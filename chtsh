@@ -1,5 +1,4 @@
 #!/bin/env bash
-#!/bin/bash
 
 # Enable error handling
 set -e
