@@ -1,0 +1,51 @@
+#!/bin/env bash
+
+set -euo pipefail
+
+echo -e "\n🔄 Updating APT packages..."
+sudo apt-get update && sudo apt-get upgrade -y && sudo apt-get autoremove -y
+
+echo -e "\n📦 Updating Flatpak packages..."
+if command -v flatpak &>/dev/null; then
+    flatpak update -y
+else
+    echo "Flatpak not installed."
+fi
+
+echo -e "\n🦀 Updating Rust toolchain (rustup)..."
+if command -v rustup &>/dev/null; then
+    rustup update
+else
+    echo "Rustup not installed."
+fi
+
+echo -e "\n🎛️ Updating Bob (Neovim manager)..."
+if command -v bob &>/dev/null; then
+    bob update
+else
+    echo "Bob not installed."
+fi
+
+echo -e "\n🐍 Updating pipx packages..."
+if command -v pipx &>/dev/null; then
+    pipx upgrade-all
+else
+    echo "pipx not installed."
+fi
+
+echo -e "\n🌍 Updating LuaRocks..."
+if command -v luarocks &>/dev/null; then
+    sudo luarocks --check-lua-versions update
+else
+    echo "LuaRocks not installed."
+fi
+
+echo -e "\n💡 Updating Neovim plugins..."
+if command -v nvim &>/dev/null; then
+    nvim --headless "+Lazy! sync" +qa
+else
+    echo "Neovim not installed."
+fi
+
+echo -e "\n✅ All updates done!"
+
