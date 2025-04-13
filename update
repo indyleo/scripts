@@ -33,13 +33,6 @@ else
     echo "pipx not installed."
 fi
 
-echo -e "\n🌍 Updating LuaRocks..."
-if command -v luarocks &>/dev/null; then
-    sudo luarocks --check-lua-versions update
-else
-    echo "LuaRocks not installed."
-fi
-
 echo -e "\n💡 Updating Neovim plugins..."
 if command -v nvim &>/dev/null; then
     nvim --headless "+Lazy! sync" +qa
