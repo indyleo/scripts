@@ -37,13 +37,6 @@ update_pipx() {
     fi
 }
 
-update_luarocks() {
-    if command -v luarocks &>/dev/null; then
-        echo -e "\n🌍 Updating LuaRocks..."
-        sudo luarocks update
-    fi
-}
-
 update_neovim() {
     if command -v nvim &>/dev/null; then
         echo -e "\n💡 Updating Neovim plugins..."
@@ -73,7 +66,7 @@ reload_tmux_config() {
 # === Menu ===
 
 main_menu() {
-    echo -e "🔄 System Update\n📦 Flatpak Update\n🦀 Rustup Update\n🎛️ Bob Update\n🐍 pipx Update\n🌍 LuaRocks Update\n💡 Neovim Plugin Update\n🔧 Tmux Plugin Update\n♻️ Reload Tmux Config\n✅ Run All\n❌ Exit" | fzf --prompt="Dashboard > "
+    echo -e "🔄 System Update\n📦 Flatpak Update\n🦀 Rustup Update\n🎛️ Bob Update\n🐍 pipx Update\n💡 Neovim Plugin Update\n🔧 Tmux Plugin Update\n♻️ Reload Tmux Config\n✅ Run All\n❌ Exit" | fzf --prompt="Dashboard > "
 }
 
 # === Run Loop ===
@@ -85,7 +78,6 @@ while true; do
         "🦀 Rustup Update") update_rust ;;
         "🎛️ Bob Update") update_bob ;;
         "🐍 pipx Update") update_pipx ;;
-        "🌍 LuaRocks Update") update_luarocks ;;
         "💡 Neovim Plugin Update") update_neovim ;;
         "🔧 Tmux Plugin Update") update_tmux_plugins ;;
         "♻️ Reload Tmux Config") reload_tmux_config ;;
@@ -95,7 +87,6 @@ while true; do
             update_rust
             update_bob
             update_pipx
-            update_luarocks
             update_neovim
             update_tmux_plugins
             reload_tmux_config
