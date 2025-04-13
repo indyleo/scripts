@@ -2,43 +2,106 @@
 
 set -euo pipefail
 
-echo -e "\n🔄 Updating APT packages..."
-sudo apt-get update && sudo apt-get upgrade -y && sudo apt-get autoremove -y
+# === Functions ===
 
-echo -e "\n📦 Updating Flatpak packages..."
-if command -v flatpak &>/dev/null; then
-    flatpak update -y
-else
-    echo "Flatpak not installed."
-fi
+update_system() {
+    echo -e "\n🔄 Updating APT packages..."
+    sudo apt-get update && sudo apt-get upgrade -y && sudo apt-get autoremove -y
+}
 
-echo -e "\n🦀 Updating Rust toolchain (rustup)..."
-if command -v rustup &>/dev/null; then
-    rustup update
-else
-    echo "Rustup not installed."
-fi
+update_flatpak() {
+    if command -v flatpak &>/dev/null; then
+        echo -e "\n📦 Updating Flatpak..."
+        flatpak update -y
+    fi
+}
 
-echo -e "\n🎛️ Updating Bob (Neovim manager)..."
-if command -v bob &>/dev/null; then
-    bob update
-else
-    echo "Bob not installed."
-fi
+update_rust() {
+    if command -v rustup &>/dev/null; then
+        echo -e "\n🦀 Updating Rust..."
+        rustup update
+    fi
+}
 
-echo -e "\n🐍 Updating pipx packages..."
-if command -v pipx &>/dev/null; then
-    pipx upgrade-all
-else
-    echo "pipx not installed."
-fi
+update_bob() {
+    if command -v bob &>/dev/null; then
+        echo -e "\n🎛️ Updating Bob..."
+        bob update
+    fi
+}
 
-echo -e "\n💡 Updating Neovim plugins..."
-if command -v nvim &>/dev/null; then
-    nvim --headless "+Lazy! sync" +qa
-else
-    echo "Neovim not installed."
-fi
+update_pipx() {
+    if command -v pipx &>/dev/null; then
+        echo -e "\n🐍 Updating pipx..."
+        pipx upgrade-all
+    fi
+}
 
-echo -e "\n✅ All updates done!"
+update_luarocks() {
+    if command -v luarocks &>/dev/null; then
+        echo -e "\n🌍 Updating LuaRocks..."
+        sudo luarocks --check-lua-versions update
+    fi
+}
 
+update_neovim() {
+    if command -v nvim &>/dev/null; then
+        echo -e "\n💡 Updating Neovim plugins..."
+        nvim --headless "+Lazy! sync" +qa
+    fi
+}
+
+update_tmux_plugins() {
+    TPM="$HOME/.tmux/plugins/tpm/bin/update_plugins"
+    if [ -x "$TPM" ]; then
+        echo -e "\n🔧 Updating tmux plugins..."
+        "$TPM" all
+    else
+        echo "❗ TPM not found at $TPM"
+    fi
+}
+
+reload_tmux_config() {
+    if [ -n "$TMUX" ]; then
+        tmux source-file "${XDG_CONFIG_HOME:-$HOME/.config}/tmux/tmux.conf"
+        echo "♻️ Reloaded tmux config"
+    else
+        echo "ℹ️ Not inside a tmux session."
+    fi
+}
+
+# === Menu ===
+
+main_menu() {
+    echo -e "🔄 System Update\n📦 Flatpak Update\n🦀 Rustup Update\n🎛️ Bob Update\n🐍 pipx Update\n🌍 LuaRocks Update\n💡 Neovim Plugin Update\n🔧 Tmux Plugin Update\n♻️ Reload Tmux Config\n✅ Run All\n❌ Exit" | fzf --prompt="Dashboard > "
+}
+
+# === Run Loop ===
+
+while true; do
+    case "$(main_menu)" in
+        "🔄 System Update") update_system ;;
+        "📦 Flatpak Update") update_flatpak ;;
+        "🦀 Rustup Update") update_rust ;;
+        "🎛️ Bob Update") update_bob ;;
+        "🐍 pipx Update") update_pipx ;;
+        "🌍 LuaRocks Update") update_luarocks ;;
+        "💡 Neovim Plugin Update") update_neovim ;;
+        "🔧 Tmux Plugin Update") update_tmux_plugins ;;
+        "♻️ Reload Tmux Config") reload_tmux_config ;;
+        "✅ Run All")
+            update_system
+            update_flatpak
+            update_rust
+            update_bob
+            update_pipx
+            update_luarocks
+            update_neovim
+            update_tmux_plugins
+            reload_tmux_config
+            ;;
+        "❌ Exit") break ;;
+    esac
+    echo -e "\n✅ Done. Press Enter to return to the dashboard..."
+    read -r
+done
