@@ -40,7 +40,7 @@ update_pipx() {
 update_luarocks() {
     if command -v luarocks &>/dev/null; then
         echo -e "\n🌍 Updating LuaRocks..."
-        sudo luarocks --check-lua-versions update
+        sudo luarocks update
     fi
 }
 
