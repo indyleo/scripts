@@ -1,0 +1,20 @@
+#!/bin/env bash
+
+set -euo pipefail
+
+if ! dpkg -s fzf &> /dev/null; then
+    echo "fzf is not installed"
+    exit 1
+fi
+
+# Find only files (exclude directories), allow multi-select with fzf
+FILES_TO_DELETE=$(find . -type f | fzf -m)
+
+# If anything was selected, delete it
+if [ -n "$FILES_TO_DELETE" ]; then
+    echo "$FILES_TO_DELETE" | while IFS= read -r file; do
+        command rm -fv "$file"
+    done
+else
+    echo "No files selected. Aborting."
+fi

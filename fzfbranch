@@ -1,0 +1,7 @@
+#!/bin/env bash
+
+BRANCH=$(git branch --all | grep -v HEAD | sed 's/remotes\///' | sort -u | fzf --prompt='Branch> ')
+
+if [ -n "$BRANCH" ]; then
+    git checkout "$(echo "$BRANCH" | sed 's/^..//')"
+fi

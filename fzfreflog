@@ -1,0 +1,2 @@
+#!/bin/env bash
+git reflog | fzf | awk '{print $1}' | xargs -r git checkout

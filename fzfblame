@@ -1,0 +1,7 @@
+#!/bin/env bash
+
+FILE=$(git ls-files | fzf)
+
+if [ -n "$FILE" ]; then
+    git blame "$FILE" | fzf
+fi

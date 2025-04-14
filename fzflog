@@ -1,0 +1,6 @@
+#!/bin/env bash
+
+git log --oneline --graph --color=always \
+    | fzf --ansi --no-sort --reverse --tiebreak=index \
+    | awk '{print $1}' \
+    | xargs -r git show

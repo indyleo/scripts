@@ -1,0 +1,11 @@
+#!/bin/env bash
+
+set -euo pipefail
+
+if ! dpkg -s fzf &> /dev/null; then
+    echo "fzf is not installed"
+    exit 1
+fi
+
+# List all man pages with fzf
+man -k . | fzf | awk '{print $1}' | xargs man

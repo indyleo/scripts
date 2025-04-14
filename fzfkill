@@ -1,0 +1,14 @@
+#!/bin/env bash
+
+set -euo pipefail
+
+if ! dpkg -s fzf &> /dev/null; then
+    echo "fzf is not installed"
+    exit 1
+fi
+
+choice=$(ps ux | fzf --prompt="What to kill? > ")
+pid=$(echo "$choice" | awk '{print $2}')
+proc_name=$(echo "$choice" | awk '{print $11}')
+echo "Killing name: $proc_name, pid: $pid"
+kill -9 "$pid"
