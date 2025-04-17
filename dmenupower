@@ -1,0 +1,24 @@
+#!/bin/env bash
+
+# dmenu prompt
+options="Lock\nLogout\nReboot\nShutdown"
+choice=$(echo -e "$options" | dmenu -i -p "Power Menu")
+
+case "$choice" in
+    Lock)
+        # Change this to your locker (e.g., slock, i3lock, betterlockscreen)
+        slock
+        ;;
+    Logout)
+        pkill -KILL -u "$USER"
+        ;;
+    Reboot)
+        systemctl reboot
+        ;;
+    Shutdown)
+        systemctl poweroff
+        ;;
+    *)
+        # Cancelled or closed menu
+        ;;
+esac

@@ -2,7 +2,7 @@
 
 # Ensure a directory argument is provided
 if [[ -z "$1" ]]; then
-    notify-send "Error: No wallpaper directory provided."
+    echo "Error: No wallpaper directory provided."
     exit 1
 fi
 
@@ -10,7 +10,7 @@ WALLPAPER_DIR="$1"
 
 # Check if the directory exists
 if [[ ! -d "$WALLPAPER_DIR" ]]; then
-    notify-send "Error: Directory does not exist: $WALLPAPER_DIR"
+    echo "Error: Directory does not exist: $WALLPAPER_DIR"
     exit 1
 fi
 
@@ -19,10 +19,10 @@ selected_wallpaper=$(find "$WALLPAPER_DIR" -type f \( -iname "*.jpg" -o -iname "
 
 # Check if a wallpaper was found
 if [[ -z "$selected_wallpaper" ]]; then
-    notify-send "Error: No valid images found in $WALLPAPER_DIR"
+    echo "Error: No valid images found in $WALLPAPER_DIR"
     exit 1
 fi
 
 # Set the wallpaper
-xwallpaper --stretch "$selected_wallpaper" && notify-send "Wallpaper set to: $selected_wallpaper"
+xwallpaper --stretch "$selected_wallpaper" && echo "Wallpaper set to: $selected_wallpaper"
 
