@@ -1,0 +1,13 @@
+#!/bin/env bash
+
+# Get the list of open windows in dwm
+window_list=$(wmctrl -l | awk '{print $1 " " $2 " " $3 " " $4 " " $5 " " $6 " " $7}')
+
+# Use dmenu to select the window
+selected_window=$(echo "$window_list" | dmenu -i -p "Switch to:")
+
+# Extract the window ID from the selected entry
+window_id=$(echo "$selected_window" | awk '{print $1}')
+
+# Focus the selected window using wmctrl
+wmctrl -i -a "$window_id"
