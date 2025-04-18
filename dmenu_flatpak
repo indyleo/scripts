@@ -15,5 +15,5 @@ if [[ -n "$selected_app" ]]; then
     app_id=$(echo "$flatpak_apps" | grep -w "$selected_app" | awk '{print $2}')
 
     # Run the selected Flatpak app
-    nohup flatpak run "$app_id" & disown
+    flatpak run "$app_id" & disown
 fi
