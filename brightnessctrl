@@ -2,34 +2,72 @@
 
 # Ensure brightnessctl is installed
 if ! command -v brightnessctl &>/dev/null; then
-  echo "Error: brightnessctl not found. Please install it first."
-  exit 1
+    echo "Error: brightnessctl not found. Please install it first."
+    exit 1
 fi
-
-# Validate arguments
-if [[ -z "$2" || ! "$2" =~ ^[0-9]+$ ]]; then
-  echo "Usage: $0 --inc|--dec <amount>"
-  exit 1
-fi
-
-amount="$2"
 
 brightness_inc() {
-  brightnessctl set "${amount}%+"
+    brightnessctl set "${1}%+"
 }
 
 brightness_dec() {
-  brightnessctl set "${amount}%-"
+    brightnessctl set "${1}%-"
+}
+
+brightness_get() {
+    backlight_foe=$(brightnessctl get)
+    backlight_max=$(brightnessctl max)
+    backlight_percent=$((backlight_foe * 100 / backlight_max))
+    if [[ "$backlight_percent" -gt 0 && "$backlight_percent" -le 10 ]]; then
+        echo "󱩎 ${backlight_percent}%"
+    elif [[ "$backlight_percent" -gt 10 && "$backlight_percent" -le 20 ]]; then
+        echo "󱩏 ${backlight_percent}%"
+    elif [[ "$backlight_percent" -gt 20 && "$backlight_percent" -le 30 ]]; then
+        echo "󱩐 ${backlight_percent}%"
+    elif [[ "$backlight_percent" -gt 30 && "$backlight_percent" -le 40 ]]; then
+        echo "󱩑 ${backlight_percent}%"
+    elif [[ "$backlight_percent" -gt 40 && "$backlight_percent" -le 50 ]]; then
+        echo "󱩒 ${backlight_percent}%"
+    elif [[ "$backlight_percent" -gt 50 && "$backlight_percent" -le 60 ]]; then
+        echo "󱩓 ${backlight_percent}%"
+    elif [[ "$backlight_percent" -gt 60 && "$backlight_percent" -le 70 ]]; then
+        echo "󱩔 ${backlight_percent}%"
+    elif [[ "$backlight_percent" -gt 70 && "$backlight_percent" -le 80 ]]; then
+        echo "󱩕 ${backlight_percent}%"
+    elif [[ "$backlight_percent" -gt 80 && "$backlight_percent" -le 90 ]]; then
+        echo "󱩖 ${backlight_percent}%"
+    elif [[ "$backlight_percent" -gt 90 && "$backlight_percent" -lt 100 ]]; then
+        echo "󱩖 ${backlight_percent}%"
+    elif [[ "$backlight_percent" -eq 100 ]]; then
+        echo "󰛨  ${backlight_percent}%"
+    else
+        echo "󰹐 "
+    fi
 }
 
 case "$1" in
-  --inc)
-    brightness_inc ;;
-  --dec)
-    brightness_dec ;;
-  *)
-    echo "Unknown argument: $1"
-    echo "Usage: $0 --inc|--dec <amount>"
-    exit 1
-    ;;
+    --inc)
+        if [[ "$2" =~ ^[0-9]+$ ]]; then
+            brightness_inc "$2"
+        else
+            echo "Usage: $0 --inc <amount>"
+            exit 1
+        fi
+        ;;
+    --dec)
+        if [[ "$2" =~ ^[0-9]+$ ]]; then
+            brightness_dec "$2"
+        else
+            echo "Usage: $0 --dec <amount>"
+            exit 1
+        fi
+        ;;
+    --get)
+        brightness_get
+        ;;
+    *)
+        echo "Unknown argument: $1"
+        echo "Usage: $0 --inc|--dec <amount> | --get"
+        exit 1
+        ;;
 esac

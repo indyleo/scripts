@@ -1,0 +1,66 @@
+#!/bin/env bash
+
+INFO=$(acpi -b | grep "Battery 1")
+STATUS=$(echo "$INFO" | awk -F': |, ' '{print $2}')
+PERCENT_RAW=$(echo "$INFO" | awk -F': |, ' '{print $3}')
+PERCENT=${PERCENT_RAW%\%}
+
+case $STATUS in
+    Charging)
+        if [ $PERCENT -ge 90 ]; then
+            STATUS_ICON="󰂋 "  # Icon for charging 90-99%
+        elif [ $PERCENT -ge 80 ]; then
+            STATUS_ICON="󰂊 "  # Icon for charging 80-89%
+        elif [ $PERCENT -ge 70 ]; then
+            STATUS_ICON="󰢞 "  # Icon for charging 70-79%
+        elif [ $PERCENT -ge 60 ]; then
+            STATUS_ICON="󰂉 "  # Icon for charging 60-69%
+        elif [ $PERCENT -ge 50 ]; then
+            STATUS_ICON="󰢝 "  # Icon for charging 50-59%
+        elif [ $PERCENT -ge 40 ]; then
+            STATUS_ICON="󰂈 "  # Icon for charging 40-49%
+        elif [ $PERCENT -ge 30 ]; then
+            STATUS_ICON="󰂇 "  # Icon for charging 30-39%
+        elif [ $PERCENT -ge 20 ]; then
+            STATUS_ICON="󰂆 "  # Icon for charging 20-29%
+        elif [ $PERCENT -ge 10 ]; then
+            STATUS_ICON="󰢜 "  # Icon for charging 10-19%
+        else
+            STATUS_ICON="󰂎 "  # Icon for charging 0-9%
+        fi
+        ;;
+    Discharging)
+        if [ $PERCENT -eq 100 ]; then
+            STATUS_ICON="󰁹 "  # Icon for discharging at 100% (Full)
+        elif [ $PERCENT -ge 90 ]; then
+            STATUS_ICON="󰂂 "  # Icon for discharging 90-99%
+        elif [ $PERCENT -ge 80 ]; then
+            STATUS_ICON="󰂁 "  # Icon for discharging 80-89%
+        elif [ $PERCENT -ge 70 ]; then
+            STATUS_ICON="󰂀 "  # Icon for discharging 70-79%
+        elif [ $PERCENT -ge 60 ]; then
+            STATUS_ICON="󰁿 "  # Icon for discharging 60-69%
+        elif [ $PERCENT -ge 50 ]; then
+            STATUS_ICON="󰁾 "  # Icon for discharging 50-59%
+        elif [ $PERCENT -ge 40 ]; then
+            STATUS_ICON="󰁽 "  # Icon for discharging 40-49%
+        elif [ $PERCENT -ge 30 ]; then
+            STATUS_ICON="󰁼 "  # Icon for discharging 30-39%
+        elif [ $PERCENT -ge 20 ]; then
+            STATUS_ICON="󰁻 "  # Icon for discharging 20-29%
+        elif [ $PERCENT -ge 10 ]; then
+            STATUS_ICON="󰁺 "  # Icon for discharging 10-19%
+        else
+            STATUS_ICON="󰂎 "  # Icon for discharging 0-9%
+        fi
+        ;;
+    Full)
+        STATUS_ICON="󰂅 "  # Icon for full charge (100%)
+        ;;
+    *)
+        STATUS_ICON="󰂃 "  # Icon for unknown status
+        ;;
+esac
+
+echo "$STATUS_ICON $PERCENT_RAW"
+

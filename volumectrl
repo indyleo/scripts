@@ -25,12 +25,28 @@ volume_togglemute() {
     pamixer --toggle-mute
 }
 
+volume_vol() {
+    vol="$(pamixer --get-volume)"
+    if [[ "$vol" -gt 0 && "$vol" -le 25 ]]; then
+        echo "🔈${vol}%"  # Low volume
+    elif [[ "$vol" -gt 25 && "$vol" -le 50 ]]; then
+        echo "🔉${vol}%"  # Medium volume
+    elif [[ "$vol" -gt 50 && "$vol" -lt 100 ]]; then
+        echo "🔊${vol}%"  # High volume
+    elif [[ "$vol" -eq 100 ]]; then
+        echo "📢${vol}%"  # Max volume
+    else
+        echo "🔇"  # Muted or 0
+    fi
+}
+
 case "$1" in
     --togglemute) volume_togglemute ;;
     --inc) volume_inc ;;
     --dec) volume_dec ;;
+    --printvol) volume_vol ;;
     *)
-        notify-send "Error: Unknown argument '$1'. Use --togglemute, --inc, or --dec."
+        echo "Error: Unknown argument '$1'. Use --togglemute, --inc, --dec, or --printvol."
         exit 1
         ;;
 esac

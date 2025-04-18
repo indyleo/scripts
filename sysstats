@@ -1,0 +1,34 @@
+#!/bin/env bash
+
+cpu_load() {
+    load="$(awk '{print $1}' /proc/loadavg)"
+    echo "  $load%"
+}
+
+disk_usage() {
+    disk_info=$(df -h / | tail -1)
+    total=$(echo $disk_info | awk '{print $2}')
+    used=$(echo $disk_info | awk '{print $3}')
+    echo "󰋊 $used/$total"
+}
+
+memory_usage() {
+    used="$(free -h | awk 'NR==2 {print $3}')"
+    total="$(free -h | awk 'NR==2 {print $2}')"
+    echo "󰍛 $used/$total"
+}
+
+case "$1" in
+    cpu)
+        cpu_load
+        ;;
+    disk)
+        disk_usage
+        ;;
+    mem)
+        memory_usage
+        ;;
+    *)
+        echo "Usage: $0 {cpu|disk|mem}"
+        ;;
+esac
