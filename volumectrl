@@ -2,7 +2,7 @@
 
 # Ensure pamixer is installed
 if ! command -v pamixer &> /dev/null; then
-    notify-send "Error: pamixer is not installed."
+    echo "Error: pamixer is not installed."
     exit 1
 fi
 

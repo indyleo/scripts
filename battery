@@ -1,13 +1,20 @@
 #!/bin/env bash
-
 INFO=$(acpi -b | grep "Battery 1")
 STATUS=$(echo "$INFO" | awk -F': |, ' '{print $2}')
 PERCENT_RAW=$(echo "$INFO" | awk -F': |, ' '{print $3}')
 PERCENT=${PERCENT_RAW%\%}
 
+# Check if PERCENT is numeric
+if ! [[ "$PERCENT" =~ ^[0-9]+$ ]]; then
+    echo "Error: Invalid battery percentage"
+    exit 1
+fi
+
 case $STATUS in
     Charging)
-        if [ $PERCENT -ge 90 ]; then
+        if [ $PERCENT -eq 100 ]; then
+            STATUS_ICON="󰂅 "  # Icon for full charge while charging (100%)
+        elif [ $PERCENT -ge 90 ]; then
             STATUS_ICON="󰂋 "  # Icon for charging 90-99%
         elif [ $PERCENT -ge 80 ]; then
             STATUS_ICON="󰂊 "  # Icon for charging 80-89%
@@ -55,7 +62,7 @@ case $STATUS in
         fi
         ;;
     Full)
-        STATUS_ICON="󰂅 "  # Icon for full charge (100%)
+        STATUS_ICON="󰂅 "  # Icon for full charge (100%) regardless of charging or discharging
         ;;
     *)
         STATUS_ICON="󰂃 "  # Icon for unknown status
@@ -63,4 +70,3 @@ case $STATUS in
 esac
 
 echo "$STATUS_ICON $PERCENT_RAW"
-
