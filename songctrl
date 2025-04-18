@@ -40,5 +40,5 @@ case "$1" in
     --songtitle)
         song_title ;;
     *)
-        echo "Unkown Arg" ;;
+        echo "Usage: $0 [--togglepause | --skip | --previous | --songtitle]" ;;
 esac
