@@ -13,7 +13,7 @@ FILES_TO_DELETE=$(find . -type f | fzf -m)
 # If anything was selected, delete it
 if [ -n "$FILES_TO_DELETE" ]; then
     echo "$FILES_TO_DELETE" | while IFS= read -r file; do
-        command rm -fv "$file"
+        command trash -fv "$file"
     done
 else
     echo "No files selected. Aborting."
