@@ -1,8 +1,15 @@
 #!/bin/env bash
-INFO=$(acpi -b | grep "Battery 1")
+
+if [[ "$1" == "BAT0" ]]; then
+    INFO=$(acpi -b | grep "Battery 0")
+elif [[ "$1" == "BAT1" ]]; then
+    INFO=$(acpi -b | grep "Battery 1")
+fi
+
 STATUS=$(echo "$INFO" | awk -F': |, ' '{print $2}')
 PERCENT_RAW=$(echo "$INFO" | awk -F': |, ' '{print $3}')
 PERCENT=${PERCENT_RAW%\%}
+
 
 [[ $STATUS == "Not charging" ]] && STATUS="Charging"
 
@@ -29,7 +36,7 @@ case $STATUS in
         elif [ $PERCENT -ge 10 ]; then
             STATUS_ICON="󰢜 "  # Icon for charging 10-19%
         else
-            STATUS_ICON="󰂎 "  # Icon for charging 0-9%
+            STATUS_ICON="󰢟 "  # Icon for charging 0-9%
         fi
         ;;
     Discharging)
