@@ -4,6 +4,8 @@ STATUS=$(echo "$INFO" | awk -F': |, ' '{print $2}')
 PERCENT_RAW=$(echo "$INFO" | awk -F': |, ' '{print $3}')
 PERCENT=${PERCENT_RAW%\%}
 
+[[ $STATUS == "Not charging" ]] && STATUS="Charging"
+
 case $STATUS in
     Charging)
         if [ $PERCENT -eq 100 ]; then
