@@ -1,15 +1,20 @@
 #!/bin/env bash
 
-if [[ "$1" == "BAT0" ]]; then
-    INFO=$(acpi -b | grep "Battery 0")
-elif [[ "$1" == "BAT1" ]]; then
+BAT_0=$(acpi -b | grep "Battery 0")
+BAT_1=$(acpi -b | grep "Battery 1")
+
+DISACTIVE_BAT0=$(echo "$BAT_0" | awk -F': |, ' '{print $4}')
+DISACTIVE_BAT1=$(echo "$BAT_1" | awk -F': |, ' '{print $4}')
+
+if [[ "$BAT_0" == *"$DISACTIVE_BAT0"* ]]; then
     INFO=$(acpi -b | grep "Battery 1")
+elif [[ "$BAT_1" == *"$DISACTIVE_BAT1"* ]]; then
+    INFO=$(acpi -b | grep "Battery 0")
 fi
 
 STATUS=$(echo "$INFO" | awk -F': |, ' '{print $2}')
 PERCENT_RAW=$(echo "$INFO" | awk -F': |, ' '{print $3}')
 PERCENT=${PERCENT_RAW%\%}
-
 
 [[ $STATUS == "Not charging" ]] && STATUS="Charging"
 
