@@ -15,35 +15,37 @@ brightness_dec() {
 }
 
 brightness_get() {
-    backlight_foe=$(brightnessctl get)
-    backlight_max=$(brightnessctl max)
-    backlight_percent=$((backlight_foe * 100 / backlight_max))
-    if [[ "$backlight_percent" -gt 0 && "$backlight_percent" -le 10 ]]; then
-        echo "󱩎 ${backlight_percent}%"
-    elif [[ "$backlight_percent" -gt 10 && "$backlight_percent" -le 20 ]]; then
-        echo "󱩏 ${backlight_percent}%"
-    elif [[ "$backlight_percent" -gt 20 && "$backlight_percent" -le 30 ]]; then
-        echo "󱩐 ${backlight_percent}%"
-    elif [[ "$backlight_percent" -gt 30 && "$backlight_percent" -le 40 ]]; then
-        echo "󱩑 ${backlight_percent}%"
-    elif [[ "$backlight_percent" -gt 40 && "$backlight_percent" -le 50 ]]; then
-        echo "󱩒 ${backlight_percent}%"
-    elif [[ "$backlight_percent" -gt 50 && "$backlight_percent" -le 60 ]]; then
-        echo "󱩓 ${backlight_percent}%"
-    elif [[ "$backlight_percent" -gt 60 && "$backlight_percent" -le 70 ]]; then
-        echo "󱩔 ${backlight_percent}%"
-    elif [[ "$backlight_percent" -gt 70 && "$backlight_percent" -le 80 ]]; then
-        echo "󱩕 ${backlight_percent}%"
-    elif [[ "$backlight_percent" -gt 80 && "$backlight_percent" -le 90 ]]; then
-        echo "󱩖 ${backlight_percent}%"
-    elif [[ "$backlight_percent" -gt 90 && "$backlight_percent" -lt 100 ]]; then
-        echo "󱩖 ${backlight_percent}%"
-    elif [[ "$backlight_percent" -eq 100 ]]; then
-        echo "󰛨  ${backlight_percent}%"
+    line="$(brightnessctl | grep "%")"
+    brightness_raw=$(echo "$line" | grep -oP '\(\K[0-9]+%')
+    brightness=${brightness_raw%\%}
+
+    if [[ "$brightness" -eq 100 ]]; then
+        echo "󰛨  ${brightness_raw}"
+    elif [[ "$brightness" -ge 90 ]]; then
+        echo "󱩖 ${brightness_raw}"
+    elif [[ "$brightness" -ge 80 ]]; then
+        echo "󱩖 ${brightness_raw}"
+    elif [[ "$brightness" -ge 70 ]]; then
+        echo "󱩕 ${brightness_raw}"
+    elif [[ "$brightness" -ge 60 ]]; then
+        echo "󱩔 ${brightness_raw}"
+    elif [[ "$brightness" -ge 50 ]]; then
+        echo "󱩓 ${brightness_raw}"
+    elif [[ "$brightness" -ge 40 ]]; then
+        echo "󱩒 ${brightness_raw}"
+    elif [[ "$brightness" -ge 30 ]]; then
+        echo "󱩑 ${brightness_raw}"
+    elif [[ "$brightness" -ge 20 ]]; then
+        echo "󱩐 ${brightness_raw}"
+    elif [[ "$brightness" -ge 10 ]]; then
+        echo "󱩏 ${brightness_raw}"
+    elif [[ "$brightness" -ge 0 ]]; then
+        echo "󱩎 ${brightness_raw}"
     else
         echo "󰹐 "
     fi
 }
+
 
 case "$1" in
     --inc)
