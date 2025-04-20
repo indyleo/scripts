@@ -27,16 +27,21 @@ volume_togglemute() {
 
 volume_vol() {
     vol="$(pamixer --get-volume)"
-    if [[ "$vol" -gt 0 && "$vol" -le 25 ]]; then
-        echo "󰕿 ${vol}%"  # Low volume
-    elif [[ "$vol" -gt 25 && "$vol" -le 50 ]]; then
-        echo "󰖀 ${vol}%"  # Medium volume
-    elif [[ "$vol" -gt 50 && "$vol" -lt 100 ]]; then
-        echo "󰕾 ${vol}%"  # High volume
-    elif [[ "$vol" -eq 100 ]]; then
+    muted=$(pamixer --get-mute)
+    if [[ "$vol" -eq 100 && "$muted" == "false" ]]; then
         echo " ${vol}%"  # Max volume
+    elif [[ "$vol" -ge 50 && "$muted" == "false" ]]; then
+        echo "󰕾 ${vol}%"  # High volume
+    elif [[ "$vol" -ge 25 && "$muted" == "false" ]]; then
+        echo "󰖀 ${vol}%"  # Medium volume
+    elif [[ "$vol" -gt 0 && "$muted" == "false" ]]; then
+        echo "󰕿 ${vol}%"  # Low volume
     else
-        echo "󰝟 "  # Muted or 0
+        if [[ "$muted" == "true" ]]; then
+            echo "󰝟  ${vol}%"  # Muted
+        else
+            echo "󰝟  Muted"  # 0
+        fi
     fi
 }
 
