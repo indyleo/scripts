@@ -1,81 +1,74 @@
 #!/bin/env bash
 
-BAT_0=$(acpi -b | grep "Battery 0")
-BAT_1=$(acpi -b | grep "Battery 1")
+best_battery_info=""
+lowest_percent=101
 
-DISACTIVE_BAT0=$(echo "$BAT_0" | awk -F': |, ' '{print $4}')
-DISACTIVE_BAT1=$(echo "$BAT_1" | awk -F': |, ' '{print $4}')
+while IFS= read -r line; do
+    status=$(echo "$line" | awk -F': |, ' '{print $2}')
+    percent_raw=$(echo "$line" | awk -F': |, ' '{print $3}')
+    percent=${percent_raw%\%}
 
-if [[ "$BAT_0" == *"$DISACTIVE_BAT0"* ]]; then
-    INFO=$(acpi -b | grep "Battery 1")
-elif [[ "$BAT_1" == *"$DISACTIVE_BAT1"* ]]; then
-    INFO=$(acpi -b | grep "Battery 0")
-else
-    INFO=$(acpi -b | grep "Battery 0")
-fi
+    # Skip batteries with unknown or bad data
+    [[ $status == "Unknown" ]] && continue
 
-STATUS=$(echo "$INFO" | awk -F': |, ' '{print $2}')
-PERCENT_RAW=$(echo "$INFO" | awk -F': |, ' '{print $3}')
+    # Prefer discharging battery if multiple are valid
+    if [[ $status == "Discharging" ]]; then
+        best_battery_info="$line"
+        break
+    fi
+
+    # Otherwise, pick the battery with the lowest percentage
+    if (( percent < lowest_percent )); then
+        best_battery_info="$line"
+        lowest_percent=$percent
+    fi
+done <<< "$(acpi -b)"
+
+# Extract final values
+STATUS=$(echo "$best_battery_info" | awk -F': |, ' '{print $2}')
+PERCENT_RAW=$(echo "$best_battery_info" | awk -F': |, ' '{print $3}')
 PERCENT=${PERCENT_RAW%\%}
 
-[[ $STATUS == "Not charging" ]] && STATUS="Charging"
+# Fix edge case: not charging but full should be "Full"
+if [[ $STATUS == "Not charging" && $PERCENT -eq 100 ]]; then
+    STATUS="Full"
+fi
 
+# Icon logic
 case $STATUS in
     Charging)
-        if [ $PERCENT -eq 100 ]; then
-            STATUS_ICON="󰂅 "  # Icon for full charge while charging (100%)
-        elif [ $PERCENT -ge 90 ]; then
-            STATUS_ICON="󰂋 "  # Icon for charging 90-99%
-        elif [ $PERCENT -ge 80 ]; then
-            STATUS_ICON="󰂊 "  # Icon for charging 80-89%
-        elif [ $PERCENT -ge 70 ]; then
-            STATUS_ICON="󰢞 "  # Icon for charging 70-79%
-        elif [ $PERCENT -ge 60 ]; then
-            STATUS_ICON="󰂉 "  # Icon for charging 60-69%
-        elif [ $PERCENT -ge 50 ]; then
-            STATUS_ICON="󰢝 "  # Icon for charging 50-59%
-        elif [ $PERCENT -ge 40 ]; then
-            STATUS_ICON="󰂈 "  # Icon for charging 40-49%
-        elif [ $PERCENT -ge 30 ]; then
-            STATUS_ICON="󰂇 "  # Icon for charging 30-39%
-        elif [ $PERCENT -ge 20 ]; then
-            STATUS_ICON="󰂆 "  # Icon for charging 20-29%
-        elif [ $PERCENT -ge 10 ]; then
-            STATUS_ICON="󰢜 "  # Icon for charging 10-19%
-        else
-            STATUS_ICON="󰢟 "  # Icon for charging 0-9%
+        if [ $PERCENT -eq 100 ]; then STATUS_ICON="󰂅 "
+        elif [ $PERCENT -ge 90 ]; then STATUS_ICON="󰂋 "
+        elif [ $PERCENT -ge 80 ]; then STATUS_ICON="󰂊 "
+        elif [ $PERCENT -ge 70 ]; then STATUS_ICON="󰢞 "
+        elif [ $PERCENT -ge 60 ]; then STATUS_ICON="󰂉 "
+        elif [ $PERCENT -ge 50 ]; then STATUS_ICON="󰢝 "
+        elif [ $PERCENT -ge 40 ]; then STATUS_ICON="󰂈 "
+        elif [ $PERCENT -ge 30 ]; then STATUS_ICON="󰂇 "
+        elif [ $PERCENT -ge 20 ]; then STATUS_ICON="󰂆 "
+        elif [ $PERCENT -ge 10 ]; then STATUS_ICON="󰢜 "
+        else STATUS_ICON="󰢟 "
         fi
         ;;
     Discharging)
-        if [ $PERCENT -eq 100 ]; then
-            STATUS_ICON="󰁹 "  # Icon for discharging at 100% (Full)
-        elif [ $PERCENT -ge 90 ]; then
-            STATUS_ICON="󰂂 "  # Icon for discharging 90-99%
-        elif [ $PERCENT -ge 80 ]; then
-            STATUS_ICON="󰂁 "  # Icon for discharging 80-89%
-        elif [ $PERCENT -ge 70 ]; then
-            STATUS_ICON="󰂀 "  # Icon for discharging 70-79%
-        elif [ $PERCENT -ge 60 ]; then
-            STATUS_ICON="󰁿 "  # Icon for discharging 60-69%
-        elif [ $PERCENT -ge 50 ]; then
-            STATUS_ICON="󰁾 "  # Icon for discharging 50-59%
-        elif [ $PERCENT -ge 40 ]; then
-            STATUS_ICON="󰁽 "  # Icon for discharging 40-49%
-        elif [ $PERCENT -ge 30 ]; then
-            STATUS_ICON="󰁼 "  # Icon for discharging 30-39%
-        elif [ $PERCENT -ge 20 ]; then
-            STATUS_ICON="󰁻 "  # Icon for discharging 20-29%
-        elif [ $PERCENT -ge 10 ]; then
-            STATUS_ICON="󰁺 "  # Icon for discharging 10-19%
-        else
-            STATUS_ICON="󰂎 "  # Icon for discharging 0-9%
+        if [ $PERCENT -eq 100 ]; then STATUS_ICON="󰁹 "
+        elif [ $PERCENT -ge 90 ]; then STATUS_ICON="󰂂 "
+        elif [ $PERCENT -ge 80 ]; then STATUS_ICON="󰂁 "
+        elif [ $PERCENT -ge 70 ]; then STATUS_ICON="󰂀 "
+        elif [ $PERCENT -ge 60 ]; then STATUS_ICON="󰁿 "
+        elif [ $PERCENT -ge 50 ]; then STATUS_ICON="󰁾 "
+        elif [ $PERCENT -ge 40 ]; then STATUS_ICON="󰁽 "
+        elif [ $PERCENT -ge 30 ]; then STATUS_ICON="󰁼 "
+        elif [ $PERCENT -ge 20 ]; then STATUS_ICON="󰁻 "
+        elif [ $PERCENT -ge 10 ]; then STATUS_ICON="󰁺 "
+        else STATUS_ICON="󰂎 "
         fi
         ;;
     Full)
-        STATUS_ICON="󰂅 "  # Icon for full charge (100%) regardless of charging or discharging
+        STATUS_ICON="󰂅 "
         ;;
     *)
-        STATUS_ICON="󰂃 "  # Icon for unknown status
+        STATUS_ICON="󰂃 "
         ;;
 esac
 
