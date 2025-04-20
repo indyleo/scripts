@@ -10,6 +10,8 @@ if [[ "$BAT_0" == *"$DISACTIVE_BAT0"* ]]; then
     INFO=$(acpi -b | grep "Battery 1")
 elif [[ "$BAT_1" == *"$DISACTIVE_BAT1"* ]]; then
     INFO=$(acpi -b | grep "Battery 0")
+else
+    INFO=$(acpi -b | grep "Battery 0")
 fi
 
 STATUS=$(echo "$INFO" | awk -F': |, ' '{print $2}')
