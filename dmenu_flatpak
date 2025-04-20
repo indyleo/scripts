@@ -1,19 +1,13 @@
 #!/bin/env bash
 
-# Get the list of installed Flatpak apps with their names and IDs
-flatpak_apps=$(flatpak list --app | awk '{print $1 " " $2}')
-
-# Extract the app names (first column) for dmenu display
-app_names=$(echo "$flatpak_apps" | awk '{print $1}')
+# Get the list of installed Flatpak apps: "Name (ID)"
+flatpak_apps=$(flatpak list --app --columns=name,application | awk -F'\t' '{print $1 " (" $2 ")"}')
 
 # Use dmenu to show the app names and capture the selection
-selected_app=$(echo "$app_names" | dmenu -p "Select a Flatpak app:")
+selected_entry=$(echo "$flatpak_apps" | dmenu -p "Select a Flatpak app:")
 
-# If the user selected an app, run the corresponding Application ID
-if [[ -n "$selected_app" ]]; then
-    # Find the Application ID corresponding to the selected app
-    app_id=$(echo "$flatpak_apps" | grep -w "$selected_app" | awk '{print $2}')
-
-    # Run the selected Flatpak app
+# Extract the Application ID from the selected entry (text inside parentheses)
+if [[ -n "$selected_entry" ]]; then
+    app_id=$(echo "$selected_entry" | sed -n 's/.*(\(.*\))$/\1/p')
     flatpak run "$app_id" & disown
 fi
