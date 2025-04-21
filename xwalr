@@ -2,7 +2,7 @@
 
 # Ensure a directory argument is provided
 if [[ -z "$1" ]]; then
-    echo "Error: No wallpaper directory provided."
+    echo "Error: $0: No wallpaper directory provided."
     exit 1
 fi
 

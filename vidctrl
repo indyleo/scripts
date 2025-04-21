@@ -36,13 +36,13 @@ backward() {
 
 # Handle user input
 case "$1" in
-    --togglepause) togglepause ;;
-    --skip) next ;;
-    --previous) previous ;;
-    --forward) forward ;;
-    --backward) backward ;;
+    --togglepause|-tp) togglepause ;;
+    --skip|-s) next ;;
+    --previous|-p) previous ;;
+    --forward|-f) forward ;;
+    --backward|-b) backward ;;
     *)
-        echo "Error: Unknown argument '$1'. Use --togglepause, --skip, --backskip, --forward, or --backward."
+        echo "Error: $0: Unknown argument '$1'. Use --togglepause|-tp, --skip|-s, --previous|-p, --forward|-f, or --backward|-b."
         exit 1
         ;;
 esac

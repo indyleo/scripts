@@ -7,25 +7,30 @@ if ! command -v flameshot &> /dev/null; then
 fi
 
 # Screenshot functions
-ss_selection() {
-    flameshot gui
+selection() {
+    flameshot gui -p "${HOME-~}/Pictures/Screenshots"
 }
 
-ss_screen() {
-    flameshot screen
+screen() {
+    flameshot screen -p "${HOME-~}/Pictures/Screenshots" -c
 }
 
-ss_launcher() {
+full() {
+    flameshot full -p "${HOME-~}/Pictures/Screenshots" -c
+}
+
+launcher() {
     flameshot launcher
 }
 
 # Handle user input
 case "$1" in
-    --select) ss_selection ;;
-    --screen) ss_screen ;;
-    --launcher) ss_launcher ;;
+    --select|-s) selection ;;
+    --screen|-sc) screen ;;
+    --full|-f) full ;;
+    --launcher|-l) launcher ;;
     *)
-        echo "Error: Unknown argument '$1'. Use --select, --screen, or --launcher."
+        echo "Error: $0: Unknown argument '$1'. Use --select|-s, --screen|-sc, --full|-f, or --launcher|-l."
         exit 1
         ;;
 esac

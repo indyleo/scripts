@@ -31,14 +31,14 @@ song_title(){
 }
 
 case "$1" in
-    --togglepause)
+    --togglepause|-tp)
         song_togglepause ;;
-    --skip)
+    --skip|-s)
         song_skip ;;
-    --previous)
+    --previous|-p)
         song_previous ;;
-    --songtitle)
+    --songtitle|-st)
         song_title ;;
     *)
-        echo "Usage: $0 [--togglepause | --skip | --previous | --songtitle]" ;;
+        echo "Usage: $0 [--togglepause|-tp | --skip|-s | --previous|-p | --songtitle|-st]" ;;
 esac
