@@ -1,0 +1,4 @@
+#!/bin/env bash
+cp ~/Github/dotfiles-stow/keymaps.md ~/keymaps.md
+moar ~/keymaps.md
+rm ~/keymaps.md
