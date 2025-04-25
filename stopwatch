@@ -15,4 +15,17 @@ sw() {
         sleep 0.5
     done
 }
-sw
+
+acsw() {
+    now=$(date +%s)sec
+    while true; do
+        printf "%s\r" $(TZ=UTC date --date now-$now +%H:%M:%S.%N)
+        sleep 0.1
+    done
+}
+
+case "$1" in
+    sw) sw ;;
+    acsw) acsw ;;
+    *) echo "Usage: stopwatch [sw|acsw]" ;;
+esac
