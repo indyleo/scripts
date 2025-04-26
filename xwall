@@ -39,13 +39,13 @@ function timexwalr() {
 }
 
 function xwalr() {
-    local WALLPAPER_DIR="$1"
-
-    # Ensure directory argument
-    if [[ -z "$WALLPAPER_DIR" ]]; then
-        echo "Error: No wallpaper directory provided."
+    # Ensure a directory argument is provided
+    if [[ -z "$1" ]]; then
+        echo "Error: $0: No wallpaper directory provided."
         exit 1
     fi
+
+    WALLPAPER_DIR="$1"
 
     # Check if the directory exists
     if [[ ! -d "$WALLPAPER_DIR" ]]; then
@@ -53,17 +53,19 @@ function xwalr() {
         exit 1
     fi
 
-    # Find a random wallpaper
-    local WALLPAPER=$(find "$WALLPAPER_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.gif" \) | shuf -n 1)
+    # Get all connected monitors
+    MONITORS=($(xrandr | grep " connected" | cut -d ' ' -f1))
 
-    # Check if a wallpaper was found
-    if [[ -z "$WALLPAPER" ]]; then
-        echo "Error: No valid images found in $WALLPAPER_DIR"
-        exit 1
-    fi
-
-    # Set the wallpaper
-    xwallpaper --stretch "$WALLPAPER" && echo "Wallpaper set to: $WALLPAPER"
+    # For each monitor, set a random wallpaper
+    for monitor in "${MONITORS[@]}"; do
+        wp=$(find "$WALLPAPER_DIR" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' \) | shuf -n 1)
+        if [[ -n "$wp" ]]; then
+            xwallpaper --output "$monitor" --stretch "$wp"
+            echo "Wallpaper set on $monitor to $wp"
+        else
+            echo "Error: No wallpaper found in $WALLPAPER_DIR"
+        fi
+    done
 }
 
 # Main program
