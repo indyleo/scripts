@@ -1,0 +1,81 @@
+#!/bin/env bash
+
+function timexwalr() {
+    local WALLPAPER_DIR="$1"
+    local INTERVAL="${2:-900}"
+
+    # Ensure directory argument
+    if [[ -z "$WALLPAPER_DIR" ]]; then
+        echo "Error: No wallpaper directory provided."
+        exit 1
+    fi
+
+    # Check if the directory exists
+    if [[ ! -d "$WALLPAPER_DIR" ]]; then
+        echo "Error: Directory does not exist: $WALLPAPER_DIR"
+        exit 1
+    fi
+
+    # Get all connected monitors
+    local MONITORS=($(xrandr | grep " connected" | cut -d ' ' -f1))
+
+    # Set wallpaper immediately at startup
+    for monitor in "${MONITORS[@]}"; do
+        local wp=$(find "$WALLPAPER_DIR" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' \) | shuf -n 1)
+        xwallpaper --output "$monitor" --stretch "$wp"
+        echo "Wallpaper set on $monitor to $wp"
+    done
+
+    # Then loop forever, changing every 15 minutes or as specified
+    while true; do
+        sleep "$INTERVAL"
+
+        for monitor in "${MONITORS[@]}"; do
+            local wp=$(find "$WALLPAPER_DIR" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' \) | shuf -n 1)
+            xwallpaper --output "$monitor" --stretch "$wp"
+            echo "Wallpaper changed on $monitor to $wp"
+        done
+    done
+}
+
+function xwalr() {
+    local WALLPAPER_DIR="$1"
+
+    # Ensure directory argument
+    if [[ -z "$WALLPAPER_DIR" ]]; then
+        echo "Error: No wallpaper directory provided."
+        exit 1
+    fi
+
+    # Check if the directory exists
+    if [[ ! -d "$WALLPAPER_DIR" ]]; then
+        echo "Error: Directory does not exist: $WALLPAPER_DIR"
+        exit 1
+    fi
+
+    # Find a random wallpaper
+    local WALLPAPER=$(find "$WALLPAPER_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.gif" \) | shuf -n 1)
+
+    # Check if a wallpaper was found
+    if [[ -z "$WALLPAPER" ]]; then
+        echo "Error: No valid images found in $WALLPAPER_DIR"
+        exit 1
+    fi
+
+    # Set the wallpaper
+    xwallpaper --stretch "$WALLPAPER" && echo "Wallpaper set to: $WALLPAPER"
+}
+
+# Main program
+case "$1" in
+    timexwalr)
+        timexwalr "$2" "$3"
+        ;;
+    xwalr)
+        xwalr "$2"
+        ;;
+    *)
+        echo "Usage: $0 {timexwalr|xwalr} [wallpaper_directory] [change_interval]"
+        exit 1
+        ;;
+esac
