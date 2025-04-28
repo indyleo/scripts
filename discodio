@@ -1,0 +1,13 @@
+#!/bin/env bash
+
+if [[ ! -f "${HOME}/.discordo_token" ]]; then
+    echo "No token file found at ${HOME}/.discordo_token"
+    touch "${HOME}/.discordo_token"
+    echo "DISCORDO_TOKEN" >> "${HOME}/.discordo_token"
+    echo "Please put your token in ${HOME}/.discordo_token"
+    exit 1
+fi
+
+TOKEN="$(command cat ${HOME:-~}/.discordo_token)"
+
+discordo -t "${TOKEN}"
