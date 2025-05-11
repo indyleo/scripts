@@ -10,7 +10,7 @@ case "$choice" in
         slock
         ;;
     Logout)
-        pkill -KILL -u "$USER"
+        pkill -u "$USER"
         ;;
     Reboot)
         systemctl reboot
