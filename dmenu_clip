@@ -1,2 +1,2 @@
 #!/bin/env sh
-clipmenu | dmenu -i -p "Clipboard History:"
+clipmenu | dmenu -p "Clipboard History:"
