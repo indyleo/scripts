@@ -1,0 +1,28 @@
+#!/bin/env bash
+
+FILE="config.def.h"
+COMMAND="sudo cp ${FILE} config.h && sudo make clean install"
+
+if [[ ! -f "$FILE" ]]; then
+    echo "Error: $FILE not found."
+    exit 1
+fi
+
+LAST_MODIFIED=$(stat -c %Y "$FILE")
+
+echo "Watching $FILE for changes..."
+while true; do
+    sleep 1
+    CURRENT_MODIFIED=$(stat -c %Y "$FILE")
+    if [[ "$CURRENT_MODIFIED" != "$LAST_MODIFIED" ]]; then
+        echo "$FILE modified. Running: $COMMAND"
+        LAST_MODIFIED="$CURRENT_MODIFIED"
+        if eval "$COMMAND"; then
+            echo "Compilation successful."
+            clear
+            echo "Watching $FILE for changes..."
+        else
+            echo "Compilation failed."
+        fi
+    fi
+done
