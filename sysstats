@@ -18,15 +18,22 @@ memory_usage() {
     echo "󰍛 $used/$total"
 }
 
+all_stats() {
+    echo "$(disk_usage) | $(memory_usage) | $(cpu_load)"
+}
+
 case "$1" in
     cpu)
         cpu_load
         ;;
+    mem)
+        memory_usage
+        ;;
     disk)
         disk_usage
         ;;
-    mem)
-        memory_usage
+    all)
+        all_stats
         ;;
     *)
         echo "Usage: $0 {cpu|disk|mem}"
