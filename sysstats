@@ -18,8 +18,13 @@ memory_usage() {
     echo "󰍛 $used/$total"
 }
 
+wifi_status() {
+    current=$(iwgetid -r)
+    echo "󰖩 $current"
+}
+
 all_stats() {
-    echo "$(disk_usage) | $(memory_usage) | $(cpu_load)"
+    echo "$(disk_usage) | $(memory_usage) | $(cpu_load) | $(wifi_status)"
 }
 
 case "$1" in
@@ -32,10 +37,13 @@ case "$1" in
     disk)
         disk_usage
         ;;
+    wifi)
+        wifi_status
+        ;;
     all)
         all_stats
         ;;
     *)
-        echo "Usage: $0 {cpu|disk|mem}"
+        echo "Usage: $0 {cpu|disk|mem|wifi|all}"
         ;;
 esac
