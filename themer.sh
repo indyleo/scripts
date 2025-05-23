@@ -69,9 +69,10 @@ for APP in "${APPS[@]}"; do
     fi
 done
 
-# Neovim: symlink colourscheme.lua and lualine.lua
+# Neovim: symlink colourscheme.lua, lualine.lua, and indent-blankline.lua
 ln -sf "${NEOVIM_PLUGIN}/colourscheme.lua_${THEME}" "${NEOVIM_PLUGIN}/colourscheme.lua"
 ln -sf "${NEOVIM_PLUGIN}/lualine.lua_${THEME}" "${NEOVIM_PLUGIN}/lualine.lua"
+ln -sf "${NEOVIM_PLUGIN}/indent-blankline.lua_${THEME}" "${NEOVIM_PLUGIN}/indent-blankline.lua"
 
 # Reload dwm
 pgrep -x dwm && pkill dwm
