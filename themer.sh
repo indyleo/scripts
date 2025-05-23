@@ -9,9 +9,18 @@ fi
 
 # Args
 THEME=$1
+THEME_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/theme"
+
+# Check if theme is valid
 if [[ "$THEME" != "gruvbox" && "$THEME" != "nord" ]]; then
     echo "Usage: $0 gruvbox|nord"
     exit 1
+fi
+
+# Check if that theme is already set
+if [[ -f "$THEME_FILE" && "$(cat "$THEME_FILE")" == "$THEME" ]]; then
+    echo "Theme '$THEME' is already active."
+    exit 0
 fi
 
 # Vars
@@ -64,6 +73,9 @@ done
 ln -sf "${NEOVIM_PLUGIN}/colourscheme.lua_${THEME}" "${NEOVIM_PLUGIN}/colourscheme.lua"
 ln -sf "${NEOVIM_PLUGIN}/lualine.lua_${THEME}" "${NEOVIM_PLUGIN}/lualine.lua"
 
+# Reload dwm
 pgrep -x dwm && pkill dwm
 
+# Update theme file
+echo "$THEME" > "$THEME_FILE"
 echo "Theme switched to $THEME!"
