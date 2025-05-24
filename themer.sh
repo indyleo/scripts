@@ -31,6 +31,7 @@ NEOVIM_PLUGIN="$HOME_CONFIG/nvim/lua/plugins"
 ALACRITTY_CONFIG="$HOME_CONFIG/alacritty"
 DUNST_CONFIG="$HOME_CONFIG/dunst"
 XRESOURCES="$HOME"
+STARTPAGE="$HOME/Github/portfilio/startpage/"
 
 # Kill any existing xwall process
 pkill -f 'xwall timexwalr' || true
@@ -73,6 +74,12 @@ done
 ln -sf "${NEOVIM_PLUGIN}/colourscheme.lua_${THEME}" "${NEOVIM_PLUGIN}/colourscheme.lua"
 ln -sf "${NEOVIM_PLUGIN}/lualine.lua_${THEME}" "${NEOVIM_PLUGIN}/lualine.lua"
 ln -sf "${NEOVIM_PLUGIN}/indent-blankline.lua_${THEME}" "${NEOVIM_PLUGIN}/indent-blankline.lua"
+
+# Startpage: symlink the correct config
+if [[ -d "$STARTPAGE" ]]; then
+    echo "Found startpage, Theming startpage..."
+    ln -sf "${STARTPAGE}/index_${THEME}.html" "${STARTPAGE}/index.html"
+fi
 
 # Reload dwm
 pgrep -x dwm && pkill dwm
