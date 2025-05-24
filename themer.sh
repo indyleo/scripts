@@ -30,6 +30,7 @@ SUCKLESS_DIR="$HOME/Github/suckless"
 NEOVIM_PLUGIN="$HOME_CONFIG/nvim/lua/plugins"
 ALACRITTY_CONFIG="$HOME_CONFIG/alacritty"
 DUNST_CONFIG="$HOME_CONFIG/dunst"
+QUTEBROWSER_CONFIG="$HOME_CONFIG/qutebrowser"
 XRESOURCES="$HOME"
 STARTPAGE="$HOME/Github/portfilio/startpage/"
 
@@ -80,6 +81,9 @@ if [[ -d "$STARTPAGE" ]]; then
     echo "Found startpage, Theming startpage..."
     ln -sf "${STARTPAGE}/index_${THEME}.html" "${STARTPAGE}/index.html"
 fi
+
+# Qutebrowser: symlink the correct config
+ln -sf "${QUTEBROWSER_CONFIG}/config_${THEME}.py" "${QUTEBROWSER_CONFIG}/config.py"
 
 # Reload dwm
 pgrep -x dwm && pkill dwm
