@@ -31,6 +31,7 @@ NEOVIM_PLUGIN="$HOME_CONFIG/nvim/lua/plugins"
 ALACRITTY_CONFIG="$HOME_CONFIG/alacritty"
 DUNST_CONFIG="$HOME_CONFIG/dunst"
 QUTEBROWSER_CONFIG="$HOME_CONFIG/qutebrowser"
+TMUX_CONFIG="$HOME_CONFIG/tmux"
 XRESOURCES="$HOME"
 STARTPAGE="$HOME/Github/portfilio/startpage/"
 
@@ -75,6 +76,9 @@ done
 ln -sf "${NEOVIM_PLUGIN}/colourscheme.lua_${THEME}" "${NEOVIM_PLUGIN}/colourscheme.lua"
 ln -sf "${NEOVIM_PLUGIN}/lualine.lua_${THEME}" "${NEOVIM_PLUGIN}/lualine.lua"
 ln -sf "${NEOVIM_PLUGIN}/indent-blankline.lua_${THEME}" "${NEOVIM_PLUGIN}/indent-blankline.lua"
+
+# Tmux: symlink the correct config
+ln -sf "${TMUX_CONFIG}/tmux_${THEME}.conf" "${TMUX_CONFIG}/tmux.conf"
 
 # Startpage: symlink the correct config
 if [[ -d "$STARTPAGE" ]]; then
