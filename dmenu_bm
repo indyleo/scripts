@@ -2,7 +2,12 @@
 
 BOOKMARK_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/bookmarks/bookmarks.txt"
 DMENU="dmenu -l 10"
-BROWSER="xdg-open"
+BROWSER="${1:-xdg-open}"
+
+if ! command -v $BROWSER >/dev/null 2>&1; then
+    echo "Error: $BROWSER not found"
+    exit 1
+fi
 
 mkdir -p "$(dirname "$BOOKMARK_FILE")"
 touch "$BOOKMARK_FILE"
