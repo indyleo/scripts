@@ -5,6 +5,6 @@ set -euo pipefail
 if [[ -f "/tmp/recordingicon" ]]; then
     cat "/tmp/recordingicon"
 elif [[ ! -f "/tmp/recordicon" ]]; then
-    echo " Not Recording"
+    echo "  Not Recording"
 fi
 
