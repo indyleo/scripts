@@ -1,7 +1,12 @@
 #!/bin/env bash
 
-FILE="config.def.h"
-COMMAND="sudo cp ${FILE} config.h && sudo make clean install"
+FILE="${1:-config.def.h}" # Default to "config.def.h"
+
+if [[ "$FILE" != "config.def.h" ]]; then
+    COMMAND="sudo make clean install"
+else
+    COMMAND="sudo cp ${FILE} config.h && sudo make clean install"
+fi
 
 if [[ ! -f "$FILE" ]]; then
     echo "Error: $FILE not found."
