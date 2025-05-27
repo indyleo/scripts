@@ -1,0 +1,29 @@
+#!/bin/env bash
+
+set -euo pipefail
+
+url="$1"
+type="$2"
+output_folder="$HOME/Downloads"
+
+if [[ -z "$url" || -z "$type" ]]; then
+    echo "Usage: get_spotify_content <url> <type>"
+    echo "Type options: -trk (track), -alb (album), -pl (playlist)"
+    return 1
+fi
+
+if ! command -v spotdl &> /dev/null; then
+    echo "spotdl is not installed. Please install spotdl and try again."
+    return 1
+fi
+
+case "$type" in
+    -trk|-alb|-pl)
+        spotdl "$url" --output "$output_folder"
+        echo "Download completed. Files saved in $output_folder."
+        ;;
+    *)
+        echo "Invalid type. Use -trk for track, -alb for album, or -pl for playlist."
+        return 1
+        ;;
+esac

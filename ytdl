@@ -1,0 +1,38 @@
+#!/bin/env bash
+
+set -euo pipefail
+
+url="$1"
+type="$2"
+output_folder="$HOME/Downloads"
+
+# Validate input
+if [[ -z "$url" || -z "$type" ]]; then
+    echo "Usage: get_youtube_content <url> <type: aud|vid|bth>"
+    return 1
+fi
+
+# Check if yt-dlp is installed
+if ! command -v yt-dlp &>/dev/null; then
+    echo "yt-dlp is not installed. Please install yt-dlp and try again."
+    return 1
+fi
+
+case "$type" in
+    aud)
+        yt-dlp -x --audio-format mp3 --embed-thumbnail --add-metadata --audio-quality 0 "$url" -o "$output_folder/%(title)s.%(ext)s"
+        echo "Audio download completed. File saved in $output_folder."
+        ;;
+    vid)
+        yt-dlp -f "bestvideo+bestaudio" --merge-output-format mp4 --embed-thumbnail --add-metadata "$url" -o "$output_folder/%(title)s.%(ext)s"
+        echo "Video download completed. File saved in $output_folder."
+        ;;
+    bth)
+        yt-dlp -f "bestvideo+bestaudio" --merge-output-format mp4 --embed-thumbnail --add-metadata "$url" -o "$output_folder/%(title)s.%(ext)s"
+        echo "Combined audio and video download completed as an MP4. File saved in $output_folder."
+        ;;
+    *)
+        echo "Invalid type specified. Use aud, vid, or bth."
+        return 1
+        ;;
+esac
