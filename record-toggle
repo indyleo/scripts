@@ -1,0 +1,40 @@
+#!/bin/env bash
+
+record() {
+    now="$(date '+%a__%b%d__%H_%M_%S')"
+    outputloc="$HOME/Videos/video_${now}"
+    mkdir -p "$outputloc"/{vid,aud}
+
+    ffmpeg -s 1920x1080 -f x11grab -r 30 -i :0.0+0,0 -c:v h264 -qp 0 "${outputloc}/vid/video_${now}.mkv" &
+    echo $! > /tmp/recpid
+
+    ffmpeg -f alsa -i default -af "afftdn=nf=-75" "${outputloc}/aud/audio_${now}.wav" &
+    echo $! > /tmp/audpid
+
+    echo "$now" > /tmp/recording_timestamp
+    echo "$outputloc" > /tmp/recording_outputdir
+
+    echo "󰑊" > /tmp/recordingicon
+
+    notify-send "Recording started"
+}
+
+end() {
+    kill -15 "$(cat /tmp/recpid)" "$(cat /tmp/audpid)"
+    wait
+
+    now=$(cat /tmp/recording_timestamp)
+    outputloc=$(cat /tmp/recording_outputdir)
+
+    # Merge audio and video
+    ffmpeg -i "${outputloc}/vid/video_${now}.mkv" -i "${outputloc}/aud/audio_${now}.wav" \
+        -map 0 -map 1:a -c:v copy -shortest "${outputloc}/final.mkv"
+
+    # Cleanup
+    rm -fv /tmp/recordingicon /tmp/audpid /tmp/recpid /tmp/recording_timestamp /tmp/recording_outputdir
+
+    notify-send "Recording ended and merged"
+}
+
+# If the recording pid exists, end recording. If not, start recording
+([[ -f /tmp/recpid ]] && end && exit 0) || record
