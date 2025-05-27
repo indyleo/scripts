@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+
+# set -euo pipefail
+#
+# # === Configuration ===
+# DMENU_ARGS="-l 15 -p Bitwarden: "
+#
+# # Detect clipboard utility
+# if command -v xclip &>/dev/null; then
+#     COPY_CMD="xclip -selection clipboard"
+# elif command -v wl-copy &>/dev/null; then
+#     COPY_CMD="wl-copy"
+# else
+#     echo "Missing clipboard utility (xclip or wl-copy)"
+#     exit 1
+# fi
+#
+# # === Dependency check ===
+# for cmd in bw jq dmenu xdotool; do
+#     command -v "$cmd" &>/dev/null || { echo "Missing dependency: $cmd"; exit 1; }
+# done
+#
+# # === Ensure login ===
+# if ! bw login --check &>/dev/null; then
+#     echo "Logging in with API key..."
+#     bw login --apikey || { echo "Bitwarden login failed."; exit 1; }
+# fi
+#
+# # === Unlock vault ===
+# SESSION="${BW_SESSION:-}"
+# if [[ -z "$SESSION" ]]; then
+#     if [[ -n "${BW_PASSWORD:-}" ]]; then
+#         SESSION=$(bw unlock --raw --passwordenv BW_PASSWORD)
+#     else
+#         SESSION=$(bw unlock --raw)
+#     fi
+#     [[ -z "$SESSION" ]] && { echo "Vault unlock failed."; exit 1; }
+# fi
+#
+# # === Fetch item data once ===
+# ITEMS_JSON=$(bw list items --session "$SESSION")
+#
+# # === Build item list for selection ===
+# ITEMS=$(echo "$ITEMS_JSON" | jq -r '.[] | "\(.id)\t\(.name)\t\(.login.username // "no-username")"')
+#
+# # Display "Name [Username]" in dmenu
+# DISPLAY_ITEMS=$(echo "$ITEMS" | awk -F '\t' '{ print $2 " [" $3 "]" }')
+# SELECTION=$(echo "$DISPLAY_ITEMS" | dmenu $DMENU_ARGS)
+# [[ -z "$SELECTION" ]] && exit 0
+#
+# # Extract ID from selection
+# # Use mapfile to safely capture ID and match via full DISPLAY_ITEMS
+# mapfile -t SELECTED <<< "$(echo "$ITEMS" | awk -F '\t' -v sel="$SELECTION" '$2 " [" $3 "]" == sel { print $1 "\t" $2 "\t" $3 }')"
+# ITEM_ID="${SELECTED[0]%%$'\t'*}"
+# NAME=$(echo -e "${SELECTED[0]}" | cut -f2)
+# USERNAME=$(echo -e "${SELECTED[0]}" | cut -f3)
+# PASSWORD=$(bw get password "$ITEM_ID" --session "$SESSION")
+#
+# # === Choose what to copy ===
+# ACTION=$(printf "Auto-Type Username\nAuto-Type Password\nCopy Username\nCopy Password" | dmenu -p "$NAME [$USERNAME]")
+# [[ -z "$ACTION" ]] && exit 0
+#
+# case "$ACTION" in
+#     "Auto-Type Username")
+#         notify-send "Bitwarden" "Typing username for '$NAME'..."
+#         xdotool type --delay 50 --clearmodifiers "$USERNAME"
+#         ;;
+#     "Auto-Type Password")
+#         notify-send "Bitwarden" "Typing password for '$NAME'..."
+#         xdotool type --delay 50 --clearmodifiers "$PASSWORD"
+#         ;;
+#     "Copy Password")
+#
+#         echo -n "$PASSWORD" | $COPY_CMD
+#         notify-send "Bitwarden" "Password for '$NAME' copied to clipboard."
+#         ;;
+#     "Copy Username")
+#         echo -n "$USERNAME" | $COPY_CMD
+#         notify-send "Bitwarden" "Username for '$NAME' copied to clipboard."
+#         ;;
+# esac
+#
+# # === Clear clipboard after 30s ===
+# (sleep 30 && echo -n "" | $COPY_CMD) & disown
+# # Optional: clear clipboard after 30s
+# if [[ "$ACTION" =~ ^Copy ]]; then
+#     (sleep 30 && echo -n "" | $COPY_CMD) & disown
+# fi
+
+set -euo pipefail
+
+# === Config ===
+DMENU_ARGS="-l 15 -p Bitwarden: "
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/dmenu_bw"
+CACHE_TIME=86400  # seconds
+
+mkdir -p "$CACHE_DIR"
+ITEMS_CACHE="$CACHE_DIR/items.json"
+MENU_CACHE="$CACHE_DIR/menu.txt"
+
+# Detect clipboard utility
+if command -v xclip &>/dev/null; then
+    COPY_CMD="xclip -selection clipboard"
+elif command -v wl-copy &>/dev/null; then
+    COPY_CMD="wl-copy"
+else
+    COPY_CMD="cat"
+fi
+
+# Check dependencies
+for cmd in bw jq dmenu xdotool; do
+    command -v "$cmd" &>/dev/null || { echo "Missing dependency: $cmd"; exit 1; }
+done
+
+# Login check
+if ! bw login --check &>/dev/null; then
+    echo "Logging in with API key..."
+    bw login --apikey || { echo "Bitwarden login failed."; exit 1; }
+fi
+
+# === Optimized session caching ===
+SESSION_FILE="$CACHE_DIR/session.token"
+SESSION=""
+
+# Try using cached session
+if [[ -f "$SESSION_FILE" ]]; then
+    SESSION=$(<"$SESSION_FILE")
+    if ! bw unlock --check --session "$SESSION" &>/dev/null; then
+        SESSION=""
+    fi
+fi
+
+# Unlock if session is missing or expired
+if [[ -z "$SESSION" ]]; then
+    if [[ -n "${BW_PASSWORD:-}" ]]; then
+        SESSION=$(bw unlock --raw --passwordenv BW_PASSWORD)
+    else
+        SESSION=$(bw unlock --raw)
+    fi
+    [[ -z "$SESSION" ]] && { echo "Vault unlock failed."; exit 1; }
+    echo "$SESSION" > "$SESSION_FILE"
+fi
+
+
+# === Load or refresh cache ===
+cache_expired() {
+    [[ ! -f "$1" ]] || [[ $(($(date +%s) - $(stat -c %Y "$1"))) -gt $CACHE_TIME ]]
+}
+
+if cache_expired "$ITEMS_CACHE"; then
+    bw list items --session "$SESSION" > "$ITEMS_CACHE"
+fi
+
+if cache_expired "$MENU_CACHE"; then
+    jq -r '.[] | "\(.id)\t\(.name)\t\(.login.username // "no-username")"' < "$ITEMS_CACHE" > "$CACHE_DIR/items_parsed.txt"
+    awk -F '\t' '{ print $2 " [" $3 "]" }' "$CACHE_DIR/items_parsed.txt" > "$MENU_CACHE"
+fi
+
+# === dmenu selection ===
+SELECTION=$(cat "$MENU_CACHE" | dmenu $DMENU_ARGS)
+[[ -z "$SELECTION" ]] && exit 0
+
+# Match item
+mapfile -t SELECTED < <(awk -F '\t' -v sel="$SELECTION" '$2 " [" $3 "]" == sel { print $1 "\t" $2 "\t" $3 }' "$CACHE_DIR/items_parsed.txt")
+ITEM_ID="${SELECTED[0]%%$'\t'*}"
+NAME=$(echo -e "${SELECTED[0]}" | cut -f2)
+USERNAME=$(echo -e "${SELECTED[0]}" | cut -f3)
+
+# === Get password (live, not cached for security) ===
+PASSWORD=$(bw get password "$ITEM_ID" --session "$SESSION")
+
+# === Action menu ===
+ACTION=$(printf "Auto-Type Username\nAuto-Type Password\nCopy Username\nCopy Password" | dmenu -p "$NAME [$USERNAME]")
+[[ -z "$ACTION" ]] && exit 0
+
+case "$ACTION" in
+    "Auto-Type Username")
+        notify-send "Bitwarden" "Typing username for '$NAME'..."
+        xdotool type --delay 50 --clearmodifiers "$USERNAME"
+        ;;
+    "Auto-Type Password")
+        notify-send "Bitwarden" "Typing password for '$NAME'..."
+        xdotool type --delay 50 --clearmodifiers "$PASSWORD"
+        ;;
+    "Copy Username")
+        echo -n "$USERNAME" | $COPY_CMD
+        notify-send "Bitwarden" "Username copied to clipboard."
+        ;;
+    "Copy Password")
+        echo -n "$PASSWORD" | $COPY_CMD
+        notify-send "Bitwarden" "Password copied to clipboard."
+        ;;
+esac
+
+# Optional: Clear clipboard
+if [[ "$ACTION" =~ ^Copy ]]; then
+    (sleep 30 && echo -n "" | $COPY_CMD) & disown
+fi
