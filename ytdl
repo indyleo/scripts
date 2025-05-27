@@ -24,7 +24,7 @@ case "$type" in
         echo "Audio download completed. File saved in $output_folder."
         ;;
     vid)
-        yt-dlp -f "bestvideo+bestaudio" --merge-output-format mp4 --embed-thumbnail --add-metadata "$url" -o "$output_folder/%(title)s.%(ext)s"
+        yt-dlp -f "bestvideo" --merge-output-format mp4 --embed-thumbnail --add-metadata "$url" -o "$output_folder/%(title)s.%(ext)s"
         echo "Video download completed. File saved in $output_folder."
         ;;
     bth)
