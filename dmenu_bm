@@ -1,0 +1,100 @@
+#!/bin/env bash
+
+BOOKMARK_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/bookmarks/bookmarks.txt"
+DMENU="dmenu -l 10"
+BROWSER="xdg-open"
+
+mkdir -p "$(dirname "$BOOKMARK_FILE")"
+touch "$BOOKMARK_FILE"
+
+# Show top-level: folders + root bookmarks
+function top_level_menu() {
+    awk -F'|' '
+    NF == 2 { print $1 " | " $2 }    # Root bookmarks
+    NF == 3 { gsub(/^ +| +$/, "", $1); folders[$1] }  # Folders
+    END { for (f in folders) print f }' "$BOOKMARK_FILE" \
+        | sort | $DMENU -p "Bookmarks"
+}
+
+# Show bookmarks inside a folder
+function folder_menu() {
+    local folder="$1"
+    awk -F'|' -v f="$folder" '$1 ~ "^ *"f" *$" && NF == 3 {
+        gsub(/^ +| +$/, "", $2); gsub(/^ +| +$/, "", $3);
+        print $2 " | " $3
+    }' "$BOOKMARK_FILE" | sort | $DMENU -p "$folder"
+}
+
+# Open a bookmark (given label | url)
+function open_label_url() {
+    local entry="$1"
+    local url=$(echo "$entry" | cut -d'|' -f2- | xargs)
+    [ -n "$url" ] && $BROWSER "$url"
+}
+
+# Add a bookmark (ask if in folder)
+function add_bookmark() {
+    local folder label url
+    folder=$(echo -e "(none)\n$(list_folders)" | $DMENU -p "Folder (or none)") || exit
+    label=$(echo "" | $DMENU -p "Label:") || exit
+    url=$(echo "" | $DMENU -p "URL:") || exit
+
+    if [ -n "$label" ] && [ -n "$url" ]; then
+        if [ "$folder" = "(none)" ]; then
+            echo "$label | $url" >> "$BOOKMARK_FILE"
+        else
+            echo "$folder | $label | $url" >> "$BOOKMARK_FILE"
+        fi
+        notify-send "Bookmark added" "$label → $url"
+    fi
+}
+
+# List folders for add prompt
+function list_folders() {
+    awk -F'|' 'NF == 3 { gsub(/^ +| +$/, "", $1); print $1 }' "$BOOKMARK_FILE" | sort -u
+}
+
+# Delete bookmark (navigate same way)
+function delete_bookmark() {
+    local choice entry folder label
+
+    choice=$(top_level_menu) || exit
+    if echo "$choice" | grep -q '|'; then
+        entry="$choice"
+    else
+        folder="$choice"
+        entry=$(folder_menu "$folder") || exit
+    fi
+
+    # Remove line from file
+    grep -vF "$entry" "$BOOKMARK_FILE" > "${BOOKMARK_FILE}.tmp" && mv "${BOOKMARK_FILE}.tmp" "$BOOKMARK_FILE"
+    notify-send "Bookmark deleted" "$entry"
+}
+
+# Open bookmark (navigate through folders if needed)
+function open_bookmark() {
+    local choice entry folder
+
+    choice=$(top_level_menu) || exit
+    if echo "$choice" | grep -q '|'; then
+        open_label_url "$choice"
+    else
+        folder="$choice"
+        entry=$(folder_menu "$folder") || exit
+        open_label_url "$entry"
+    fi
+}
+
+# Main menu
+function main_menu() {
+    local action
+    action=$(printf "Open\nAdd\nDelete\nQuit" | $DMENU -p "Bookmark Manager") || exit
+    case "$action" in
+        Open) open_bookmark ;;
+        Add) add_bookmark ;;
+        Delete) delete_bookmark ;;
+        *) exit ;;
+    esac
+}
+
+main_menu
