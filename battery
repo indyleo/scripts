@@ -59,4 +59,3 @@ esac
 
 # Output
 echo "$icon $percent%"
-

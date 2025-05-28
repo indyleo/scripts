@@ -51,6 +51,7 @@ case "$1" in
     --inc)
         if [[ "$2" =~ ^[0-9]+$ ]]; then
             brightness_inc "$2"
+            pkill -RTMIN+15 slstatus
         else
             echo "Usage: $0 --inc <amount>"
             exit 1
@@ -59,6 +60,7 @@ case "$1" in
     --dec)
         if [[ "$2" =~ ^[0-9]+$ ]]; then
             brightness_dec "$2"
+            pkill -RTMIN+15 slstatus
         else
             echo "Usage: $0 --dec <amount>"
             exit 1

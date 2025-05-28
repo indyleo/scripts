@@ -46,9 +46,18 @@ volume_vol() {
 }
 
 case "$1" in
-    --togglemute) volume_togglemute ;;
-    --inc) volume_inc ;;
-    --dec) volume_dec ;;
+    --togglemute)
+        volume_togglemute
+        pkill -RTMIN+16 slstatus
+        ;;
+    --inc)
+        volume_inc
+        pkill -RTMIN+16 slstatus
+        ;;
+    --dec)
+        volume_dec
+        pkill -RTMIN+16 slstatus
+        ;;
     --printvol) volume_vol ;;
     *)
         echo "Error: Unknown argument '$1'. Use --togglemute, --inc, --dec, or --printvol."

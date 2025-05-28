@@ -31,7 +31,7 @@ record() {
     # Metadata
     echo "$now" > /tmp/recording_timestamp
     echo "$outputloc" > /tmp/recording_outputdir
-    echo "󰑊 Recording" > /tmp/recordingicon
+    echo "󰑊 Recording" > /tmp/recordingicon && pkill -RTMIN+14 slstatus
 
     notify-send "Recording started"
 }
@@ -55,7 +55,9 @@ end() {
         -map 2:a -metadata:s:a:2 title="System Audio" -disposition:a:2 0 \
         -c:v copy -c:a aac -shortest "${outputloc}/final.mkv"
 
-    rm -fv /tmp/recordingicon /tmp/*pid /tmp/recording_timestamp /tmp/recording_outputdir
+    echo "  Not Recording" > /tmp/recordingicon && pkill -RTMIN+14 slstatus
+
+    rm -fv /tmp/*pid /tmp/recording_timestamp /tmp/recording_outputdir
 
     notify-send "Recording ended and merged"
 }
