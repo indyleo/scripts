@@ -68,29 +68,6 @@ function xwalr() {
     done
 }
 
-function xwallpaper_stretch() {
-    # Ensure a file argument is provided
-    if [[ -z "$1" ]]; then
-        echo "Error: $0: No wallpaper directory provided."
-        exit 1
-    fi
-
-    # Check if the file exists
-    if [[ ! -f "$1" ]]; then
-        echo "Error: File does not exist: $1"
-        exit 1
-    fi
-
-    # Get all connected monitors
-    MONITORS=($(xrandr | grep " connected" | cut -d ' ' -f1))
-
-    # For each monitor, set the wallpaper
-    for monitor in "${MONITORS[@]}"; do
-        xwallpaper --output "$monitor" --stretch "$1"
-        echo "Wallpaper set on $monitor to $1"
-    done
-}
-
 # Main program
 case "$1" in
     timexwalr)
@@ -99,11 +76,8 @@ case "$1" in
     xwalr)
         xwalr "$2"
         ;;
-    stretch)
-        xwallpaper_stretch "$2"
-        ;;
     *)
-        echo "Usage: $0 {timexwalr|xwalr|stretch} [wallpaper_directory] [change_interval]"
+        echo "Usage: $0 {timexwalr|xwalr} [wallpaper_directory] [change_interval]"
         exit 1
         ;;
 esac
