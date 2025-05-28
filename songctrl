@@ -2,32 +2,69 @@
 
 player="$2"
 cutpoint="$3"
+parent_cmd=$(ps -o comm= -p $PPID)
+
+if [[ "$parent_cmd" == "slstatus" ]]; then
+    COMMAND="pkill -RTMIN+13 slstatus"
+fi
 
 song_togglepause(){
     playerctl play-pause --player="$player"
+    [[ -n "$COMMAND" ]] && $COMMAND
 }
 
 song_skip(){
     playerctl next --player="$player"
+    [[ -n "$COMMAND" ]] && $COMMAND
 }
 
 song_previous(){
     playerctl previous --player="$player"
+    [[ -n "$COMMAND" ]] && $COMMAND
 }
 
 song_title(){
-    # Get the playback status
-    status=$(playerctl status --player="$player")
+    status=$(playerctl status --player="$player" 2>/dev/null)
 
-    # Check if the status is "Playing"
     if [ "$status" = "Playing" ]; then
-        # Get the title and cut off after 15 letters
-        title=$(playerctl metadata title --player="$player" | cut -c 1-"$cutpoint")
-        echo "$title"
+        title=$(playerctl metadata title --player="$player")
+
+        if [[ -n "$cutpoint" ]]; then
+            if (( ${#title} > cutpoint )); then
+                # Cut at nearest space before cutpoint
+                truncated=$(echo "$title" | cut -c 1-"$cutpoint")
+                clean_cut=$(echo "$truncated" | awk '{ for (i=1;i<=NF;i++) { if (length(s $i) + 1 <= '$cutpoint') s = s $i " "; else break } print s }' | sed 's/ *$//')
+                echo "$clean_cut ..."
+            else
+                echo "$title"
+            fi
+        else
+            echo "$title"
+        fi
     else
-        # Set the title to "Not Playing/Paused"
         echo "Not Playing/Paused"
     fi
+
+    [[ -n "$COMMAND" ]] && $COMMAND
+}
+
+song_state(){
+    status=$(playerctl status --player="$player" 2>/dev/null)
+    case "$status" in
+        Playing)
+            echo ""
+            ;;
+        Paused)
+            echo ""
+            ;;
+        Stopped)
+            echo ""
+            ;;
+        *)
+            echo ""
+            ;;
+    esac
+    [[ -n "$COMMAND" ]] && $COMMAND
 }
 
 case "$1" in
@@ -39,6 +76,8 @@ case "$1" in
         song_previous ;;
     --songtitle|-st)
         song_title ;;
+    --songstate|-ss)
+        song_state ;;
     *)
-        echo "Usage: $0 [--togglepause|-tp | --skip|-s | --previous|-p | --songtitle|-st]" ;;
+        echo "Usage: $0 [--togglepause|-tp | --skip|-s | --previous|-p | --songtitle|-st | --songstate|-ss] [PLAYER] [CUTPOINT]" ;;
 esac
