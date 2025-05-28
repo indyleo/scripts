@@ -1,12 +1,19 @@
 #!/bin/env bash
 
 record() {
+    # Create output directory
     now="$(date '+%a__%b%d__%H_%M_%S')"
     outputloc="$HOME/Videos/video_${now}"
     mkdir -p "$outputloc"/{vid,aud}
 
-    # Screen capture
-    ffmpeg -s 1920x1080 -f x11grab -r 30 -i :0.0+0,0 -c:v h264 -qp 0 \
+    # Detect primary monitor
+    primary_info=$(xrandr | awk '/ primary / {print $4}')
+    res=${primary_info%%+*}
+    offset=${primary_info#*+}
+    offset=${offset//+/,}
+
+    # Screen capture only the primary monitor
+    ffmpeg -video_size "$res" -f x11grab -r 30 -i ":0.0+${offset}" -c:v h264 -qp 0 \
         "${outputloc}/vid/video_${now}.mkv" &
     echo $! > /tmp/recpid
 
