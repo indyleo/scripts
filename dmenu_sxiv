@@ -1,0 +1,13 @@
+#!/bin/env bash
+
+PICTURES_DIR="$HOME/Pictures"
+
+open_picture() {
+    FILE=$(find "$PICTURES_DIR" -type f \( -iname '*.jpg' -o -iname '*.png' -o -iname '*.jpeg' -o -iname '*.gif' \) \
+            | sed "s|$PICTURES_DIR/||" \
+        | dmenu -l 15 -p "Select picture: ") || exit 0
+
+    [[ -n "$FILE" ]] && sxiv "$PICTURES_DIR/$FILE" 2>/dev/null & disown
+}
+
+open_picture
