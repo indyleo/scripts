@@ -61,7 +61,7 @@ song_state(){
             echo ""
             ;;
         *)
-            echo ""
+            echo "  "
             ;;
     esac
     [[ -n "$COMMAND" ]] && $COMMAND
