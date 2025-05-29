@@ -4,7 +4,7 @@ VIDEOS_DIR="$HOME/Videos"
 
 function open_video() {
     FILE="$(echo "$(command ls $VIDEOS_DIR)" | dmenu -l 15 -p "Select video: ")" || exit 0
-    mpv "$VIDEOS_DIR/$FILE" 2>/dev/null & disown
+    mpv --fs "$VIDEOS_DIR/$FILE" 2>/dev/null & disown
 }
 
 open_video
