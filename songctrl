@@ -52,13 +52,13 @@ song_state(){
     status=$(playerctl status --player="$player" 2>/dev/null)
     case "$status" in
         Playing)
-            echo ""
+            echo " "
             ;;
         Paused)
-            echo ""
+            echo " "
             ;;
         Stopped)
-            echo ""
+            echo " "
             ;;
         *)
             echo "  "
