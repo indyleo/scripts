@@ -61,7 +61,11 @@ song_state(){
             echo " "
             ;;
         *)
-            echo "  "
+            if ! flatpak ps | awk '{ print $3 }' |  grep -xq "io.github.dweymouth.supersonic"; then
+                echo " "
+            else
+                echo "  "
+            fi
             ;;
     esac
     [[ -n "$COMMAND" ]] && $COMMAND
