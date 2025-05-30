@@ -1,37 +1,120 @@
 #!/bin/env bash
 
-# Ensure flameshot is installed
-if ! command -v flameshot &> /dev/null; then
-    echo "Error: flameshot is not installed."
+# Ensure dependencies
+if ! command -v import &> /dev/null; then
+    echo "Error: ImageMagick (import) is not installed."
+    exit 1
+fi
+if ! command -v xdotool &> /dev/null; then
+    echo "Error: xdotool is not installed."
+    exit 1
+fi
+if ! command -v xrandr &> /dev/null; then
+    echo "Error: xrandr is not installed."
+    exit 1
+fi
+if ! command -v notify-send &> /dev/null; then
+    echo "Error: notify-send is not installed."
+    exit 1
+fi
+if ! command -v xclip &> /dev/null; then
+    echo "Error: xclip is not installed."
     exit 1
 fi
 
-# Screenshot functions
-selection() {
-    flameshot gui -p "${HOME-~}/Pictures/Screenshots"
-}
+OPTION="${1}"
 
-screen() {
-    flameshot screen -p "${HOME-~}/Pictures/Screenshots" -c
+SAVE_DIR="${HOME}/Pictures/Screenshots"
+mkdir -p "$SAVE_DIR"
+
+timestamp=$(date +"%Y-%m-%d_%H-%M-%S")
+filename="${SAVE_DIR}/${timestamp}.png"
+
+selection() {
+    notify-send "Select an area to capture..."
+    import "$filename"
+    notify-send "Saved to:" "$filename"
+    xclip -selection clipboard -t image/png "$filename"
 }
 
 full() {
-    flameshot full -p "${HOME-~}/Pictures/Screenshots" -c
+    notify-send "Capturing full screen..."
+    import -window root "$filename"
+    notify-send "Saved to:" "$filename"
+    xclip -selection clipboard -t image/png "$filename"
 }
 
-launcher() {
-    flameshot launcher
+window() {
+    notify-send "Capturing focused window..."
+    win_id=$(xdotool getactivewindow)
+    if [ -z "$win_id" ]; then
+        notify-send "Error:" "Could not get active window."
+        exit 1
+    fi
+    import -window "$win_id" "$filename"
+    notify-send "Saved to:" "$filename"
+    xclip -selection clipboard -t image/png "$filename"
 }
 
-# Handle user input
-case "$1" in
+screen() {
+    notify-send "Capturing active screen containing the focused window..."
+
+    win_id=$(xdotool getactivewindow)
+    if [ -z "$win_id" ]; then
+        notify-send "Error:" "Could not get active window."
+        exit 1
+    fi
+
+    # Get window absolute position
+    read -r win_x win_y <<< $(xdotool getwindowgeometry --shell "$win_id" | grep -E 'X=|Y=' | sed 's/X=//; s/Y=//' | tr '\n' ' ')
+
+    # Get monitors geometry from xrandr
+    monitors=$(xrandr | grep ' connected' | grep -oP '\d+x\d+\+\d+\+\d+')
+
+    monitor_geometry=""
+    for mon in $monitors; do
+        IFS='x+'
+        read -r mon_w mon_h mon_x mon_y <<< "$mon"
+        IFS=' '
+
+        if (( win_x >= mon_x && win_x < mon_x + mon_w && win_y >= mon_y && win_y < mon_y + mon_h )); then
+            monitor_geometry="${mon_w}x${mon_h}+${mon_x}+${mon_y}"
+            break
+        fi
+    done
+
+    if [ -z "$monitor_geometry" ]; then
+        notify-send "Warning:" "Could not detect active monitor, capturing full screen."
+        import -window root "$filename"
+    else
+        import -window root -crop "$monitor_geometry" "$filename"
+    fi
+
+    notify-send "Saved to:" "$filename"
+    xclip -selection clipboard -t image/png "$filename"
+}
+
+help_menu() {
+    echo "Usage: $0 [OPTION]"
+    echo
+    echo "Options:"
+    echo "  -s, --select      Select an area to capture"
+    echo "  -sc, --screen     Capture active screen containing the focused window"
+    echo "  -f, --full        Capture full screen"
+    echo "  -w, --window      Capture focused window"
+    echo "  -h, --help        Show this help message"
+    echo
+}
+
+case "$OPTION" in
     --select|-s) selection ;;
     --screen|-sc) screen ;;
     --full|-f) full ;;
-    --launcher|-l) launcher ;;
+    --window|-w) window ;;
+    --help|-h) help_menu ;;
     *)
-        echo "Error: $0: Unknown argument '$1'. Use --select|-s, --screen|-sc, --full|-f, or --launcher|-l."
+        echo "Error: '${OPTION:- }' Invalid option."
+        help_menu
         exit 1
         ;;
 esac
-
