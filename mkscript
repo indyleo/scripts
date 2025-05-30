@@ -1,7 +1,12 @@
 #!/bin/env bash
 
-printf "File Name: "
-read -r ans
+if [[ -z $1 ]]; then
+    printf "File Name: "
+    read -r ans
+else
+    ans=$1
+fi
+
 file=$HOME/Scripts/$ans
 if [ -d "$HOME/Scripts" ]; then
     if [ -e "$HOME/Scripts/$ans" ]; then
