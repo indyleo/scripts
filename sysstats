@@ -1,5 +1,17 @@
 #!/bin/env bash
 
+ttime() {
+    date +"󰥔  %I:%M %p"
+}
+
+ddate() {
+    date +"  %A %B %d %Y"
+}
+
+date_time() {
+    date +"󰥔 %I:%M %p |  %A %B %d %Y"
+}
+
 cpu_load() {
     load="$(awk '{print $1}' /proc/loadavg)"
     echo "  $load%"
@@ -20,11 +32,27 @@ memory_usage() {
 
 wifi_status() {
     current=$(iwgetid -r)
-    echo "󰖩 $current"
+    if [[ -z "$current" ]]; then
+        echo "󰖪 Disconnected"
+    else
+        echo "󰖩 $current"
+    fi
+}
+
+tail_status() {
+    if tailscale status &>/dev/null; then
+        if tailscale status | grep -q "Logged out"; then
+            echo "󰈂 Not connected"
+        else
+            echo "󰈁 Connected"
+        fi
+    else
+        echo "󰈂 Not connected"
+    fi
 }
 
 all_stats() {
-    echo "$(disk_usage) | $(memory_usage) | $(cpu_load) | $(wifi_status)"
+    echo "$(disk_usage) | $(memory_usage) | $(cpu_load) | $(wifi_status) | $(tail_status) | $(ddate) | $(ttime)"
 }
 
 case "$1" in
@@ -40,10 +68,22 @@ case "$1" in
     wifi)
         wifi_status
         ;;
+    tail)
+        tail_status
+        ;;
+    date)
+        ddate
+        ;;
+    time)
+        ttime
+        ;;
+    date_time)
+        date_time
+        ;;
     all)
         all_stats
         ;;
     *)
-        echo "Usage: $0 {cpu|disk|mem|wifi|all}"
+        echo "Usage: $0 {cpu|disk|mem|wifi|tail|date|time|date_time|all}"
         ;;
 esac
