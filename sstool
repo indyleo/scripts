@@ -95,15 +95,15 @@ screen() {
 }
 
 help_menu() {
-    echo "Usage: $0 [OPTION]"
-    echo
-    echo "Options:"
-    echo "  -s, --select      Select an area to capture"
-    echo "  -sc, --screen     Capture active screen containing the focused window"
-    echo "  -f, --full        Capture full screen"
-    echo "  -w, --window      Capture focused window"
-    echo "  -h, --help        Show this help message"
-    echo
+    cat <<EOF
+Usage: $0 [OPTION]
+
+Options:
+  -h, --help        Show this help message
+  -s, --select      Select an area to capture
+  -f, --full        Capture full screen
+  -w, --window      Capture focused window
+EOF
 }
 
 case "$OPTION" in
