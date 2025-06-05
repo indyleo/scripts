@@ -9,17 +9,17 @@ cmd="pkill -RTMIN+13 slstatus"
 
 song_togglepause(){
     playerctl play-pause --player="$player"
-    $cmd
+    eval "$cmd"
 }
 
 song_skip(){
     playerctl next --player="$player"
-    $cmd
+    eval "$cmd"
 }
 
 song_previous(){
     playerctl previous --player="$player"
-    $cmd
+    eval "$cmd"
 }
 
 song_title(){
@@ -43,7 +43,7 @@ song_title(){
     else
         echo "Not Playing/Paused"
     fi
-    $cmd
+    eval "$cmd"
 }
 
 song_state(){
@@ -66,7 +66,7 @@ song_state(){
             fi
             ;;
     esac
-    $cmd
+    eval "$cmd"
 }
 
 function help_menu() {
