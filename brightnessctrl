@@ -1,17 +1,33 @@
 #!/bin/env bash
 
+set -euo pipefail
+
 # Ensure brightnessctl is installed
 if ! command -v brightnessctl &>/dev/null; then
     echo "Error: brightnessctl not found. Please install it first."
     exit 1
 fi
 
+opt="${1:-}"
+num="${2:-5}"
+
 brightness_inc() {
-    brightnessctl set "${1}%+"
+    if [[ "${num}" =~ ^[0-9]+$ ]]; then
+        brightnessctl set "${num}%+"
+        pkill -RTMIN+15 slstatus
+    else
+        exit 1
+    fi
 }
 
 brightness_dec() {
-    brightnessctl set "${1}%-"
+    if [[ "${num}" =~ ^[0-9]+$ ]]; then
+        brightnessctl set "${num}%-"
+        pkill -RTMIN+15 slstatus
+    else
+        exit 1
+    fi
+
 }
 
 brightness_get() {
@@ -46,32 +62,34 @@ brightness_get() {
     fi
 }
 
+function help_menu() {
+    cat << EOF
+Usage: $0 [Options]
 
-case "$1" in
-    --inc)
-        if [[ "$2" =~ ^[0-9]+$ ]]; then
-            brightness_inc "$2"
-            pkill -RTMIN+15 slstatus
-        else
-            echo "Usage: $0 --inc <amount>"
-            exit 1
-        fi
+Options:
+  --inc, -i [Amount]     increase brightness by [Amount] or 5 if not specified
+  --dec, -d [Amount]     decrease brightness by [Amount] or 5 if not specified
+  --get, -g              get current brightness
+  --help, -h             show this help message
+EOF
+}
+
+case "$opt" in
+    --inc|-i)
+        brightness_inc "${num}"
         ;;
-    --dec)
-        if [[ "$2" =~ ^[0-9]+$ ]]; then
-            brightness_dec "$2"
-            pkill -RTMIN+15 slstatus
-        else
-            echo "Usage: $0 --dec <amount>"
-            exit 1
-        fi
+    --dec|-d)
+        brightness_dec "${num}"
         ;;
-    --get)
+    --get|-g)
         brightness_get
         ;;
+    --help|-h)
+        help_menu
+        ;;
     *)
-        echo "Unknown argument: $1"
-        echo "Usage: $0 --inc|--dec <amount> | --get"
+        echo "Error: '${opt:- }' Invalid option."
+        help_menu
         exit 1
         ;;
 esac
