@@ -1,0 +1,18 @@
+#!/bin/env bash
+
+# Directory containing your scripts
+SCRIPTS_DIR="$HOME/.local/scripts"
+
+# Get the name of this script (without path)
+self_name=$(basename "$0")
+
+# Find all executable files starting with 'dmenu', excluding this script
+scripts=$(find "$SCRIPTS_DIR" -maxdepth 1 -type f -executable -name 'dmenu*' -printf "%f\n" | grep -v "^$self_name$" | sort)
+
+# Show dmenu prompt
+chosen=$(echo "$scripts" | dmenu -p "Run script:")
+
+# If something was selected, run it
+if [ -n "$chosen" ]; then
+    "$SCRIPTS_DIR/$chosen" & disown
+fi
