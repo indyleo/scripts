@@ -64,13 +64,13 @@ brightness_get() {
 
 function help_menu() {
     cat << EOF
-Usage: $0 [Options]
+    Usage: $(basename "$0") [Options]
 
 Options:
-  --inc, -i [Amount]     increase brightness by [Amount] or 5 if not specified
-  --dec, -d [Amount]     decrease brightness by [Amount] or 5 if not specified
+  --help, -h             Show this help message
+  --inc, -i \${num}      increase brightness by [Amount] or 5 if not specified
+  --dec, -d \${num}      decrease brightness by [Amount] or 5 if not specified
   --get, -g              get current brightness
-  --help, -h             show this help message
 EOF
 }
 

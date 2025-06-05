@@ -1,26 +1,25 @@
 #!/bin/env bash
 
+set -euo pipefail
+
+opt="${1:-}"
 player="${2:-Supersonic}"
 cutpoint="${3:-0}"
-parent_cmd=$(ps -o comm= -p $PPID)
-
-if [[ "$parent_cmd" == "slstatus" ]]; then
-    COMMAND="pkill -RTMIN+13 slstatus"
-fi
+cmd="pkill -RTMIN+13 slstatus"
 
 song_togglepause(){
     playerctl play-pause --player="$player"
-    [[ -n "$COMMAND" ]] && $COMMAND
+    $cmd
 }
 
 song_skip(){
     playerctl next --player="$player"
-    [[ -n "$COMMAND" ]] && $COMMAND
+    $cmd
 }
 
 song_previous(){
     playerctl previous --player="$player"
-    [[ -n "$COMMAND" ]] && $COMMAND
+    $cmd
 }
 
 song_title(){
@@ -44,8 +43,7 @@ song_title(){
     else
         echo "Not Playing/Paused"
     fi
-
-    [[ -n "$COMMAND" ]] && $COMMAND
+    $cmd
 }
 
 song_state(){
@@ -68,10 +66,24 @@ song_state(){
             fi
             ;;
     esac
-    [[ -n "$COMMAND" ]] && $COMMAND
+    $cmd
 }
 
-case "$1" in
+function help_menu() {
+    cat <<EOF
+Usage: $(basename "$0") [OPTION]
+
+Options:
+    --help, -h              Show this help message
+    --togglepause, -tp      Toggle pause
+    --skip, -s              Skip song
+    --previous, -p          Previous song
+    --songtitle, -st        Show song title
+    --songstate, -ss        Show song state
+EOF
+}
+
+case "$opt" in
     --togglepause|-tp)
         song_togglepause ;;
     --skip|-s)
@@ -82,6 +94,10 @@ case "$1" in
         song_title ;;
     --songstate|-ss)
         song_state ;;
+    --help|-h)
+        help_menu ;;
     *)
-        echo "Usage: $0 [--togglepause|-tp | --skip|-s | --previous|-p | --songtitle|-st | --songstate|-ss] [PLAYER] [CUTPOINT]" ;;
+        echo "Error: '${opt:- }' Invalid option."
+        help_menu
+        exit 1 ;;
 esac

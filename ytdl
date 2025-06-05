@@ -2,37 +2,53 @@
 
 set -euo pipefail
 
-url="$1"
-type="$2"
+opt="$1"
+url="$2"
 output_folder="$HOME/Downloads"
 
 # Validate input
-if [[ -z "$url" || -z "$type" ]]; then
+if [[ -z "$opt" || -z "$url" ]]; then
     echo "Usage: get_youtube_content <url> <type: aud|vid|bth>"
-    return 1
+    exit 1
 fi
 
 # Check if yt-dlp is installed
 if ! command -v yt-dlp &>/dev/null; then
     echo "yt-dlp is not installed. Please install yt-dlp and try again."
-    return 1
+    exit 1
 fi
 
-case "$type" in
+function help_menu() {
+    cat <<EOF
+Usage: $(basename "$0") [OPTION]
+
+Options:
+  -h, --help        Show this help message
+  aud               Download audio only
+  vid               Download video only
+  bth               Download both audio and video
+EOF
+}
+
+case "$opt" in
     aud)
-        yt-dlp -x --audio-format mp3 --embed-thumbnail --add-metadata --audio-quality 0 "$url" -o "$output_folder/%(title)s.%(ext)s"
+        yt-dlp -x --audio-format mp3 --embed-thumbnail --add-metadata --audio-quality 0 "$opt" -o "$output_folder/%(title)s.%(ext)s"
         echo "Audio download completed. File saved in $output_folder."
         ;;
     vid)
-        yt-dlp -f "bestvideo" --merge-output-format mp4 --embed-thumbnail --add-metadata "$url" -o "$output_folder/%(title)s.%(ext)s"
+        yt-dlp -f "bestvideo" --merge-output-format mp4 --embed-thumbnail --add-metadata "$opt" -o "$output_folder/%(title)s.%(ext)s"
         echo "Video download completed. File saved in $output_folder."
         ;;
     bth)
-        yt-dlp -f "bestvideo+bestaudio" --merge-output-format mp4 --embed-thumbnail --add-metadata "$url" -o "$output_folder/%(title)s.%(ext)s"
+        yt-dlp -f "bestvideo+bestaudio" --merge-output-format mp4 --embed-thumbnail --add-metadata "$opt" -o "$output_folder/%(title)s.%(ext)s"
         echo "Combined audio and video download completed as an MP4. File saved in $output_folder."
         ;;
+    --help|-h)
+        help_menu
+        ;;
     *)
-        echo "Invalid type specified. Use aud, vid, or bth."
-        return 1
+        echo "Error: '${opt:- }' Invalid option."
+        help_menu
+        exit 1
         ;;
 esac

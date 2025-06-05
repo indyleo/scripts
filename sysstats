@@ -1,5 +1,9 @@
 #!/bin/env bash
 
+set -euo pipefail
+
+opt="${1:-}"
+
 ttime() {
     date +"󰥔  %I:%M %p"
 }
@@ -55,7 +59,25 @@ all_stats() {
     echo "$(disk_usage) | $(memory_usage) | $(cpu_load) | $(wifi_status) | $(tail_status) | $(ddate) | $(ttime)"
 }
 
-case "$1" in
+function help_menu() {
+    cat <<EOF
+  Usage: $(basename "$0") [OPTION]
+
+  Options:
+    -h, --help  Show this help message
+    cpu         Display CPU load
+    mem         Display memory usage
+    disk        Display disk usage
+    wifi        Display WiFi connection status
+    tail        Display tailscale connection status
+    date        Display date
+    time        Display time
+    date_time   Display date and time
+    all         Display all stats
+EOF
+}
+
+case "$opt" in
     cpu)
         cpu_load
         ;;
@@ -83,7 +105,12 @@ case "$1" in
     all)
         all_stats
         ;;
+    --help|-h)
+        help_menu
+        ;;
     *)
-        echo "Usage: $0 {cpu|disk|mem|wifi|tail|date|time|date_time|all}"
+        echo "Error: Unknown argument '${opt:- }'."
+        help_menu
+        exit 1
         ;;
 esac

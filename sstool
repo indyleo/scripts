@@ -22,7 +22,7 @@ if ! command -v xclip &> /dev/null; then
     exit 1
 fi
 
-OPTION="${1}"
+opt="${1}"
 
 SAVE_DIR="${HOME}/Pictures/Screenshots"
 mkdir -p "$SAVE_DIR"
@@ -96,7 +96,7 @@ screen() {
 
 help_menu() {
     cat <<EOF
-Usage: $0 [OPTION]
+Usage: $(basename "$0") [OPTION]
 
 Options:
   -h, --help        Show this help message
@@ -106,14 +106,14 @@ Options:
 EOF
 }
 
-case "$OPTION" in
+case "$opt" in
     --select|-s) selection ;;
     --screen|-sc) screen ;;
     --full|-f) full ;;
     --window|-w) window ;;
     --help|-h) help_menu ;;
     *)
-        echo "Error: '${OPTION:- }' Invalid option."
+        echo "Error: '${opt:- }' Invalid option."
         help_menu
         exit 1
         ;;

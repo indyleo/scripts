@@ -1,8 +1,14 @@
 #!/bin/env bash
 
+set -euo pipefail
+
+opt="${1:-}"
+dir="${2:-}"
+time="${3:-900}"
+
 function timexwalr() {
-    local WALLPAPER_DIR="$1"
-    local INTERVAL="${2:-900}"
+    local WALLPAPER_DIR="$dir"
+    local INTERVAL="$time"
 
     # Ensure directory argument
     if [[ -z "$WALLPAPER_DIR" ]]; then
@@ -39,13 +45,13 @@ function timexwalr() {
 }
 
 function xwalr() {
+    local WALLPAPER_DIR="$dir"
+
     # Ensure a directory argument is provided
-    if [[ -z "$1" ]]; then
+    if [[ -z "$WALLPAPER_DIR" ]]; then
         echo "Error: $0: No wallpaper directory provided."
         exit 1
     fi
-
-    WALLPAPER_DIR="$1"
 
     # Check if the directory exists
     if [[ ! -d "$WALLPAPER_DIR" ]]; then
@@ -54,11 +60,11 @@ function xwalr() {
     fi
 
     # Get all connected monitors
-    MONITORS=($(xrandr | grep " connected" | cut -d ' ' -f1))
+    local MONITORS=($(xrandr | grep " connected" | cut -d ' ' -f1))
 
     # For each monitor, set a random wallpaper
     for monitor in "${MONITORS[@]}"; do
-        wp=$(find "$WALLPAPER_DIR" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' \) | shuf -n 1)
+        local wp=$(find "$WALLPAPER_DIR" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' \) | shuf -n 1)
         if [[ -n "$wp" ]]; then
             xwallpaper --output "$monitor" --stretch "$wp"
             echo "Wallpaper set on $monitor to $wp"
@@ -68,16 +74,31 @@ function xwalr() {
     done
 }
 
+function help_menu() {
+    cat <<EOF
+Usage: $(basename "$0") [OPTION]
+
+Options:
+  -h, --help                       Show this help message
+  timexwalr \${dir} \${time}       Change wallpaper every INTERVAL seconds randomly, on all connected displays.
+  xwalr \${dir}                    Set a random wallpaper on all connected displays.
+EOF
+}
+
 # Main program
-case "$1" in
+case "$opt" in
     timexwalr)
-        timexwalr "$2" "$3"
+        timexwalr "${dir}" "${time}"
         ;;
     xwalr)
-        xwalr "$2"
+        xwalr "${dir}"
+        ;;
+    --help|-h)
+        help_menu
         ;;
     *)
-        echo "Usage: $0 {timexwalr|xwalr} [wallpaper_directory] [change_interval]"
+        echo "Error: '${opt:- }' Invalid option."
+        help_menu
         exit 1
         ;;
 esac

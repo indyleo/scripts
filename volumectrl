@@ -1,28 +1,29 @@
 #!/bin/env bash
 
+set -euo pipefail
+
 # Ensure pamixer is installed
 if ! command -v pamixer &> /dev/null; then
     echo "Error: pamixer is not installed."
     exit 1
 fi
 
-# Validate volume increment/decrement value
-if [[ "$2" =~ ^[0-9]+$ ]]; then
-    num="$2"
-else
-    num=5  # Default volume step if not provided or invalid
-fi
+opt="${1:-}"
+num="${2:-5}"
 
 volume_inc() {
     pamixer -i "$num"
+    pkill -RTMIN+16 slstatus
 }
 
 volume_dec() {
     pamixer -d "$num"
+    pkill -RTMIN+16 slstatus
 }
 
 volume_togglemute() {
     pamixer --toggle-mute
+    pkill -RTMIN+16 slstatus
 }
 
 volume_vol() {
@@ -45,22 +46,34 @@ volume_vol() {
     fi
 }
 
+function help_menu() {
+    cat <<EOF
+Usage: $(basename "$0") [OPTION]
+
+Options:
+    --help, -h           Show this help menu
+    --togglemute, -tm    Toggle mute
+    --inc, -i            Increase volume by \${num}
+    --dec, -d            Decrease volume by \${num}
+    --printvol, -pv      Print current volume
+EOF
+}
+
 case "$1" in
-    --togglemute)
+    --togglemute|-tm)
         volume_togglemute
-        pkill -RTMIN+16 slstatus
         ;;
-    --inc)
+    --inc|-i)
         volume_inc
-        pkill -RTMIN+16 slstatus
         ;;
-    --dec)
+    --dec|-d)
         volume_dec
-        pkill -RTMIN+16 slstatus
         ;;
-    --printvol) volume_vol ;;
+    --printvol|-pv) volume_vol ;;
+    --help|-h) help_menu ;;
     *)
-        echo "Error: Unknown argument '$1'. Use --togglemute, --inc, --dec, or --printvol."
+        echo "Error: '${opt:- }' Invalid option."
+        help_menu
         exit 1
         ;;
 esac

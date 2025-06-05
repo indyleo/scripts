@@ -1,0 +1,44 @@
+#!/bin/env bash
+
+set -euo pipefail
+
+opt="${1:-}"
+url="${2:-}"
+output_folder="$HOME/Downloads"
+
+if ! command -v spotdl &> /dev/null; then
+    echo "spotdl is not installed. Please install spotdl and try again."
+    return 1
+fi
+
+function help_menu() {
+    cat <<EOF
+Usage: $(basename "$0") [OPTION]
+
+Options:
+  -h, --help        Show this help message
+  -trk, --track     Download track
+  -alb, --album     Download album
+  -pl, --playlist   Download playlist
+EOF
+}
+
+if [[ -z "$opt" || -z "$url" ]]; then
+    help_menu
+    exit 1
+fi
+
+case "$opt" in
+    -trk|-alb|-pl|--track|--album|--playlist)
+        spotdl "$url" --output "$output_folder"
+        echo "Download completed. Files saved in $output_folder."
+        ;;
+    --help|-h)
+        help_menu
+        ;;
+    *)
+        echo "Error: '${opt:- }' Invalid option."
+        help_menu
+        exit 1
+        ;;
+esac
