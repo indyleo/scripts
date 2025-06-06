@@ -23,7 +23,7 @@ song_previous() {
 }
 
 song_title() {
-    title_status=$(playerctl status --player="$player" 2>/dev/null || echo "")
+    local title_status=$(playerctl status --player="$player" 2>/dev/null || echo "")
 
     if [[ "$title_status" == "Playing" ]]; then
         title=$(playerctl metadata title --player="$player")
@@ -48,7 +48,7 @@ song_title() {
 }
 
 song_state() {
-    song_status=$(playerctl status --player="$player" 2>/dev/null || echo "")
+    local song_status=$(playerctl status --player="$player" 2>/dev/null || echo "")
 
     case "$song_status" in
         Playing)
