@@ -10,7 +10,7 @@ active_players=$(playerctl -l 2>/dev/null || true)
 
 opt="${1:-}"
 cutpoint="${2:-25}"
-cmd="pkill -RTMIN+17 slstatus"
+cmd="pkill -RTMIN+13 dwmblocks"
 
 # Select the most preferred available player
 function sel_player() {

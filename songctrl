@@ -5,25 +5,25 @@ set -euo pipefail
 opt="${1:-}"
 player="${2:-Supersonic}"
 cutpoint="${3:-0}"
-cmd="pkill -RTMIN+13 slstatus"
+cmd="pkill -RTMIN+14 dwmblocks"
 
 song_togglepause() {
     playerctl play-pause --player="$player"
-    [[ -n "$cmd" ]] && $cmd
+    $cmd
 }
 
 song_skip() {
     playerctl next --player="$player"
-    [[ -n "$cmd" ]] && $cmd
+    $cmd
 }
 
 song_previous() {
     playerctl previous --player="$player"
-    [[ -n "$cmd" ]] && $cmd
+    $cmd
 }
 
 song_title() {
-    local title_status=$(playerctl status --player="$player" 2>/dev/null || echo "")
+    title_status=$(playerctl status --player="$player" 2>/dev/null || echo "")
 
     if [[ "$title_status" == "Playing" ]]; then
         title=$(playerctl metadata title --player="$player")
@@ -44,12 +44,11 @@ song_title() {
     else
         echo "Not Playing/Paused"
     fi
-
-    [[ -n "$cmd" ]] && $cmd
+    $cmd
 }
 
 song_state() {
-    local song_status=$(playerctl status --player="$player" 2>/dev/null || echo "")
+    song_status=$(playerctl status --player="$player" 2>/dev/null || echo "")
 
     case "$song_status" in
         Playing)
@@ -69,8 +68,12 @@ song_state() {
             fi
             ;;
     esac
+    $cmd
+}
 
-    [[ -n "$cmd" ]] && $cmd
+song_state_title() {
+    echo "$(song_state)$(song_title)"
+    $cmd
 }
 
 help_menu() {
@@ -84,6 +87,7 @@ Options:
   --previous, -p      Go to previous track
   --songtitle, -st    Show current song title (with optional cutpoint)
   --songstate, -ss    Show song state symbol
+  --songstatetitle, -sst Show song state symbol and title
 EOF
 }
 
@@ -98,6 +102,8 @@ case "$opt" in
         song_title ;;
     --songstate|-ss)
         song_state ;;
+    --songstatetitle|-sst)
+        song_state_title ;;
     --help|-h)
         help_menu ;;
     *)

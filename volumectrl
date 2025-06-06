@@ -10,20 +10,21 @@ fi
 
 opt="${1:-}"
 num="${2:-5}"
+cmd="pkill -RTMIN+16 dwmblocks"
 
 volume_inc() {
     pamixer -i "$num"
-    pkill -RTMIN+16 slstatus
+    $cmd
 }
 
 volume_dec() {
     pamixer -d "$num"
-    pkill -RTMIN+16 slstatus
+    $cmd
 }
 
 volume_togglemute() {
     pamixer --toggle-mute
-    pkill -RTMIN+16 slstatus
+    $cmd
 }
 
 volume_vol() {

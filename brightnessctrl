@@ -10,11 +10,12 @@ fi
 
 opt="${1:-}"
 num="${2:-5}"
+cmd="pkill -RTMIN+15 dwmblocks"
 
 brightness_inc() {
     if [[ "${num}" =~ ^[0-9]+$ ]]; then
         brightnessctl set "${num}%+"
-        pkill -RTMIN+15 slstatus
+        $cmd
     else
         exit 1
     fi
@@ -23,7 +24,7 @@ brightness_inc() {
 brightness_dec() {
     if [[ "${num}" =~ ^[0-9]+$ ]]; then
         brightnessctl set "${num}%-"
-        pkill -RTMIN+15 slstatus
+        $cmd
     else
         exit 1
     fi

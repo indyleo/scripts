@@ -1,5 +1,7 @@
 #!/bin/env bash
 
+cmd="pkill -RTMIN+12 dwmblocks"
+
 record() {
     # Create output directory
     now="$(date '+%a__%b%d__%H_%M_%S')"
@@ -31,7 +33,7 @@ record() {
     # Metadata
     echo "$now" > /tmp/recording_timestamp
     echo "$outputloc" > /tmp/recording_outputdir
-    echo "󰑊 Recording" > /tmp/recordingicon && pkill -RTMIN+14 slstatus
+    echo "󰑊 Recording" > /tmp/recordingicon && $cmd
 
     notify-send "Recording started"
 }
@@ -55,7 +57,7 @@ end() {
         -map 2:a -metadata:s:a:2 title="System Audio" -disposition:a:2 0 \
         -c:v copy -c:a aac -shortest "${outputloc}/final.mkv"
 
-    pkill -RTMIN+14 slstatus
+    $cmd
 
     rm -fv /tmp/recordingicon /tmp/*pid /tmp/recording_timestamp /tmp/recording_outputdir
 
