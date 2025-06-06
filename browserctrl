@@ -6,28 +6,32 @@ set -euo pipefail
 players=("chromium" "firefox" "brave")
 
 # Get the list of active playerctl names
-active_players=$(playerctl -l 2>/dev/null)
+active_players=$(playerctl -l 2>/dev/null || true)
 
 opt="${1:-}"
 cutpoint="${2:-25}"
 cmd="pkill -RTMIN+17 slstatus"
 
+# Select the most preferred available player
 function sel_player() {
     for preferred in "${players[@]}"; do
-        match=$(echo "$active_players" | grep -i "^$preferred")
-        if [[ -n $match ]]; then
+        match=$(echo "$active_players" | grep -i "^$preferred" | head -n 1)
+        if [[ -n "$match" ]]; then
             echo "$match"
-            exit 0
+            return 0
         fi
     done
+    return 1
 }
 
-match=$(sel_player)
-if [[ -z $match ]]; then
+# Cache the selected player
+match=$(sel_player || true)
+if [[ -z "${match:-}" ]]; then
     echo "No player found"
-    exit 1
+    return 1
 fi
 
+# Get the first running browser from the preferred list
 browsers=("qutebrowser" "firefox" "brave" "chromium")
 function get_running_browser() {
     for browser in "${browsers[@]}"; do
@@ -36,87 +40,73 @@ function get_running_browser() {
             return 0
         fi
     done
-    exit 1  # none found
+    return 1
 }
-active_browser=$(get_running_browser)
-if [[ -z $active_browser ]]; then
+active_browser=$(get_running_browser || true)
+if [[ -z "${active_browser:-}" ]]; then
     echo "No browser found"
     exit 1
 fi
 
 function browser_togglepause() {
     playerctl play-pause --player="$match"
-    eval "$cmd"
+    $cmd
 }
 
 function browser_skip() {
     playerctl next --player="$match"
-    eval "$cmd"
+    $cmd
 }
 
 function browser_previous() {
     playerctl previous --player="$match"
-    eval "$cmd"
+    $cmd
 }
 
 function browser_title() {
-    status=$(playerctl status --player="$match" 2>/dev/null)
+    status=$(playerctl status --player="$match" 2>/dev/null || true)
 
-    if [ "$status" = "Playing" ]; then
-        title=$(playerctl metadata title --player="$match" 2>/dev/null)
+    if [[ "$status" == "Playing" ]]; then
+        title=$(playerctl metadata title --player="$match" 2>/dev/null || true)
 
-        if [[ -n "$cutpoint" ]]; then
-            if (( ${#title} > cutpoint )); then
-                # Cut at nearest space before cutpoint
-                truncated=$(echo "$title" | cut -c 1-"$cutpoint")
-                clean_cut=$(echo "$truncated" | awk '{ for (i=1;i<=NF;i++) { if (length(s $i) + 1 <= '$cutpoint') s = s $i " "; else break } print s }' | sed 's/ *$//')
-                echo "$clean_cut ..."
-            else
-                echo "$title"
-            fi
+        if [[ -n "$cutpoint" && ${#title} -gt "$cutpoint" ]]; then
+            # Cut at nearest space before cutpoint
+            truncated=$(echo "$title" | cut -c 1-"$cutpoint")
+            clean_cut=$(echo "$truncated" | awk -v cp="$cutpoint" '{ for (i=1;i<=NF;i++) { if (length(s $i) + 1 <= cp) s = s $i " "; else break } print s }' | sed 's/ *$//')
+            echo "$clean_cut ..."
         else
             echo "$title"
         fi
     else
         echo "Not Playing/Paused"
     fi
-    eval "$cmd"
+    $cmd
 }
 
 function browser_state() {
-    match=$(sel_player)
-
-    # Icon mapping
+    # Icon mapping based on active browser
     case "$active_browser" in
-        qutebrowser) icon=" " ;;  # Web icon or generic globe
+        qutebrowser) icon=" " ;;
         firefox)     icon=" " ;;
         brave)       icon=" " ;;
         chromium)    icon=" " ;;
-        *)           icon="󰖟 " ;;  # Fallback
+        *)           icon="󰖟 " ;;
     esac
 
-    if [[ -z $match ]]; then
-        echo "$icon  "  # Browser running, but no media session
+    if [[ -z "$match" ]]; then
+        echo "$icon  "
         return
     fi
 
-    # Query media playback state
-    status=$(playerctl status --player="$match" 2>/dev/null)
+    status=$(playerctl status --player="$match" 2>/dev/null || true)
     case "$status" in
-        Playing)
-            echo "$icon "
-            ;;
-        Paused)
-            echo "$icon "
-            ;;
-        Stopped)
-            echo "$icon "
-            ;;
-        *)
-            echo "$icon "
-            ;;
+        Playing) echo "$icon " ;;
+        Paused)  echo "$icon " ;;
+        Stopped) echo "$icon " ;;
+        *)       echo "$icon " ;;
     esac
 }
+
 
 function help_menu() {
     cat <<EOF
@@ -130,9 +120,9 @@ Options:
     --browsertitle, -bt        Show browser title
     --browserstate, -bs        Show browser state
 EOF
-
 }
 
+# Command dispatch
 case "$opt" in
     --togglepause|-tp)
         browser_togglepause ;;
@@ -142,12 +132,12 @@ case "$opt" in
         browser_previous ;;
     --browsertitle|-bt)
         browser_title ;;
-    --songstate|-bs)
+    --browserstate|-bs)
         browser_state ;;
     --help|-h)
         help_menu ;;
     *)
-        echo "Error: '${opt:- }' Invalid option."
+        echo "Error: '${opt:- }' is an invalid option."
         help_menu
         exit 1 ;;
 esac

@@ -7,48 +7,53 @@ player="${2:-Supersonic}"
 cutpoint="${3:-0}"
 cmd="pkill -RTMIN+13 slstatus"
 
-song_togglepause(){
+song_togglepause() {
     playerctl play-pause --player="$player"
-    eval "$cmd"
+    [[ -n "$cmd" ]] && $cmd
 }
 
-song_skip(){
+song_skip() {
     playerctl next --player="$player"
-    eval "$cmd"
+    [[ -n "$cmd" ]] && $cmd
 }
 
-song_previous(){
+song_previous() {
     playerctl previous --player="$player"
-    eval "$cmd"
+    [[ -n "$cmd" ]] && $cmd
 }
 
-song_title(){
-    status=$(playerctl status --player="$player" 2>/dev/null)
+song_title() {
+    local song_status
+    song_status=$(playerctl status --player="$player" 2>/dev/null || echo "")
 
-    if [ "$status" = "Playing" ]; then
+    if [[ "$song_status" == "Playing" ]]; then
         title=$(playerctl metadata title --player="$player")
 
-        if [[ -n "$cutpoint" ]]; then
-            if (( ${#title} > cutpoint )); then
-                # Cut at nearest space before cutpoint
-                truncated=$(echo "$title" | cut -c 1-"$cutpoint")
-                clean_cut=$(echo "$truncated" | awk '{ for (i=1;i<=NF;i++) { if (length(s $i) + 1 <= '$cutpoint') s = s $i " "; else break } print s }' | sed 's/ *$//')
-                echo "$clean_cut ..."
-            else
-                echo "$title"
-            fi
+        if (( cutpoint > 0 )) && (( ${#title} > cutpoint )); then
+            # Cut at nearest word before cutpoint
+            truncated="${title:0:$cutpoint}"
+            clean_cut=$(echo "$truncated" | awk -v max="$cutpoint" '{
+                s = ""; for (i = 1; i <= NF; i++) {
+                    if (length(s $i) + 1 <= max) s = s $i " ";
+                    else break;
+                } sub(/[ \t]+$/, "", s); print s
+            }')
+            echo "$clean_cut ..."
         else
             echo "$title"
         fi
     else
         echo "Not Playing/Paused"
     fi
-    eval "$cmd"
+
+    [[ -n "$cmd" ]] && $cmd
 }
 
-song_state(){
-    status=$(playerctl status --player="$player" 2>/dev/null)
-    case "$status" in
+song_state() {
+    local song_status
+    song_status=$(playerctl status --player="$player" 2>/dev/null || echo "")
+
+    case "$song_status" in
         Playing)
             echo " "
             ;;
@@ -59,27 +64,28 @@ song_state(){
             echo " "
             ;;
         *)
-            if ! flatpak ps | awk '{print $3}' | grep -Fxq "io.github.dweymouth.supersonic"; then
-                echo " "
+            if flatpak ps 2>/dev/null | awk '{print $3}' | grep -Fxq "io.github.dweymouth.supersonic"; then
+                echo " "
             else
-                echo "  "
+                echo " "
             fi
             ;;
     esac
-    eval "$cmd"
+
+    [[ -n "$cmd" ]] && $cmd
 }
 
-function help_menu() {
+help_menu() {
     cat <<EOF
-Usage: $(basename "$0") [OPTION]
+Usage: $(basename "$0") [OPTION] [PLAYER] [CUTPOINT]
 
 Options:
-    --help, -h              Show this help message
-    --togglepause, -tp      Toggle pause
-    --skip, -s              Skip song
-    --previous, -p          Previous song
-    --songtitle, -st        Show song title
-    --songstate, -ss        Show song state
+  --help, -h          Show this help message
+  --togglepause, -tp  Toggle play/pause
+  --skip, -s          Skip to next track
+  --previous, -p      Go to previous track
+  --songtitle, -st    Show current song title (with optional cutpoint)
+  --songstate, -ss    Show song state symbol
 EOF
 }
 
@@ -97,7 +103,7 @@ case "$opt" in
     --help|-h)
         help_menu ;;
     *)
-        echo "Error: '${opt:- }' Invalid option."
+        echo "Error: '${opt:- }' is an invalid option."
         help_menu
         exit 1 ;;
 esac
