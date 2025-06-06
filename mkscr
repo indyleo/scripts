@@ -29,29 +29,6 @@ else
 
 set -euo pipefail
 
-opt="\${1:-}"
-
-help_menu() {
-    cat << EOM
-
-Usage: \$(basename "\$0") [OPTION]
-
-Options:
-  -h, --help        Show this help message
-
-EOM
-}
-
-case "\$opt" in
-    -h|--help)
-        help_menu
-        ;;
-    *)
-        echo "Error: '\${opt:- }' Invalid option."
-        help_menu
-        exit 1
-        ;;
-esac
 EOF
     # Remove all backslashes from the generated file
     sed -i 's/\\//g' "$file_path"
