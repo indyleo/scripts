@@ -1,5 +1,5 @@
 #!/bin/env bash
-emoji=$(dmenu-emoji | dmenu -l 10 -p "What Emoji? "| awk '{print $1}' | tr -d '\n' )
+emoji=$(emoji_list | dmenu -l 10 -p "What Emoji? "| awk '{print $1}' | tr -d '\n' )
 if [[ -n "$emoji" ]]; then
     echo -n "$emoji" | xclip -selection clipboard
     notify-send "Copied to clipboard!" "Emoji: $emoji"
