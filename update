@@ -4,47 +4,47 @@ set -euo pipefail
 
 # === Functions ===
 
-update_system() {
+function update_system() {
     echo -e "\n🔄 Updating APT packages..."
     sudo apt-get update && sudo apt-get upgrade -y && sudo apt-get autoremove -y
 }
 
-update_flatpak() {
+function update_flatpak() {
     if command -v flatpak &>/dev/null; then
         echo -e "\n📦 Updating Flatpak..."
         flatpak update -y
     fi
 }
 
-update_rust() {
+function update_rust() {
     if command -v rustup &>/dev/null; then
         echo -e "\n🦀 Updating Rust..."
         rustup update
     fi
 }
 
-update_bob() {
+function update_bob() {
     if command -v bob &>/dev/null; then
         echo -e "\n🎛️ Updating Bob..."
         bob update
     fi
 }
 
-update_pipx() {
+function update_pipx() {
     if command -v pipx &>/dev/null; then
         echo -e "\n🐍 Updating pipx..."
         pipx upgrade-all
     fi
 }
 
-update_neovim() {
+function update_neovim() {
     if command -v nvim &>/dev/null; then
         echo -e "\n💡 Updating Neovim plugins..."
         nvim --headless "+Lazy! sync" +qa
     fi
 }
 
-update_tmux_plugins() {
+function update_tmux_plugins() {
     TPM="$HOME/.tmux/plugins/tpm/bin/update_plugins"
     if [ -x "$TPM" ]; then
         echo -e "\n🔧 Updating tmux plugins..."
@@ -54,7 +54,7 @@ update_tmux_plugins() {
     fi
 }
 
-reload_tmux_config() {
+function reload_tmux_config() {
     if [ -n "$TMUX" ]; then
         tmux source-file "${XDG_CONFIG_HOME:-$HOME/.config}/tmux/tmux.conf"
         echo "♻️ Reloaded tmux config"
@@ -65,7 +65,7 @@ reload_tmux_config() {
 
 # === Menu ===
 
-main_menu() {
+function main_menu() {
     echo -e "🔄 System Update\n📦 Flatpak Update\n🦀 Rustup Update\n🎛️ Bob Update\n🐍 pipx Update\n💡 Neovim Plugin Update\n🔧 Tmux Plugin Update\n♻️ Reload Tmux Config\n✅ Run All\n❌ Exit" | fzf --prompt="Dashboard > "
 }
 

@@ -1,5 +1,5 @@
 #!/bin/env bash
-sw() {
+function sw() {
     local BEGIN=$(date +%s)
     echo Starting Stopwatch...
 
@@ -16,7 +16,7 @@ sw() {
     done
 }
 
-acsw() {
+function acsw() {
     now=$(date +%s)sec
     while true; do
         printf "%s\r" $(TZ=UTC date --date now-$now +%H:%M:%S.%N)

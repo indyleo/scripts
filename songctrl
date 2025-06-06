@@ -7,23 +7,24 @@ player="${2:-Supersonic}"
 cutpoint="${3:-0}"
 cmd="pkill -RTMIN+14 dwmblocks"
 
-song_togglepause() {
+function song_togglepause() {
     playerctl play-pause --player="$player"
     $cmd
 }
 
-song_skip() {
+function song_skip() {
     playerctl next --player="$player"
     $cmd
 }
 
-song_previous() {
+function song_previous() {
     playerctl previous --player="$player"
     $cmd
 }
 
-song_title() {
-    local title_status=$(playerctl status --player="$player" 2>/dev/null || echo "")
+function song_title() {
+    local title_status
+    title_status=$(playerctl status --player="$player" 2>/dev/null || echo "")
 
     if [[ "$title_status" == "Playing" ]]; then
         title=$(playerctl metadata title --player="$player")
@@ -47,8 +48,9 @@ song_title() {
     $cmd
 }
 
-song_state() {
-    local song_status=$(playerctl status --player="$player" 2>/dev/null || echo "")
+function song_state() {
+    local song_status
+    song_status=$(playerctl status --player="$player" 2>/dev/null || echo "")
 
     case "$song_status" in
         Playing)
@@ -71,12 +73,12 @@ song_state() {
     $cmd
 }
 
-song_state_title() {
+function song_state_title() {
     echo "$(song_state)$(song_title)"
     $cmd
 }
 
-help_menu() {
+function help_menu() {
     cat <<EOF
 Usage: $(basename "$0") [OPTION] [PLAYER] [CUTPOINT]
 

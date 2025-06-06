@@ -56,7 +56,7 @@ fi
 
 
 # === Load or refresh cache ===
-cache_expired() {
+function cache_expired() {
     [[ ! -f "$1" ]] || [[ $(($(date +%s) - $(stat -c %Y "$1"))) -gt $CACHE_TIME ]]
 }
 

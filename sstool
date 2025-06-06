@@ -30,21 +30,21 @@ mkdir -p "$SAVE_DIR"
 timestamp=$(date +"%Y-%m-%d_%H-%M-%S")
 filename="${SAVE_DIR}/${timestamp}.png"
 
-selection() {
+function selection() {
     notify-send "Select an area to capture..."
     import "$filename"
     notify-send "Saved to:" "$filename"
     xclip -selection clipboard -t image/png "$filename"
 }
 
-full() {
+function full() {
     notify-send "Capturing full screen..."
     import -window root "$filename"
     notify-send "Saved to:" "$filename"
     xclip -selection clipboard -t image/png "$filename"
 }
 
-window() {
+function window() {
     notify-send "Capturing focused window..."
     win_id=$(xdotool getactivewindow)
     if [ -z "$win_id" ]; then
@@ -56,7 +56,7 @@ window() {
     xclip -selection clipboard -t image/png "$filename"
 }
 
-screen() {
+function screen() {
     notify-send "Capturing active screen containing the focused window..."
 
     win_id=$(xdotool getactivewindow)
@@ -94,7 +94,7 @@ screen() {
     xclip -selection clipboard -t image/png "$filename"
 }
 
-help_menu() {
+function help_menu() {
     cat <<EOF
 Usage: $(basename "$0") [OPTION]
 

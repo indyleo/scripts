@@ -4,37 +4,37 @@ set -euo pipefail
 
 opt="${1:-}"
 
-ttime() {
+function ttime() {
     date +"󰥔  %I:%M %p"
 }
 
-ddate() {
+function ddate() {
     date +"  %A %B %d %Y"
 }
 
-date_time() {
+function date_time() {
     date +"󰥔  %I:%M %p |   %A %B %d %Y"
 }
 
-cpu_load() {
+function cpu_load() {
     load="$(awk '{print $1}' /proc/loadavg)"
     echo "  $load%"
 }
 
-disk_usage() {
+function disk_usage() {
     disk_info=$(df -h / | tail -1)
     total=$(echo $disk_info | awk '{print $2}')
     used=$(echo $disk_info | awk '{print $3}')
     echo "󰋊 $used/$total"
 }
 
-memory_usage() {
+function memory_usage() {
     used="$(free -h | awk 'NR==2 {print $3}')"
     total="$(free -h | awk 'NR==2 {print $2}')"
     echo "󰍛 $used/$total"
 }
 
-wifi_status() {
+function wifi_status() {
     current=$(iwgetid -r)
     if [[ -z "$current" ]]; then
         echo "󰖪 Disconnected"
@@ -43,7 +43,7 @@ wifi_status() {
     fi
 }
 
-tail_status() {
+function tail_status() {
     if tailscale status &>/dev/null; then
         if tailscale status | grep -q "Logged out"; then
             echo "󰈂 Not connected"
@@ -55,7 +55,7 @@ tail_status() {
     fi
 }
 
-all_stats() {
+function all_stats() {
     echo "$(disk_usage) | $(memory_usage) | $(cpu_load) | $(wifi_status) | $(tail_status) | $(ddate) | $(ttime)"
 }
 

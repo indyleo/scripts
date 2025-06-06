@@ -12,7 +12,7 @@ opt="${1:-}"
 num="${2:-5}"
 cmd="pkill -RTMIN+15 dwmblocks"
 
-brightness_inc() {
+function brightness_inc() {
     if [[ "${num}" =~ ^[0-9]+$ ]]; then
         brightnessctl set "${num}%+"
         $cmd
@@ -21,7 +21,7 @@ brightness_inc() {
     fi
 }
 
-brightness_dec() {
+function brightness_dec() {
     if [[ "${num}" =~ ^[0-9]+$ ]]; then
         brightnessctl set "${num}%-"
         $cmd
@@ -31,7 +31,7 @@ brightness_dec() {
 
 }
 
-brightness_get() {
+function brightness_get() {
     line="$(brightnessctl | grep "%")"
     brightness_raw=$(echo "$line" | grep -oP '\(\K[0-9]+%')
     brightness=${brightness_raw%\%}

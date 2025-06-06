@@ -12,22 +12,22 @@ opt="${1:-}"
 num="${2:-5}"
 cmd="pkill -RTMIN+16 dwmblocks"
 
-volume_inc() {
+function volume_inc() {
     pamixer -i "$num"
     $cmd
 }
 
-volume_dec() {
+function volume_dec() {
     pamixer -d "$num"
     $cmd
 }
 
-volume_togglemute() {
+function volume_togglemute() {
     pamixer --toggle-mute
     $cmd
 }
 
-volume_vol() {
+function volume_vol() {
     vol="$(pamixer --get-volume)"
     muted=$(pamixer --get-mute)
     if [[ "$vol" -eq 100 && "$muted" == "false" ]]; then

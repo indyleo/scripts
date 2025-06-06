@@ -2,7 +2,7 @@
 
 cmd="pkill -RTMIN+12 dwmblocks"
 
-record() {
+function record() {
     # Create output directory
     now="$(date '+%a__%b%d__%H_%M_%S')"
     outputloc="$HOME/Videos/video_${now}"
@@ -38,7 +38,7 @@ record() {
     notify-send "Recording started"
 }
 
-end() {
+function end() {
     kill -15 "$(cat /tmp/recpid)" "$(cat /tmp/audpid)" "$(cat /tmp/deskaudpid)"
     wait
 
