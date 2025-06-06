@@ -108,7 +108,7 @@ function browser_state() {
 }
 
 function browser_state_title() {
-    echo "$(browser_state)$(browser_title)"
+    echo "$(browser_state) $(browser_title)"
     $cmd
 }
 
