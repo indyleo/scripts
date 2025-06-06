@@ -23,10 +23,9 @@ song_previous() {
 }
 
 song_title() {
-    local song_status
-    song_status=$(playerctl status --player="$player" 2>/dev/null || echo "")
+    local title_status=$(playerctl status --player="$player" 2>/dev/null || echo "")
 
-    if [[ "$song_status" == "Playing" ]]; then
+    if [[ "$title_status" == "Playing" ]]; then
         title=$(playerctl metadata title --player="$player")
 
         if (( cutpoint > 0 )) && (( ${#title} > cutpoint )); then
@@ -50,8 +49,7 @@ song_title() {
 }
 
 song_state() {
-    local song_status
-    song_status=$(playerctl status --player="$player" 2>/dev/null || echo "")
+    local song_status=$(playerctl status --player="$player" 2>/dev/null || echo "")
 
     case "$song_status" in
         Playing)
