@@ -1,6 +1,2 @@
 #!/bin/env bash
-if [[ $WM = "dwm" ]]; then
-    pkill -u "$USER"
-else
-    notify-send "This ${WM} is not dwm"
-fi
+pkill -u "$USER"
