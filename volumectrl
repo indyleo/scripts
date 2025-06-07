@@ -10,7 +10,7 @@ fi
 
 opt="${1:-}"
 num="${2:-5}"
-cmd="pkill -RTMIN+16 dwmblocks"
+cmd="restatus 16 dwmblocks"
 
 function volume_inc() {
     pamixer -i "$num"

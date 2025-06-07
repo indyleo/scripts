@@ -5,7 +5,7 @@ set -euo pipefail
 opt="${1:-}"
 player="${2:-Supersonic}"
 cutpoint="${3:-0}"
-cmd="pkill -RTMIN+14 dwmblocks"
+cmd="restatus 14 dwmblocks"
 
 function song_togglepause() {
     playerctl play-pause --player="$player"

@@ -1,0 +1,14 @@
+#!/bin/env bash
+
+set -euo pipefail
+
+signal="$1"
+
+if [[ -z "$signal" ]]; then
+    echo "Usage: $0 <signal>"
+    exit 1
+fi
+
+status="${2:-dwmblocks}"
+
+pkill -RTMIN+"${signal}" ${status}
