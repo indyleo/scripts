@@ -23,14 +23,12 @@ function song_previous() {
 }
 
 function song_title() {
-    local title_status
+    local title_status title
     title_status=$(playerctl status --player="$player" 2>/dev/null || echo "")
 
     if [[ "$title_status" == "Playing" ]]; then
         title=$(playerctl metadata title --player="$player")
-
         if (( cutpoint > 0 )) && (( ${#title} > cutpoint )); then
-            # Cut at nearest word before cutpoint
             truncated="${title:0:$cutpoint}"
             clean_cut=$(echo "$truncated" | awk -v max="$cutpoint" '{
                 s = ""; for (i = 1; i <= NF; i++) {
@@ -45,7 +43,6 @@ function song_title() {
     else
         echo "Not Playing/Paused"
     fi
-    $cmd
 }
 
 function song_state() {
@@ -70,12 +67,13 @@ function song_state() {
             fi
             ;;
     esac
-    $cmd
 }
 
 function song_state_title() {
-    echo "$(song_state)$(song_title)"
-    $cmd
+    local state title
+    state=$(song_state)
+    title=$(song_title)
+    echo "$state$title"
 }
 
 function help_menu() {

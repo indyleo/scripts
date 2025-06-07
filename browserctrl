@@ -70,7 +70,6 @@ function browser_title() {
         title=$(playerctl metadata title --player="$match" 2>/dev/null || true)
 
         if [[ -n "$cutpoint" && ${#title} -gt "$cutpoint" ]]; then
-            # Cut at nearest space before cutpoint
             truncated=$(echo "$title" | cut -c 1-"$cutpoint")
             clean_cut=$(echo "$truncated" | awk -v cp="$cutpoint" '{ for (i=1;i<=NF;i++) { if (length(s $i) + 1 <= cp) s = s $i " "; else break } print s }' | sed 's/ *$//')
             echo "$clean_cut ..."
@@ -80,11 +79,9 @@ function browser_title() {
     else
         echo "Not Playing/Paused"
     fi
-    $cmd
 }
 
 function browser_state() {
-    # Icon mapping based on active browser
     case "$active_browser" in
         qutebrowser) icon=" " ;;
         firefox)     icon=" " ;;
@@ -108,8 +105,10 @@ function browser_state() {
 }
 
 function browser_state_title() {
-    echo "$(browser_state) $(browser_title)"
-    $cmd
+    local state title
+    state=$(browser_state)
+    title=$(browser_title)
+    echo "$state $title"
 }
 
 function help_menu() {
