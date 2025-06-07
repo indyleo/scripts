@@ -1,7 +1,6 @@
 #!/bin/env bash
-wm="$(ps -e -o comm= | grep -E 'dwm|bspwm|xmonad|awesome|kwin' | grep -v dwmblocks | head -n 1 | xargs)"
-if [[ $wm = "dwm" ]]; then
+if [[ $WM = "dwm" ]]; then
     pkill -u "$USER"
 else
-    notify-send "This ${wm} is not dwm"
+    notify-send "This ${WM} is not dwm"
 fi
