@@ -11,7 +11,7 @@ if [[ "$wm" == "dwm" ]]; then
 fi
 
 # Restart
-if [[ $wm = "dwm" ]]; then
+if [[ "$wm" == "dwm" ]]; then
     pkill dwm
     if [[ "$status" == "dwmblocks" ]]; then
         ${status} & disown
