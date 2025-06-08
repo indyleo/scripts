@@ -1,7 +1,24 @@
 #!/bin/env bash
-if [[ $WM = "dwm" ]]; then
+
+# Get current window manager and statusbar
+wm="$(ps -e -o comm= | grep -E 'dwm|bspwm|xmonad|awesome|kwin' | grep -v dwmblocks | head -n 1 | xargs)"
+if [[ "$wm" == "dwm" ]]; then
+    if pgrep -x dwmblocks >/dev/null; then
+        status="dwmblocks"
+    elif pgrep -x slstatus >/dev/null; then
+        status="slstatus"
+    fi
+fi
+
+# Restart
+if [[ $wm = "dwm" ]]; then
     pkill dwm
-    dwmblocks & disown
+    if [[ "$status" == "dwmblocks" ]]; then
+        ${status} & disown
+    elif [[ "$status" == "slstatus" ]]; then
+        pkill "${status}"
+        ${status} & disown
+    fi
 else
-    notify-send "This ${WM} is not dwm"
+    notify-send "This ${wm} is not dwm"
 fi
