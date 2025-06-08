@@ -1,0 +1,11 @@
+#!/bin/env bash
+
+# Utils for scripts that need this info
+
+WM="$(ps -e -o comm= | grep -E 'dwm|bspwm|xmonad|awesome|kwin' | grep -v dwmblocks | head -n 1 | xargs)"
+
+if pgrep -x dwmblocks >/dev/null; then
+    STATUSBAR="dwmblocks"
+elif pgrep -x slstatus >/dev/null; then
+    STATUSBAR="slstatus"
+fi

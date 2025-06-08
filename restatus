@@ -2,13 +2,16 @@
 
 set -euo pipefail
 
+# Source utils
+[[ -f "${XDG_SCRIPTS_HOME:-$HOME/.local/scripts}/utils" ]] && source "${XDG_SCRIPTS_HOME:-$HOME/.local/scripts}/utils"
+
 signal="$1"
 
 if [[ -z "$signal" ]]; then
-    echo "Usage: $0 <signal>"
+    echo "Usage: $(basename "$0") <signal>"
     exit 1
 fi
 
-status="${2:-dwmblocks}"
+status="${2:-${STATUSBAR:-dwmblocks}}"
 
-pkill -RTMIN+"${signal}" ${status}
+pkill -RTMIN+"${signal}" "${status}"

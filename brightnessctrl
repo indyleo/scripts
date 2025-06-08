@@ -2,6 +2,9 @@
 
 set -euo pipefail
 
+# Source utils
+[[ -f "${XDG_SCRIPTS_HOME:-$HOME/.local/scripts}/utils" ]] && source "${XDG_SCRIPTS_HOME:-$HOME/.local/scripts}/utils"
+
 # Ensure brightnessctl is installed
 if ! command -v brightnessctl &>/dev/null; then
     echo "Error: brightnessctl not found. Please install it first."
@@ -10,7 +13,8 @@ fi
 
 opt="${1:-}"
 num="${2:-5}"
-cmd="restatus 15 dwmblocks"
+status="${STATUSBAR:-dwmblocks}"
+cmd="restatus 15 $status"
 
 function brightness_inc() {
     if [[ "${num}" =~ ^[0-9]+$ ]]; then

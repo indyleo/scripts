@@ -2,6 +2,9 @@
 
 set -euo pipefail
 
+# Source utils
+[[ -f "${XDG_SCRIPTS_HOME:-$HOME/.local/scripts}/utils" ]] && source "${XDG_SCRIPTS_HOME:-$HOME/.local/scripts}/utils"
+
 # Preferred players in order
 players=("chromium" "firefox" "brave")
 
@@ -10,7 +13,8 @@ active_players=$(playerctl -l 2>/dev/null || true)
 
 opt="${1:-}"
 cutpoint="${2:-25}"
-cmd="restatus 13 dwmblocks"
+status="${STATUSBAR:-dwmblocks}"
+cmd="restatus 13 $status"
 
 # Select the most preferred available player
 function sel_player() {
