@@ -1,6 +1,7 @@
 #!/bin/env bash
 if [[ $WM = "dwm" ]]; then
     pkill dwm
+    dwmblocks & disown
 else
     notify-send "This ${WM} is not dwm"
 fi
