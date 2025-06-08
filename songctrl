@@ -14,8 +14,11 @@ fi
 opt="${1:-}"
 player="${2:-Supersonic}"
 cutpoint="${3:-0}"
-status="${STATUSBAR:-dwmblocks}"
-cmd="restatus 14 $status"
+statusbar="${STATUSBAR:-dwmblocks}"
+cmd="restatus 14 $statusbar"
+
+# Update script when title changes
+pidof -x superloop >/dev/null 2>&1 || superloop "$player" >/dev/null 2>&1 &
 
 function song_togglepause() {
     playerctl play-pause --player="$player"
