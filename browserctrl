@@ -59,9 +59,6 @@ if [[ -z "${active_browser:-}" ]]; then
     exit 1
 fi
 
-# Update script when title changes
-pidof -x browserloop >/dev/null 2>&1 || browserloop "$match" >/dev/null 2>&1 &
-
 function browser_togglepause() {
     playerctl play-pause --player="$match"
     $cmd

@@ -18,9 +18,6 @@ cutpoint="${3:-20}"
 statusbar="${STATUSBAR:-dwmblocks}"
 cmd="restatus 14 $statusbar"
 
-# # Update script when title changes
-pidof -x superloop >/dev/null 2>&1 || superloop "$player" >/dev/null 2>&1 &
-
 function song_togglepause() {
     playerctl play-pause --player="$player"
     $cmd
