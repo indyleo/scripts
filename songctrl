@@ -15,22 +15,20 @@ fi
 opt="${1:-}"
 player="${2:-Supersonic}"
 cutpoint="${3:-20}"
-statusbar="${STATUSBAR:-dwmblocks}"
-cmd="restatus 14 $statusbar"
+
+# Update script when title changes
+pidof -x superloop >/dev/null 2>&1 || superloop "$player" >/dev/null 2>&1 &
 
 function song_togglepause() {
     playerctl play-pause --player="$player"
-    $cmd
 }
 
 function song_skip() {
     playerctl next --player="$player"
-    $cmd
 }
 
 function song_previous() {
     playerctl previous --player="$player"
-    $cmd
 }
 
 function song_title() {

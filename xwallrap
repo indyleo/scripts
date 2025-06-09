@@ -1,7 +1,0 @@
-#!/bin/env bash
-
-set -euo pipefail
-
-THEME="$(cat "${XDG_CACHE_HOME:-$HOME/.cache}/theme")"
-
-xwall xwalr "$HOME"/Pictures/Wallpapers/"$THEME"

@@ -20,8 +20,6 @@ active_players=$(playerctl -l 2>/dev/null || true)
 
 opt="${1:-}"
 cutpoint="${2:-25}"
-statusbar="${STATUSBAR:-dwmblocks}"
-cmd="restatus 13 $statusbar"
 
 # Select the most preferred available player
 function sel_player() {
@@ -39,7 +37,7 @@ function sel_player() {
 match=$(sel_player || true)
 if [[ -z "${match:-}" ]]; then
     echo "No player found"
-    return 1
+    exit 1
 fi
 
 # Get the first running browser from the preferred list
@@ -59,19 +57,19 @@ if [[ -z "${active_browser:-}" ]]; then
     exit 1
 fi
 
+# Update script when title changes
+pidof -x browserloop >/dev/null 2>&1 || browserloop "$match" >/dev/null 2>&1 &
+
 function browser_togglepause() {
     playerctl play-pause --player="$match"
-    $cmd
 }
 
 function browser_skip() {
     playerctl next --player="$match"
-    $cmd
 }
 
 function browser_previous() {
     playerctl previous --player="$match"
-    $cmd
 }
 
 function browser_title() {

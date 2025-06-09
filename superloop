@@ -1,0 +1,13 @@
+#!/bin/env bash
+
+set -euo pipefail
+
+# Source utils
+[[ -f "${XDG_SCRIPTS_HOME:-$HOME/.local/scripts}/utils" ]] && \
+    source "${XDG_SCRIPTS_HOME:-$HOME/.local/scripts}/utils"
+
+player="${1:-Supersonic}"
+status="${STATUSBAR:-dwmblocks}"
+cmd="restatus 14 $status"
+
+playerctl --player="$player" metadata title >/dev/null && $cmd || exit

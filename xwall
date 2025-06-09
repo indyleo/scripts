@@ -74,6 +74,50 @@ function xwalr() {
     done
 }
 
+function themewall() {
+    local THEME
+    THEME="$(cat "${XDG_CACHE_HOME:-$HOME/.cache}/theme")"
+
+    # Check if theme file is valid
+    if [[ ! -f "${XDG_CACHE_HOME:-$HOME/.cache}/theme" ]]; then
+        echo "Error: Theme file not found."
+        exit 1
+    fi
+
+    # Check if theme is valid
+    if [[ "$THEME" != "gruvbox" && "$THEME" != "nord" ]]; then
+        THEME="other"
+    fi
+
+    local WALLPAPER_DIR="$dir/$THEME"
+
+    # Ensure a directory argument is provided
+    if [[ -z "$WALLPAPER_DIR" ]]; then
+        echo "Error: $0: No wallpaper directory provided."
+        exit 1
+    fi
+
+    # Check if the directory exists
+    if [[ ! -d "$WALLPAPER_DIR" ]]; then
+        echo "Error: Directory does not exist: $WALLPAPER_DIR"
+        exit 1
+    fi
+
+    # Get all connected monitors
+    local MONITORS=($(xrandr | grep " connected" | cut -d ' ' -f1))
+
+    # For each monitor, set a random wallpaper
+    for monitor in "${MONITORS[@]}"; do
+        local wp=$(find "$WALLPAPER_DIR" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' \) | shuf -n 1)
+        if [[ -n "$wp" ]]; then
+            xwallpaper --output "$monitor" --stretch "$wp"
+            echo "Wallpaper set on $monitor to $wp"
+        else
+            echo "Error: No wallpaper found in $WALLPAPER_DIR"
+        fi
+    done
+}
+
 function help_menu() {
     cat <<EOF
 Usage: $(basename "$0") [OPTION]
@@ -82,6 +126,7 @@ Options:
   -h, --help                       Show this help message
   timexwalr \${dir} \${time}       Change wallpaper every INTERVAL seconds randomly, on all connected displays.
   xwalr \${dir}                    Set a random wallpaper on all connected displays.
+  themewall \${dir}                Set a random wallpaper on all connected displays based on current theme
 EOF
 }
 
@@ -92,6 +137,9 @@ case "$opt" in
         ;;
     xwalr)
         xwalr "${dir}"
+        ;;
+    themewall)
+        themewall "${dir}"
         ;;
     --help|-h)
         help_menu

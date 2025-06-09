@@ -1,0 +1,37 @@
+#!/bin/env bash
+
+# Source utils
+[[ -f "${XDG_SCRIPTS_HOME:-$HOME/.local/scripts}/utils" ]] && \
+    source "${XDG_SCRIPTS_HOME:-$HOME/.local/scripts}/utils"
+
+signal="${1:-13}"
+status="${STATUSBAR:-dwmblocks}"
+
+# Command to run when Chromium starts playing media
+on_browser_play() {
+    echo "Browser started playing media at $(date)"
+    restatus "$signal" "$status"
+}
+
+# Keep track of browser state
+was_running=false
+
+while true; do
+    is_running=false
+
+    player_list=$(playerctl -l 2>/dev/null || true)
+
+    while read -r player; do
+        if [[ "$player" == *chromium* || "$player" == *firefox* || "$player" == *brave* ]]; then
+            is_running=true
+            break
+        fi
+    done <<< "$player_list"
+
+    if [[ "$is_running" == true && "$was_running" == false ]]; then
+        on_browser_play
+    fi
+
+    was_running=$is_running
+    sleep 1
+done
