@@ -53,8 +53,9 @@ case "\$opt" in
         ;;
 esac
 EOF
-    # Remove all backslashes from the generated file
+    # Remove all backslashes/EOM from the generated file
     sed -i 's/\\//g' "$file_path"
+    sed -i 's/\bEOM\b/EOF/g' "$file_path"
 
     # Make file executable
     chmod +x "$file_path"
