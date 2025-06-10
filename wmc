@@ -1,0 +1,96 @@
+#!/bin/env bash
+
+set -euo pipefail
+
+function command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# Check if xdo or xdotool is installed
+if ! command_exists xdo && ! command_exists xdotool; then
+    echo "Error: Neither xdo nor xdotool is installed." >&2
+    exit 1
+fi
+
+# Check if slock is installed
+if ! command_exists slock; then
+    echo "Error: slock is not installed." >&2
+    exit 1
+fi
+
+# Source utils
+[[ -f "${XDG_SCRIPTS_HOME:-$HOME/.local/scripts}/utils" ]] && \
+    source "${XDG_SCRIPTS_HOME:-$HOME/.local/scripts}/utils"
+
+opt="${1:-}"
+
+function killwindowx() {
+    if command_exists xdotool; then
+        windowid=$(xdotool getactivewindow)
+        xdotool windowkill "$windowid"
+    elif command_exists xdo; then
+        windowid=$(xdo id)
+        xdo kill "$windowid"
+    fi
+}
+
+function logoutx() {
+    pkill -u "$USER"
+}
+
+function restartx() {
+    # Restart
+    if [[ "$WM" == "dwm" ]]; then
+        pkill dwm
+        if [[ "$STATUSBAR" == "dwmblocks" ]]; then
+            ${STATUSBAR} & disown
+        elif [[ "$STATUSBAR" == "slstatus" ]]; then
+            pkill "${STATUSBAR}"
+            ${STATUSBAR} & disown
+        fi
+    else
+        notify-send "This ${WM} is not dwm"
+    fi
+}
+
+function lockx() {
+    slock & disown
+}
+
+help_menu() {
+    cat << EOF
+
+Usage: $(basename "$0") [OPTION]
+
+Options:
+  -h, --help        Show this help message
+  killwindow, xkill, -k        Kill the active window
+  logout, exit, -lo            Logout the user
+  restartwm, restart, -r       Restart the WM
+  lock, -l                     Lock the screen
+
+EOF
+}
+
+case "$opt" in
+    -h|--help)
+        help_menu
+        ;;
+    killwindow|xkill|-k)
+        killwindowx
+        ;;
+    logout|exit|-lo)
+        logoutx
+        ;;
+    restartwm|restart|-r)
+        restartx
+        ;;
+    lock|-l)
+        lockx
+        ;;
+    *)
+        echo "Error: '${opt:- }' Invalid option."
+        help_menu
+        exit 1
+        ;;
+esac
