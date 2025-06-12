@@ -26,8 +26,8 @@ function fbopen() {
 }
 
 function new_note() {
-    name="$(echo "" | dmenu -p "Enter a name: " <&-)" || exit 0
-    : "${name:=Notes_$today}"
+    name="$(echo "" | dmenu -p "Enter a name (default: $today, fmt: Notes_\$name/\$today.md): " <&-)" || exit 0
+    : "${name:=$today}"
     filedir="$(gennotes "$name")"
     "${GEDIT:-fbopen}" "$filedir"
 }
