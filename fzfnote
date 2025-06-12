@@ -1,0 +1,44 @@
+#!/bin/env bash
+
+set -euo pipefail
+
+notes_dir="$HOME/Documents/Markdown/Notes"
+today="$(date +%F_%T | tr ':' '-')"
+
+function getfiles() {
+    find "$notes_dir" -maxdepth 2 -type f \
+        ! -path '*/.*' \
+        -printf "%T@ ./%P\n" | sort -nr | cut -d' ' -f2-
+}
+
+if [[ ! -d "$notes_dir" ]]; then
+    echo "$notes_dir is not a directory, making one"
+    mkdir -p "$notes_dir"
+fi
+
+function new_note() {
+    name="$(fzf --print-query --prompt='Enter a name: ' <<< '')"
+    name="${name:-Notes_$today}"
+    filedir="$(gennotes "$name")"
+    "${EDITOR:-nvim}" "$filedir"
+}
+
+function notebook() {
+    choice=$(printf "📘 New Note\n%s\n" "$(getfiles)" | \
+            fzf --prompt="Choose note or create new: " \
+        --preview "glow -s dark $notes_dir/{}")
+
+    case "$choice" in
+        "📘 New Note")
+            new_note
+            ;;
+        *.md)
+            "${EDITOR:-nvim}" "$notes_dir/$choice"
+            ;;
+        *)
+            exit 1
+            ;;
+    esac
+}
+
+notebook

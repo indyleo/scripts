@@ -1,0 +1,50 @@
+#!/bin/env bash
+
+set -euo pipefail
+
+notes_dir="$HOME/Documents/Markdown/Notes"
+today="$(date +%F_%T | tr ':' '-')"
+
+function getfiles() {
+    find "$notes_dir" -maxdepth 2 -type f \
+        ! -path '*/.*' \
+        -printf "%T@ ./%P\n" | sort -nr | cut -d' ' -f2-
+}
+
+if [[ ! -d "$notes_dir" ]]; then
+    echo "$notes_dir is not a directory, making one"
+    mkdir -p "$notes_dir"
+fi
+
+function fbopen() {
+    if [[ -n "$TERMINAL" ]]; then
+        $TERMINAL -e "$SHELL" -c "${EDITOR:-nvim} $1"
+    else
+        echo "TERMINAL is not set"
+        exit 1
+    fi
+}
+
+function new_note() {
+    name="$(echo "" | dmenu -p "Enter a name: " <&-)" || exit 0
+    : "${name:=Notes_$today}"
+    filedir="$(gennotes "$name")"
+    "${GEDIT:-fbopen}" "$filedir"
+}
+
+function notebook() {
+    choice=$(echo -e "📘 New Note\n$(getfiles)" | dmenu -l 5 -p "Choose note or create new: ")
+    case "$choice" in
+        "📘 New Note")
+            new_note
+            ;;
+        *.md)
+            "${GEDIT:-fbopen}" "$notes_dir/$choice"
+            ;;
+        *)
+            exit 1
+            ;;
+    esac
+}
+
+notebook

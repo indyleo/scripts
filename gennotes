@@ -2,14 +2,24 @@
 
 # Get today's date
 today="$(date +%F)"  # Format: YYYY-MM-DD
+now="$(date +%F_%T | tr ':' '-')"  # Format: YYYY-MM-DD-HH-MM
 
 # Set the path
 notes_dir="${HOME}/Documents/Markdown/Notes"
-notes_file="${notes_dir}/Notes_${today}.md"
+day_dir="${notes_dir}/${today}"
+
+# Set the filename
+notes_name="Notes_${1:-$now}"
+notes_file="${day_dir}/${notes_name}.md"
 
 # Make sure the notes directory exists
 if [[ ! -d "$notes_dir" ]]; then
     mkdir -p "$notes_dir"
+fi
+
+# Make sure the day directory exists
+if [[ ! -d "$day_dir" ]]; then
+    mkdir -p "$day_dir"
 fi
 
 # If the file doesn't exist yet, create it and add a header
@@ -17,6 +27,4 @@ if [[ ! -f "$notes_file" ]]; then
     echo "# 📘 Notes - ${today}" > "$notes_file"
 fi
 
-# Open the note in Neovim
-nvim "$notes_file"
-
+echo "$notes_file"
