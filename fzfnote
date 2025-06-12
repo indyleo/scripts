@@ -17,8 +17,9 @@ if [[ ! -d "$notes_dir" ]]; then
 fi
 
 function new_note() {
-    name="$(fzf --print-query --prompt='Enter a name: ' <<< '')"
-    name="${name:-Notes_$today}"
+    read -rp "Enter a name: " name
+    name="${name:-$today}"
+    echo "$name"
     filedir="$(gennotes "$name")"
     "${EDITOR:-nvim}" "$filedir"
 }
