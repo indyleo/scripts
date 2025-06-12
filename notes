@@ -14,7 +14,7 @@ fi
 
 # If the file doesn't exist yet, create it and add a header
 if [[ ! -f "$notes_file" ]]; then
-    echo "# Notes - ${today}" > "$notes_file"
+    echo "# 📘 Notes - ${today}" > "$notes_file"
 fi
 
 # Open the note in Neovim
