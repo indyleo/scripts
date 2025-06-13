@@ -40,7 +40,7 @@ done
 # Select topic based on constraint
 if [[ "$topic_constraint" == "lang" ]]; then
     # Fetch programming languages dynamically
-    topic=$(fetch_list "https://cheat.sh/:list" | grep -E "^(c|cpp|python|go|rust|java|javascript|typescript|bash|zsh|lua|git)$" | fzf)
+    topic=$(fetch_list "https://cheat.sh/:list" | grep -E "^(c|cpp|python|go|rust|java|javascript|typescript|bash|zsh|lua|git|perl|ruby|haskell|kotlin|swift|powershell|scala|clojure|r|elixir|dart|php|make|docker|ansible|terraform|sql|html|css|json|yaml|xml)$" | fzf)
 else
     # Fetch all available topics
     topic=$(fetch_list "https://cheat.sh/:list" | fzf)
