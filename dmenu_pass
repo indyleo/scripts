@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-
 set -euo pipefail
 
 # === Config ===
 DMENU_ARGS="-l 15 -p Bitwarden: "
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/dmenu_bw"
-CACHE_TIME=86400  # seconds
-
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/dmenu_pass"
+CACHE_TIME=86400
 mkdir -p "$CACHE_DIR"
-ITEMS_CACHE="$CACHE_DIR/items.json"
-MENU_CACHE="$CACHE_DIR/menu.txt"
 
-# Detect clipboard utility
+ITEMS_CACHE="$CACHE_DIR/items.json"
+PARSED_CACHE="$CACHE_DIR/items_parsed.txt"
+MENU_CACHE="$CACHE_DIR/menu.txt"
+SESSION_FILE="$CACHE_DIR/session.token"
+
+# Clipboard detection
 if command -v xclip &>/dev/null; then
     COPY_CMD="xclip -selection clipboard"
 elif command -v wl-copy &>/dev/null; then
@@ -20,92 +21,124 @@ else
     COPY_CMD="cat"
 fi
 
-# Check dependencies
+# Check required commands
 for cmd in bw jq dmenu xdotool; do
     command -v "$cmd" &>/dev/null || { echo "Missing dependency: $cmd"; exit 1; }
 done
 
-# Login check
-if ! bw login --check &>/dev/null; then
-    echo "Logging in with API key..."
-    bw login --apikey || { echo "Bitwarden login failed."; exit 1; }
-fi
+# === Functions ===
 
-# === Optimized session caching ===
-SESSION_FILE="$CACHE_DIR/session.token"
-SESSION=""
-
-# Try using cached session
-if [[ -f "$SESSION_FILE" ]]; then
-    SESSION=$(<"$SESSION_FILE")
-    if ! bw unlock --check --session "$SESSION" &>/dev/null; then
-        SESSION=""
+unlock_session() {
+    if [[ -f "$SESSION_FILE" ]]; then
+        SESSION=$(<"$SESSION_FILE")
+        if ! bw unlock --check --session "$SESSION" &>/dev/null; then
+            SESSION=""
+        fi
     fi
-fi
 
-# Unlock if session is missing or expired
-if [[ -z "$SESSION" ]]; then
-    if [[ -n "${BW_PASSWORD:-}" ]]; then
-        SESSION=$(bw unlock --raw --passwordenv BW_PASSWORD)
-    else
-        SESSION=$(bw unlock --raw)
+    if [[ -z "${SESSION:-}" ]]; then
+        if [[ -n "${BW_PASSWORD:-}" ]]; then
+            SESSION=$(bw unlock --raw --passwordenv BW_PASSWORD)
+        else
+            SESSION=$(bw unlock --raw)
+        fi
+        [[ -z "$SESSION" ]] && { echo "Vault unlock failed."; exit 1; }
+        echo "$SESSION" > "$SESSION_FILE"
     fi
-    [[ -z "$SESSION" ]] && { echo "Vault unlock failed."; exit 1; }
-    echo "$SESSION" > "$SESSION_FILE"
-fi
+}
 
-
-# === Load or refresh cache ===
-function cache_expired() {
+cache_expired() {
     [[ ! -f "$1" ]] || [[ $(($(date +%s) - $(stat -c %Y "$1"))) -gt $CACHE_TIME ]]
 }
 
-if cache_expired "$ITEMS_CACHE"; then
+refresh_cache() {
     bw list items --session "$SESSION" > "$ITEMS_CACHE"
+    jq -r '.[] | "\(.id)\t\(.name)\t\(.login.username // "no-username")"' "$ITEMS_CACHE" > "$PARSED_CACHE"
+    awk -F '\t' '{ print $2 " [" $3 "]" }' "$PARSED_CACHE" > "$MENU_CACHE"
+}
+
+get_selection() {
+    (cat "$MENU_CACHE"; echo -e "\n[+] Add New Login\n[-] Delete Login\n[🔍] View Details") | dmenu $DMENU_ARGS
+}
+
+parse_selection() {
+    mapfile -t SELECTED < <(awk -F '\t' -v sel="$1" '$2 " [" $3 "]" == sel { print $1 "\t" $2 "\t" $3 }' "$PARSED_CACHE")
+    ITEM_ID="${SELECTED[0]%%$'\t'*}"
+    NAME=$(echo -e "${SELECTED[0]}" | cut -f2)
+    USERNAME=$(echo -e "${SELECTED[0]}" | cut -f3)
+}
+
+add_login() {
+    NAME=$(dmenu -p "New Entry Name:")
+    [[ -z "$NAME" ]] && return
+    USERNAME=$(dmenu -p "Username:")
+    PASSWORD=$(dmenu -p "Password:")
+    ITEM=$(jq -n --arg name "$NAME" --arg user "$USERNAME" --arg pass "$PASSWORD" \
+        '{type: "login", name: $name, login: {username: $user, password: $pass}}')
+    echo "$ITEM" | bw create item --session "$SESSION" >/dev/null && notify-send "Bitwarden" "Item '$NAME' added."
+    rm -f "$ITEMS_CACHE" "$MENU_CACHE"
+    exec "$0"
+}
+
+delete_login() {
+    parse_selection "$1"
+    bw delete item "$ITEM_ID" --session "$SESSION" --quiet && notify-send "Bitwarden" "Deleted '$NAME'."
+    rm -f "$ITEMS_CACHE" "$MENU_CACHE"
+    exec "$0"
+}
+
+view_details() {
+    parse_selection "$1"
+    bw get item "$ITEM_ID" --session "$SESSION" | jq | less
+}
+
+handle_action_menu() {
+    PASSWORD=$(bw get password "$ITEM_ID" --session "$SESSION")
+    ACTION=$(printf "Auto-Type Username\nAuto-Type Password\nCopy Username\nCopy Password" | dmenu -p "$NAME [$USERNAME]")
+    [[ -z "$ACTION" ]] && exit 0
+    case "$ACTION" in
+        "Auto-Type Username")
+            notify-send "Bitwarden" "Typing username for '$NAME'..."
+            xdotool type --delay 50 --clearmodifiers "$USERNAME"
+            ;;
+        "Auto-Type Password")
+            notify-send "Bitwarden" "Typing password for '$NAME'..."
+            xdotool type --delay 50 --clearmodifiers "$PASSWORD"
+            ;;
+        "Copy Username")
+            echo -n "$USERNAME" | $COPY_CMD
+            notify-send "Bitwarden" "Username copied to clipboard."
+            ;;
+        "Copy Password")
+            echo -n "$PASSWORD" | $COPY_CMD
+            notify-send "Bitwarden" "Password copied to clipboard."
+            ;;
+    esac
+
+    # Clear clipboard after 30 seconds
+    [[ "$ACTION" =~ ^Copy ]] && (sleep 30 && echo -n "" | $COPY_CMD) & disown
+}
+
+# === Main Execution ===
+
+# Login (only if not already)
+bw login --check &>/dev/null || bw login --apikey || { echo "Bitwarden login failed."; exit 1; }
+
+unlock_session
+
+# Cache refresh (asynchronously)
+if cache_expired "$ITEMS_CACHE" || cache_expired "$MENU_CACHE"; then
+    refresh_cache &
 fi
 
-if cache_expired "$MENU_CACHE"; then
-    jq -r '.[] | "\(.id)\t\(.name)\t\(.login.username // "no-username")"' < "$ITEMS_CACHE" > "$CACHE_DIR/items_parsed.txt"
-    awk -F '\t' '{ print $2 " [" $3 "]" }' "$CACHE_DIR/items_parsed.txt" > "$MENU_CACHE"
-fi
+[[ ! -f "$MENU_CACHE" ]] && refresh_cache
 
-# === dmenu selection ===
-SELECTION=$(cat "$MENU_CACHE" | dmenu $DMENU_ARGS)
+SELECTION=$(get_selection)
 [[ -z "$SELECTION" ]] && exit 0
 
-# Match item
-mapfile -t SELECTED < <(awk -F '\t' -v sel="$SELECTION" '$2 " [" $3 "]" == sel { print $1 "\t" $2 "\t" $3 }' "$CACHE_DIR/items_parsed.txt")
-ITEM_ID="${SELECTED[0]%%$'\t'*}"
-NAME=$(echo -e "${SELECTED[0]}" | cut -f2)
-USERNAME=$(echo -e "${SELECTED[0]}" | cut -f3)
-
-# === Get password (live, not cached for security) ===
-PASSWORD=$(bw get password "$ITEM_ID" --session "$SESSION")
-
-# === Action menu ===
-ACTION=$(printf "Auto-Type Username\nAuto-Type Password\nCopy Username\nCopy Password" | dmenu -p "$NAME [$USERNAME]")
-[[ -z "$ACTION" ]] && exit 0
-
-case "$ACTION" in
-    "Auto-Type Username")
-        notify-send "Bitwarden" "Typing username for '$NAME'..."
-        xdotool type --delay 50 --clearmodifiers "$USERNAME"
-        ;;
-    "Auto-Type Password")
-        notify-send "Bitwarden" "Typing password for '$NAME'..."
-        xdotool type --delay 50 --clearmodifiers "$PASSWORD"
-        ;;
-    "Copy Username")
-        echo -n "$USERNAME" | $COPY_CMD
-        notify-send "Bitwarden" "Username copied to clipboard."
-        ;;
-    "Copy Password")
-        echo -n "$PASSWORD" | $COPY_CMD
-        notify-send "Bitwarden" "Password copied to clipboard."
-        ;;
+case "$SELECTION" in
+    "[+] Add New Login") add_login ;;
+    "[-] Delete Login") delete_login "$(get_selection)" ;;
+    "[🔍] View Details") view_details "$(get_selection)" ;;
+    *) parse_selection "$SELECTION"; handle_action_menu ;;
 esac
-
-# Optional: Clear clipboard
-if [[ "$ACTION" =~ ^Copy ]]; then
-    (sleep 30 && echo -n "" | $COPY_CMD) & disown
-fi
