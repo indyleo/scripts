@@ -1,0 +1,37 @@
+#!/bin/env bash
+
+set -euo pipefail
+
+# === Config ===
+PORT=8000
+HOST=127.0.0.1
+PID_FILE="/tmp/http_server_$PORT.pid"
+SERVE_DIR="${1:-.}"
+OPEN_BROWSER="${BROWSER:-${2:-xdg-open}}"
+LOG_FILE="${SERVE_DIR}/http_server.log"
+
+# === Dependencies ===
+command -v python3 >/dev/null 2>&1 || { echo "python3 not found" >&2; exit 1; }
+
+# === Functions ===
+function start_server() {
+    echo "Starting server on http://$HOST:$PORT ..."
+    cd "$SERVE_DIR" || exit 1
+    python3 -m http.server "$PORT" --bind "$HOST" >> "$LOG_FILE" 2>&1 &
+    echo $! > "$PID_FILE"
+    echo "Server started with PID $(cat "$PID_FILE")"
+    "$OPEN_BROWSER" "http://$HOST:$PORT" &>/dev/null &
+}
+
+function stop_server() {
+    echo "Stopping server on port $PORT ..."
+    if kill "$(cat "$PID_FILE")" 2>/dev/null; then
+        echo "Server stopped."
+    else
+        echo "Process not found. Cleaning up."
+    fi
+    rm -f "$PID_FILE"
+}
+
+# === Toggle Logic ===
+([[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null && stop_server && exit 0) || start_server
