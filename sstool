@@ -31,11 +31,17 @@ timestamp=$(date +"%Y-%m-%d_%H-%M-%S")
 filename="${SAVE_DIR}/${timestamp}.png"
 
 function selection() {
+    if pgrep -x import >/dev/null; then
+        notify-send "Screenshot" "A selection is already in progress."
+        return
+    fi
+
     notify-send "Select an area to capture..."
-    import "$filename"
+    import "$filename" || { notify-send "Error:" "Failed to capture selection."; return; }
     notify-send "Saved to:" "$filename"
     xclip -selection clipboard -t image/png "$filename"
 }
+
 
 function full() {
     notify-send "Capturing full screen..."
