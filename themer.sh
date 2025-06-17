@@ -58,7 +58,7 @@ ln -sf "${XRESOURCES}/.Xresources_${THEME}" "${XRESOURCES}/.Xresources"
 xrdb "${XRESOURCES}/.Xresources"
 
 # Suckless apps to theme
-APPS=(dmenu dwm slock st)
+APPS=(dmenu dwm slock st tabbed)
 for APP in "${APPS[@]}"; do
     APP_DIR="${SUCKLESS_DIR}/${APP}"
     if [[ -d "$APP_DIR" ]]; then
