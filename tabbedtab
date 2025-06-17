@@ -3,18 +3,14 @@
 set -euo pipefail
 
 # Dependies check
-if ! command -v xdotool &> /dev/null; then
-    echo "xdotool is not installed." >&2
-    exit 1
-fi
-if ! command -v tabbed &> /dev/null; then
-    echo "tabbed is not installed." >&2
-    exit 1
-fi
-if ! command -v st &> /dev/null; then
-    echo "st is not installed." >&2
-    exit 1
-fi
+for cmd in xdotool tabbed st; do
+    if ! command -v "$cmd" &> /dev/null; then
+        echo "$cmd is not installed." >&2
+        exit 1
+    fi
+done
+
+APP="${1:-}"
 
 # Function to launch a new tabbed instance
 function start_tabbed() {
@@ -46,5 +42,17 @@ if [[ -z "${tabbed_id:-}" ]]; then
     start_tabbed
 fi
 
-# Spawn st inside the tabbed window
-st -w "$tabbed_id" &
+# Check if tuiapp is executable
+if ! command -v ${APP} &> /dev/null; then
+    echo "$APP is not installed. or it is not executable" >&2
+    exit 1
+fi
+
+# If tuiapp is empty, spawn st inside the tabbed window
+if [[ -z "$APP" ]]; then
+    # Spawn st inside the tabbed window
+    st -w "$tabbed_id" & disown
+else
+    # Spawn the specified app inside the tabbed window
+    st -w "$tabbed_id" -e zsh -c "$APP" & disown
+fi
