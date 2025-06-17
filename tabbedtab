@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Dependies check
+if ! command -v xdotool &> /dev/null; then
+    echo "xdotool is not installed." >&2
+    exit 1
+fi
+if ! command -v tabbed &> /dev/null; then
+    echo "tabbed is not installed." >&2
+    exit 1
+fi
+if ! command -v st &> /dev/null; then
+    echo "st is not installed." >&2
+    exit 1
+fi
+
+# Function to launch a new tabbed instance
+function start_tabbed() {
+    tabbed -c -r 2 &
+    tabbed_pid=$!
+
+    # Wait for the tabbed window to appear (max 2 seconds)
+    for i in {1..20}; do
+        tabbed_id=$(xdotool search --class tabbed | head -n 1 || true)
+        if [[ -n "${tabbed_id:-}" ]]; then
+            break
+        fi
+        sleep 0.1
+    done
+
+    if [[ -z "${tabbed_id:-}" ]]; then
+        echo "Timed out waiting for tabbed to start." >&2
+        kill "$tabbed_pid" 2>/dev/null || true
+        exit 1
+    fi
+}
+
+# Try to find an existing tabbed window
+tabbed_id=$(xdotool search --class tabbed | head -n 1 || true)
+
+# If not found, start a new tabbed instance
+if [[ -z "${tabbed_id:-}" ]]; then
+    echo "No running tabbed instance found. Starting a new one..."
+    start_tabbed
+fi
+
+# Spawn st inside the tabbed window
+st -w "$tabbed_id" &
