@@ -74,11 +74,7 @@ function restartx() {
 }
 
 function lockx() {
-    if command -v slock >/dev/null 2>&1; then
-        slock & disown
-    else
-        notify-send "lockx: 'slock' is not installed"
-    fi
+    slock & disown
 }
 
 function help_menu() {
