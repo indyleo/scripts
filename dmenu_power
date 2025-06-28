@@ -6,11 +6,10 @@ choice=$(echo -e "$options" | dmenu -p "Power Menu")
 
 case "$choice" in
     Lock)
-        # Change this to your locker (e.g., slock, i3lock, betterlockscreen)
-        slock
+        wmc lock
         ;;
     Logout)
-        pkill -u "$USER"
+        wmc logout
         ;;
     Reboot)
         systemctl reboot
@@ -19,6 +18,5 @@ case "$choice" in
         systemctl poweroff
         ;;
     *)
-        # Cancelled or closed menu
         ;;
 esac
