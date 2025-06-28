@@ -6,17 +6,13 @@ function command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
-# Check if xdo or xdotool is installed
-if ! command_exists xdo && ! command_exists xdotool; then
-    echo "Error: Neither xdo nor xdotool is installed." >&2
-    exit 1
-fi
-
-# Check if slock is installed
-if ! command_exists slock; then
-    echo "Error: slock is not installed." >&2
-    exit 1
-fi
+# Check if dependencies are there
+for deps in xdotool xdo slock loginctl; do
+    if ! command_exists "$deps"; then
+        notify-send "wmc: $deps is not installed"
+        exit 1
+    fi
+done
 
 # Source utils
 [[ -f "${XDG_SCRIPTS_HOME:-$HOME/.local/scripts}/utils" ]] && \
@@ -26,38 +22,66 @@ opt="${1:-}"
 
 function killwindowx() {
     if command_exists xdotool; then
-        windowid=$(xdotool getactivewindow)
-        xdotool windowkill "$windowid"
+        windowid=$(xdotool getactivewindow 2>/dev/null)
+        if [[ -n "$windowid" ]]; then
+            xdotool windowkill "$windowid"
+        else
+            notify-send "killwindowx: No active window detected (xdotool)"
+        fi
     elif command_exists xdo; then
-        windowid=$(xdo id)
-        xdo kill "$windowid"
+        windowid=$(xdo id 2>/dev/null)
+        if [[ -n "$windowid" ]]; then
+            xdo kill "$windowid"
+        else
+            notify-send "killwindowx: No active window detected (xdo)"
+        fi
+    else
+        notify-send "killwindowx: No suitable tool (xdotool/xdo) found"
     fi
 }
 
 function logoutx() {
-    pkill -u "$USER"
+    notify-send "Logging out..."
+    loginctl terminate-user "$USER"
 }
 
 function restartx() {
-    # Restart
-    if [[ "$WM" == "dwm" ]]; then
-        pkill dwm
-        if [[ "$STATUSBAR" == "dwmblocks" ]]; then
-            ${STATUSBAR} & disown
-        elif [[ "$STATUSBAR" == "slstatus" ]]; then
-            pkill "${STATUSBAR}"
-            ${STATUSBAR} & disown
-        fi
-    else
-        notify-send "This ${WM} is not dwm"
+    # Only handle dwm restarts
+    if [[ "${WM:-}" != "dwm" ]]; then
+        notify-send "restartx: current WM (${WM:-unknown}) is not dwm"
+        return 1
     fi
+
+    # Restart dwm
+    pkill -x dwm
+
+    # Restart the status bar, if recognized
+    case "${STATUSBAR:-}" in
+        dwmblocks)
+            command -v dwmblocks >/dev/null && dwmblocks & disown
+            ;;
+        slstatus)
+            pkill -x slstatus
+            command -v slstatus >/dev/null && slstatus & disown
+            ;;
+        "")
+            notify-send "restartx: no known status bar found"
+            ;;
+        *)
+            notify-send "restartx: unknown STATUSBAR: ${STATUSBAR}"
+            ;;
+    esac
 }
 
 function lockx() {
-    slock & disown
+    if command -v slock >/dev/null 2>&1; then
+        slock & disown
+    else
+        notify-send "lockx: 'slock' is not installed"
+    fi
 }
 
-help_menu() {
+function help_menu() {
     cat << EOF
 
 Usage: $(basename "$0") [OPTION]
