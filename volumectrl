@@ -65,7 +65,7 @@ Options:
 EOF
 }
 
-case "$1" in
+case "$opt" in
     --togglemute|-tm)
         volume_togglemute
         ;;
