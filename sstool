@@ -99,7 +99,7 @@ function screen() {
 }
 
 function colorpicker() {
-    crop_area=$(slop --tolerance=0) || {
+    crop_area=$(slop --tolerance=0 --noopengl) || {
         notify-send "Cancelled" "No area selected."
         exit 1
     }
