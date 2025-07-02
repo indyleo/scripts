@@ -1,24 +1,21 @@
 #!/bin/env bash
 
-# Ensure dependencies
-if ! command -v import &> /dev/null; then
-    echo "Error: ImageMagick (import) is not installed."
-    exit 1
-fi
-if ! command -v xdotool &> /dev/null; then
-    echo "Error: xdotool is not installed."
-    exit 1
-fi
-if ! command -v xrandr &> /dev/null; then
-    echo "Error: xrandr is not installed."
-    exit 1
-fi
-if ! command -v notify-send &> /dev/null; then
-    echo "Error: notify-send is not installed."
-    exit 1
-fi
-if ! command -v xclip &> /dev/null; then
-    echo "Error: xclip is not installed."
+# Required binaries
+deps=(import magick xdotool xrandr notify-send xclip slop)
+RED=$(tput setaf 1)
+RESET=$(tput sgr0)
+
+missing=()
+
+for cmd in "${deps[@]}"; do
+    command -v "$cmd" &>/dev/null || missing+=("$cmd")
+done
+
+if (( ${#missing[@]} )); then
+    echo "Missing dependencies:"
+    for cmd in "${missing[@]}"; do
+        echo "  - ${RED}$cmd${RESET}"
+    done
     exit 1
 fi
 
@@ -29,6 +26,7 @@ mkdir -p "$SAVE_DIR"
 
 timestamp=$(date +"%Y-%m-%d_%H-%M-%S")
 filename="${SAVE_DIR}/${timestamp}.png"
+tmpfile=$(mktemp --suffix=.png); trap 'rm -f "$TMP"' EXIT
 
 function selection() {
     if pgrep -x import >/dev/null; then
@@ -100,6 +98,17 @@ function screen() {
     xclip -selection clipboard -t image/png "$filename"
 }
 
+function colorpicker() {
+    crop_area=$(slop --tolerance=0) || {
+        notify-send "Cancelled" "No area selected."
+        exit 1
+    }
+    magick import -window root -crop "$crop_area" "$tmpfile"
+    hex=$(magick "$tmpfile" -scale 1x1\! -format "#%[hex:p{0,0}]" info: 2>/dev/null || echo "#??????")
+    echo "$hex" | tee ~/.cache/last_color.hex | xclip -selection clipboard
+    notify-send -i "$tmpfile" "Color Picked" "Copied: $hex"
+}
+
 function help_menu() {
     cat <<EOF
 Usage: $(basename "$0") [OPTION]
@@ -109,6 +118,7 @@ Options:
   -s, --select      Select an area to capture
   -f, --full        Capture full screen
   -w, --window      Capture focused window
+  -c, --colorpicker Capture color picker
 EOF
 }
 
@@ -117,6 +127,7 @@ case "$opt" in
     --screen|-sc) screen ;;
     --full|-f) full ;;
     --window|-w) window ;;
+    --colorpicker|-c) colorpicker ;;
     --help|-h) help_menu ;;
     *)
         echo "Error: '${opt:- }' Invalid option."
