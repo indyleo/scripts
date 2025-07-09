@@ -31,7 +31,7 @@ set -euo pipefail
 
 opt="\${1:-}"
 
-help_menu() {
+function help_menu() {
     cat << EOM
 
 Usage: \$(basename "\$0") [OPTION]
