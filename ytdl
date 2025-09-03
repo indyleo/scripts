@@ -32,15 +32,15 @@ EOF
 
 case "$opt" in
     aud)
-        yt-dlp -x --audio-format mp3 --embed-thumbnail --add-metadata --audio-quality 0 "$opt" -o "$output_folder/%(title)s.%(ext)s"
+        yt-dlp -x --audio-format mp3 --embed-thumbnail --add-metadata --audio-quality 0 "$url" -o "$output_folder/%(title)s.%(ext)s"
         echo "Audio download completed. File saved in $output_folder."
         ;;
     vid)
-        yt-dlp -f "bestvideo" --merge-output-format mp4 --embed-thumbnail --add-metadata "$opt" -o "$output_folder/%(title)s.%(ext)s"
+        yt-dlp -f "bestvideo" --merge-output-format mp4 --embed-thumbnail --add-metadata "$url" -o "$output_folder/%(title)s.%(ext)s"
         echo "Video download completed. File saved in $output_folder."
         ;;
     bth)
-        yt-dlp -f "bestvideo+bestaudio" --merge-output-format mp4 --embed-thumbnail --add-metadata "$opt" -o "$output_folder/%(title)s.%(ext)s"
+        yt-dlp -f "bestvideo+bestaudio" --merge-output-format mp4 --embed-thumbnail --add-metadata "$url" -o "$output_folder/%(title)s.%(ext)s"
         echo "Combined audio and video download completed as an MP4. File saved in $output_folder."
         ;;
     --help|-h)

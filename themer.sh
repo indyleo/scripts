@@ -83,7 +83,10 @@ ln -sf "${TMUX_CONFIG}/tmux_${THEME}.conf" "${TMUX_CONFIG}/tmux.conf"
 # Startpage: symlink the correct config
 if [[ -d "$STARTPAGE" ]]; then
     echo "Found startpage, Theming startpage..."
-    ln -sf "${STARTPAGE}/index_${THEME}.html" "${STARTPAGE}/index.html"
+    sptheme="$(cat ${STARTPAGE}/theme.txt)"
+    if [[ "$sptheme" != "$THEME" ]]; then
+        echo "$THEME" >> "${STARTPAGE}/theme.txt"
+    fi
 fi
 
 # Qutebrowser: symlink the correct config
