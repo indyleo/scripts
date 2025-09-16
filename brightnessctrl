@@ -14,13 +14,10 @@ fi
 
 opt="${1:-}"
 num="${2:-5}"
-status="${STATUSBAR:-dwmblocks}"
-cmd="restatus 15 $status"
 
 function brightness_inc() {
     if [[ "${num}" =~ ^[0-9]+$ ]]; then
         brightnessctl set "${num}%+"
-        $cmd
     else
         exit 1
     fi
@@ -29,7 +26,6 @@ function brightness_inc() {
 function brightness_dec() {
     if [[ "${num}" =~ ^[0-9]+$ ]]; then
         brightnessctl set "${num}%-"
-        $cmd
     else
         exit 1
     fi

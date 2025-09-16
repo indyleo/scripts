@@ -10,9 +10,6 @@ fi
 [[ -f "${XDG_SCRIPTS_HOME:-$HOME/.local/scripts}/utils" ]] && \
     source "${XDG_SCRIPTS_HOME:-$HOME/.local/scripts}/utils"
 
-status="${STATUSBAR:-dwmblocks}"
-cmd="restatus 12 $status"
-
 function record() {
     # Create output directory
     now="$(date '+%a__%b%d__%H_%M_%S')"
@@ -44,7 +41,7 @@ function record() {
     # Metadata
     echo "$now" > /tmp/recording_timestamp
     echo "$outputloc" > /tmp/recording_outputdir
-    echo "󰑊 Recording" > /tmp/recordingicon && $cmd
+    echo "󰑊 Recording" > /tmp/recordingicon
 
     notify-send "Recording started"
 }
@@ -55,7 +52,6 @@ function end() {
 
     # Update statusbar
     rm -fv  /tmp/recordingicon
-    $cmd
 
     now=$(cat /tmp/recording_timestamp)
     outputloc=$(cat /tmp/recording_outputdir)

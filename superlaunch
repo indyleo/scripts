@@ -6,11 +6,4 @@ set -euo pipefail
 [[ -f "${XDG_SCRIPTS_HOME:-$HOME/.local/scripts}/utils" ]] && \
     source "${XDG_SCRIPTS_HOME:-$HOME/.local/scripts}/utils"
 
-signal="${1:-14}"
-status="${STATUSBAR:-dwmblocks}"
-
 flatpak run io.github.dweymouth.supersonic & disown
-
-sleep 0.1
-
-restatus "$signal" "$status"

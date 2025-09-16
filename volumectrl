@@ -14,22 +14,17 @@ fi
 
 opt="${1:-}"
 num="${2:-5}"
-status="${STATUSBAR:-dwmblocks}"
-cmd="restatus 16 $status"
 
 function volume_inc() {
     pamixer -i "$num"
-    $cmd
 }
 
 function volume_dec() {
     pamixer -d "$num"
-    $cmd
 }
 
 function volume_togglemute() {
     pamixer --toggle-mute
-    $cmd
 }
 
 function volume_vol() {
