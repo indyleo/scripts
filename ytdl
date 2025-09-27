@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-opt="$1"
+opt="${1:--h}"
 url="$2"
 output_folder="$HOME/Downloads"
 
