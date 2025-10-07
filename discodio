@@ -10,4 +10,4 @@ fi
 
 TOKEN="$(command cat ${HOME:-~}/.discordo_token)"
 
-discordo -t "${TOKEN}"
+discordo -token "${TOKEN}"
