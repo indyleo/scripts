@@ -1,0 +1,13 @@
+#!/bin/env bash
+
+TOUCH_DEV="ILITEK       ILITEK-TOUCH"
+OUTPUT="HDMI-1"
+
+# Check if HDMI-1 is connected
+if xrandr --query | grep -q "^$OUTPUT connected"; then
+    echo "Mapping $TOUCH_DEV to $OUTPUT..."
+    xinput set-prop "$TOUCH_DEV" "Coordinate Transformation Matrix" 1 0 0 0 1 0 0 0 1
+    xinput map-to-output "$TOUCH_DEV" "$OUTPUT"
+else
+    echo "$OUTPUT not connected, skipping touchscreen mapping."
+fi
