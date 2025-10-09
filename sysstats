@@ -125,8 +125,29 @@ function bbattery() {
     echo "$icon $percent%"
 }
 
+function vvolume() {
+    vol="$(pamixer --get-volume)"
+    muted=$(pamixer --get-mute)
+    if [[ "$vol" -eq 100 && "$muted" == "false" ]]; then
+        echo " ${vol}%"  # Max volume
+    elif [[ "$vol" -ge 50 && "$muted" == "false" ]]; then
+        echo "󰕾 ${vol}%"  # High volume
+    elif [[ "$vol" -ge 25 && "$muted" == "false" ]]; then
+        echo "󰖀 ${vol}%"  # Medium volume
+    elif [[ "$vol" -gt 0 && "$muted" == "false" ]]; then
+        echo "󰕿 ${vol}%"  # Low volume
+    else
+        if [[ "$muted" == "true" ]]; then
+            echo "󰝟  ${vol}%"  # Muted
+        else
+            echo "󰝟  Muted"  # 0
+        fi
+    fi
+}
+
+
 function all_stats() {
-    echo "$(issrec) | $(disk_usage) | $(memory_usage) | $(cpu_load) | $(bbattery) | $(wifi_status) | $(tail_status) | $(ddate) | $(ttime)"
+    echo "$(issrec) | $(disk_usage) | $(memory_usage) | $(cpu_load) | $(vvolume) | $(bbattery) | $(wifi_status) | $(tail_status) | $(ddate) | $(ttime)"
 }
 
 function help_menu() {
@@ -145,6 +166,7 @@ function help_menu() {
     date_time   Display date and time
     isrec       Display recording status
     battery     Display battery status
+    volume      Display volume
     all         Display all stats
 EOF
 }
@@ -179,6 +201,9 @@ case "$opt" in
         ;;
     battery)
         bbattery
+        ;;
+    volume)
+        vvolume
         ;;
     all)
         all_stats

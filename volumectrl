@@ -27,26 +27,6 @@ function volume_togglemute() {
     pamixer --toggle-mute
 }
 
-function volume_vol() {
-    vol="$(pamixer --get-volume)"
-    muted=$(pamixer --get-mute)
-    if [[ "$vol" -eq 100 && "$muted" == "false" ]]; then
-        echo " ${vol}%"  # Max volume
-    elif [[ "$vol" -ge 50 && "$muted" == "false" ]]; then
-        echo "󰕾 ${vol}%"  # High volume
-    elif [[ "$vol" -ge 25 && "$muted" == "false" ]]; then
-        echo "󰖀 ${vol}%"  # Medium volume
-    elif [[ "$vol" -gt 0 && "$muted" == "false" ]]; then
-        echo "󰕿 ${vol}%"  # Low volume
-    else
-        if [[ "$muted" == "true" ]]; then
-            echo "󰝟  ${vol}%"  # Muted
-        else
-            echo "󰝟  Muted"  # 0
-        fi
-    fi
-}
-
 function help_menu() {
     cat <<EOF
 Usage: $(basename "$0") [OPTION]
@@ -56,7 +36,6 @@ Options:
     --togglemute, -tm    Toggle mute
     --inc, -i            Increase volume by \${num}
     --dec, -d            Decrease volume by \${num}
-    --printvol, -pv      Print current volume
 EOF
 }
 
@@ -70,7 +49,6 @@ case "$opt" in
     --dec|-d)
         volume_dec
         ;;
-    --printvol|-pv) volume_vol ;;
     --help|-h) help_menu ;;
     *)
         echo "Error: '${opt:- }' Invalid option."
