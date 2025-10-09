@@ -9,7 +9,7 @@ case "$choice" in
         slock
         ;;
     Logout)
-        xkill -9 "$(pidof Xorg)"
+        pkill -KILL -u "$USER"
         ;;
     Reboot)
         systemctl reboot
