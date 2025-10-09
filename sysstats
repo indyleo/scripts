@@ -63,8 +63,70 @@ function issrec() {
     fi
 }
 
+function bbattery() {
+    # Get battery info
+    battery_info=$(acpi -b)
+
+    # Filter out lines with "Unknown" or "rate information unavailable"
+    valid_batteries=$(echo "$battery_info" | grep -v "Unknown" | grep -v "rate information unavailable")
+
+    # Use the first valid battery, or fallback to the first available
+    if [ -n "$valid_batteries" ]; then
+        active_battery_line=$(echo "$valid_batteries" | head -n 1)
+    else
+        active_battery_line=$(echo "$battery_info" | head -n 1)
+    fi
+
+    # Extract the percentage
+    percent=$(echo "$active_battery_line" | grep -o '[0-9]\+%' | tr -d '%')
+
+    # Extract the status: Charging, Discharging, Full, etc.
+    status=$(echo "$active_battery_line" | cut -d: -f2 | cut -d, -f1 | xargs)
+
+    # Choose an icon based on status
+    case "$status" in
+        Charging|Not\ charging)
+            if [[ $percent -ge 100 ]]; then icon="󰂅 "
+            elif [[ $percent -ge 90 ]]; then icon="󰂋 "
+            elif [[ $percent -ge 80 ]]; then icon="󰂊 "
+            elif [[ $percent -ge 70 ]]; then icon="󰢞 "
+            elif [[ $percent -ge 60 ]]; then icon="󰂉 "
+            elif [[ $percent -ge 50 ]]; then icon="󰢝 "
+            elif [[ $percent -ge 40 ]]; then icon="󰂈 "
+            elif [[ $percent -ge 30 ]]; then icon="󰂇 "
+            elif [[ $percent -ge 20 ]]; then icon="󰂆 "
+            elif [[ $percent -ge 10 ]]; then icon="󰢜 "
+            elif [[ $percent -ge 0 ]]; then icon="󰢟 "
+            fi
+            ;;
+        Discharging)
+            if [[ $percent -ge 100 ]]; then icon="󰁹 "
+            elif [[ $percent -ge 90 ]]; then icon="󰂂 "
+            elif [[ $percent -ge 80 ]]; then icon="󰂁 "
+            elif [[ $percent -ge 70 ]]; then icon="󰂀 "
+            elif [[ $percent -ge 60 ]]; then icon="󰁿 "
+            elif [[ $percent -ge 50 ]]; then icon="󰁾 "
+            elif [[ $percent -ge 40 ]]; then icon="󰁽 "
+            elif [[ $percent -ge 30 ]]; then icon="󰁼 "
+            elif [[ $percent -ge 20 ]]; then icon="󰁻 "
+            elif [[ $percent -ge 10 ]]; then icon="󰁺 "
+            elif [[ $percent -ge 0 ]]; then icon="󰂎 "
+            fi
+            ;;
+        Full)
+            icon="󰂄 "
+            ;;
+        *)
+            icon="󰂑 "
+            ;;
+    esac
+
+    # Output
+    echo "$icon $percent%"
+}
+
 function all_stats() {
-    echo "$(issrec) | $(disk_usage) | $(memory_usage) | $(cpu_load) | $(wifi_status) | $(tail_status) | $(ddate) | $(ttime)"
+    echo "$(issrec) | $(disk_usage) | $(memory_usage) | $(cpu_load) | $(bbattery) | $(wifi_status) | $(tail_status) | $(ddate) | $(ttime)"
 }
 
 function help_menu() {
@@ -82,6 +144,7 @@ function help_menu() {
     time        Display time
     date_time   Display date and time
     isrec       Display recording status
+    battery     Display battery status
     all         Display all stats
 EOF
 }
@@ -113,6 +176,9 @@ case "$opt" in
         ;;
     isrec)
         issrec
+        ;;
+    battery)
+        bbattery
         ;;
     all)
         all_stats
