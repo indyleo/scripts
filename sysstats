@@ -55,8 +55,16 @@ function tail_status() {
     fi
 }
 
+function issrec() {
+    if [[ -f "/tmp/recordingicon" ]]; then
+        cat "/tmp/recordingicon"
+    elif [[ ! -f "/tmp/recordicon" ]]; then
+        echo "  Not Recording"
+    fi
+}
+
 function all_stats() {
-    echo "$(disk_usage) | $(memory_usage) | $(cpu_load) | $(wifi_status) | $(tail_status) | $(ddate) | $(ttime)"
+    echo "$(issrec) | $(disk_usage) | $(memory_usage) | $(cpu_load) | $(wifi_status) | $(tail_status) | $(ddate) | $(ttime)"
 }
 
 function help_menu() {
@@ -73,6 +81,7 @@ function help_menu() {
     date        Display date
     time        Display time
     date_time   Display date and time
+    isrec       Display recording status
     all         Display all stats
 EOF
 }
@@ -101,6 +110,9 @@ case "$opt" in
         ;;
     date_time)
         date_time
+        ;;
+    isrec)
+        issrec
         ;;
     all)
         all_stats
