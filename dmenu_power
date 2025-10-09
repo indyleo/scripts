@@ -6,10 +6,10 @@ choice=$(echo -e "$options" | dmenu -p "Power Menu")
 
 case "$choice" in
     Lock)
-        wmc lock
+        slock
         ;;
     Logout)
-        wmc logout
+        xkill -9 "$(pidof Xorg)"
         ;;
     Reboot)
         systemctl reboot
