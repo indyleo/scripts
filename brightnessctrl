@@ -32,38 +32,6 @@ function brightness_dec() {
 
 }
 
-function brightness_get() {
-    line="$(brightnessctl | grep "%")"
-    brightness_raw=$(echo "$line" | grep -oP '\(\K[0-9]+%')
-    brightness=${brightness_raw%\%}
-
-    if [[ "$brightness" -eq 100 ]]; then
-        echo "󰛨  ${brightness_raw}"
-    elif [[ "$brightness" -ge 90 ]]; then
-        echo "󱩖 ${brightness_raw}"
-    elif [[ "$brightness" -ge 80 ]]; then
-        echo "󱩖 ${brightness_raw}"
-    elif [[ "$brightness" -ge 70 ]]; then
-        echo "󱩕 ${brightness_raw}"
-    elif [[ "$brightness" -ge 60 ]]; then
-        echo "󱩔 ${brightness_raw}"
-    elif [[ "$brightness" -ge 50 ]]; then
-        echo "󱩓 ${brightness_raw}"
-    elif [[ "$brightness" -ge 40 ]]; then
-        echo "󱩒 ${brightness_raw}"
-    elif [[ "$brightness" -ge 30 ]]; then
-        echo "󱩑 ${brightness_raw}"
-    elif [[ "$brightness" -ge 20 ]]; then
-        echo "󱩐 ${brightness_raw}"
-    elif [[ "$brightness" -ge 10 ]]; then
-        echo "󱩏 ${brightness_raw}"
-    elif [[ "$brightness" -ge 0 ]]; then
-        echo "󱩎 ${brightness_raw}"
-    else
-        echo "󰹐 "
-    fi
-}
-
 function help_menu() {
     cat << EOF
     Usage: $(basename "$0") [Options]
@@ -72,7 +40,6 @@ Options:
   --help, -h             Show this help message
   --inc, -i \${num}      increase brightness by [Amount] or 5 if not specified
   --dec, -d \${num}      decrease brightness by [Amount] or 5 if not specified
-  --get, -g              get current brightness
 EOF
 }
 
@@ -82,9 +49,6 @@ case "$opt" in
         ;;
     --dec|-d)
         brightness_dec "${num}"
-        ;;
-    --get|-g)
-        brightness_get
         ;;
     --help|-h)
         help_menu

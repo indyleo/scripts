@@ -145,9 +145,42 @@ function vvolume() {
     fi
 }
 
+function bbrightness() {
+    line="$(brightnessctl | grep "%")"
+    brightness_raw=$(echo "$line" | grep -oP '\(\K[0-9]+%')
+    brightness=${brightness_raw%\%}
+
+    if [[ "$brightness" -eq 100 ]]; then
+        echo "󰛨  ${brightness_raw}"
+    elif [[ "$brightness" -ge 90 ]]; then
+        echo "󱩖 ${brightness_raw}"
+    elif [[ "$brightness" -ge 80 ]]; then
+        echo "󱩖 ${brightness_raw}"
+    elif [[ "$brightness" -ge 70 ]]; then
+        echo "󱩕 ${brightness_raw}"
+    elif [[ "$brightness" -ge 60 ]]; then
+        echo "󱩔 ${brightness_raw}"
+    elif [[ "$brightness" -ge 50 ]]; then
+        echo "󱩓 ${brightness_raw}"
+    elif [[ "$brightness" -ge 40 ]]; then
+        echo "󱩒 ${brightness_raw}"
+    elif [[ "$brightness" -ge 30 ]]; then
+        echo "󱩑 ${brightness_raw}"
+    elif [[ "$brightness" -ge 20 ]]; then
+        echo "󱩐 ${brightness_raw}"
+    elif [[ "$brightness" -ge 10 ]]; then
+        echo "󱩏 ${brightness_raw}"
+    elif [[ "$brightness" -ge 0 ]]; then
+        echo "󱩎 ${brightness_raw}"
+    else
+        echo "󰹐 "
+    fi
+}
+
+
 
 function all_stats() {
-    echo "$(issrec) | $(disk_usage) | $(memory_usage) | $(cpu_load) | $(vvolume) | $(bbattery) | $(wifi_status) | $(tail_status) | $(ddate) | $(ttime)"
+    echo "$(issrec) | $(disk_usage) | $(memory_usage) | $(cpu_load) | $(bbrightness) | $(vvolume) | $(bbattery) | $(wifi_status) | $(tail_status) | $(ddate) | $(ttime)"
 }
 
 function help_menu() {
@@ -167,6 +200,7 @@ function help_menu() {
     isrec       Display recording status
     battery     Display battery status
     volume      Display volume
+    brightness  Display brightness
     all         Display all stats
 EOF
 }
@@ -204,6 +238,9 @@ case "$opt" in
         ;;
     volume)
         vvolume
+        ;;
+    brightness)
+        bbrightness
         ;;
     all)
         all_stats
