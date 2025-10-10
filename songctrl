@@ -13,7 +13,7 @@ fi
     source "${XDG_SCRIPTS_HOME:-$HOME/.local/scripts}/utils"
 
 opt="${1:-}"
-player="${2:-Supersonic}"
+player="${2:-SubsonicTUI}"
 cutpoint="${3:-20}"
 
 function song_togglepause() {
