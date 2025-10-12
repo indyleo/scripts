@@ -1,63 +1,100 @@
 #!/bin/env bash
 
+# === ERRORS ===
 set -euo pipefail
 
 # === CONFIG ===
-REPO="neovim/neovim"
+REPO="neovim/neovim-releases"   # Correct repo with AppImage assets
 INSTALL_DIR="${HOME}/.local/bin"
 INSTALL_NAME="nvim"
 TARGET="${INSTALL_DIR}/${INSTALL_NAME}"
 
+# === COLORS ===
+GREEN="\e[32m"
+YELLOW="\e[33m"
+RED="\e[31m"
+BOLD="\e[1m"
+RESET="\e[0m"
+
 # === FUNCTIONS ===
 
+function check_dependencies() {
+    if ! command -v curl >/dev/null 2>&1; then
+        echo -e "${RED}❌ curl is required. Install it and retry.${RESET}"
+        exit 1
+    fi
+    if ! command -v grep >/dev/null 2>&1; then
+        echo -e "${RED}❌ grep is required. Install it and retry.${RESET}"
+        exit 1
+    fi
+}
+
 function get_arch_key() {
-    local arch
-    arch=$(uname -m)
-    case "$arch" in
-        x86_64)   echo "x86_64|linux64" ;;
-        aarch64)  echo "arm64|aarch64" ;;
-        armv7l)   echo "armv7|arm32" ;;
-        *)        echo "$arch" ;;
+    case "$(uname -m)" in
+        x86_64)  echo "x86_64" ;;
+        aarch64) echo "arm64" ;;
+        armv7l)  echo "armv7" ;;
+        *)       echo "" ;;  # unknown arch
     esac
 }
 
 function fetch_latest_release_tag() {
-    curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep -Eo '"tag_name":\s*"v[^"]+"' | head -n1 | cut -d'"' -f4
+    curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" |
+    grep -Eo '"tag_name":\s*"v[^"]+"' | head -n1 | cut -d'"' -f4
 }
 
-function fetch_latest_url() {
-    local arch_key="$1"
-    local json download_url
-    echo "Fetching latest release info for ${REPO}..."
-    json=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest")
+function construct_download_url() {
+    local tag="$1"
+    local arch="$2"
 
-    download_url=$(echo "$json" | grep -Eo "https://[^\"']*(${arch_key})[^\"']*appimage[^\"']*" | head -n1)
-    if [ -z "$download_url" ]; then
-        echo "No arch match, falling back to first AppImage..."
-        download_url=$(echo "$json" | grep -Eo "https://[^\"']*appimage[^\"']*" | head -n1)
-    fi
-    echo "$download_url"
+    case "$arch" in
+        x86_64) echo "https://github.com/${REPO}/releases/download/${tag}/nvim-linux-x86_64.AppImage" ;;
+        arm64)  echo "https://github.com/${REPO}/releases/download/${tag}/nvim-linux-arm64.AppImage" ;;
+        armv7)  echo "https://github.com/${REPO}/releases/download/${tag}/nvim-linux-armv7.AppImage" ;;
+        *)      echo "" ;;
+    esac
 }
 
 function install_nvim() {
+    check_dependencies
     mkdir -p "$INSTALL_DIR"
-    local arch_key download_url tmpfile
 
-    arch_key=$(get_arch_key)
-    download_url=$(fetch_latest_url "$arch_key")
+    local arch tag download_url tmpfile
+    arch=$(get_arch_key)
+    tag=$(fetch_latest_release_tag)
+    download_url=$(construct_download_url "$tag" "$arch")
 
-    if [ -z "$download_url" ]; then
-        echo "❌ Could not find AppImage for this architecture."
+    if [[ -z "$download_url" ]]; then
+        echo -e "${RED}❌ No AppImage found for your architecture (${arch}).${RESET}"
         exit 1
     fi
 
-    echo "Downloading: $download_url"
-    tmpfile=$(mktemp)
-    curl -L --progress-bar -o "$tmpfile" "$download_url"
+    # Skip install if already latest version and not forcing
+    if [[ "$FORCE_INSTALL" != true ]] && [ -x "$TARGET" ]; then
+        local_version=$("$TARGET" --version | head -n1 | grep -Eo 'v[0-9]+\.[0-9]+\.[0-9]+')
+        if [[ "$local_version" == "$tag" ]]; then
+            echo -e "${GREEN}✅ You already have the latest version ($local_version). Use --force to reinstall.${RESET}"
+            return
+        fi
+    fi
+
+    echo -e "${YELLOW}Downloading:${RESET} $download_url"
+    tmpfile=$(mktemp --suffix=.AppImage)
+    trap 'rm -f "$tmpfile"' EXIT
+    curl -fL --progress-bar -o "$tmpfile" "$download_url"
 
     chmod +x "$tmpfile"
     mv -f "$tmpfile" "$TARGET"
-    echo "✅ Installed Neovim AppImage to: $TARGET"
+    trap - EXIT
+
+    echo -e "${GREEN}✅ Installed Neovim AppImage to:${RESET} $TARGET"
+
+    if ! [[ ":$PATH:" == *":$INSTALL_DIR:"* ]]; then
+        SHELL_RC="${HOME}/.bashrc"
+        [[ "$SHELL" == *"zsh"* ]] && SHELL_RC="${HOME}/.zshrc"
+        echo -e "${YELLOW}⚠️  $INSTALL_DIR is not in your PATH. Add this to your shell rc file:${RESET}"
+        echo "    export PATH=\"\$PATH:$INSTALL_DIR\"  # add to $SHELL_RC"
+    fi
 
     check_nvim
 }
@@ -65,7 +102,7 @@ function install_nvim() {
 function uninstall_nvim() {
     if [ -f "$TARGET" ]; then
         rm -f "$TARGET"
-        echo "🗑️  Removed $TARGET"
+        echo -e "${RED}🗑️  Removed $TARGET${RESET}"
     else
         echo "Neovim not installed at $TARGET"
     fi
@@ -73,36 +110,35 @@ function uninstall_nvim() {
 
 function check_nvim() {
     if [ -x "$TARGET" ]; then
-        echo "🔍 Installed Neovim version:"
+        echo -e "${GREEN}🔍 Installed Neovim version:${RESET}"
         "$TARGET" --version | head -n3
     else
-        echo "❌ No Neovim AppImage installed in $INSTALL_DIR"
+        echo -e "${RED}❌ No Neovim AppImage installed in $INSTALL_DIR${RESET}"
     fi
 }
 
 function compare_versions() {
     local local_version latest_version
     if [ ! -x "$TARGET" ]; then
-        echo "❌ No local Neovim found at $TARGET"
+        echo -e "${RED}❌ No local Neovim found at $TARGET${RESET}"
         exit 1
     fi
 
-    # Extract first line version like "NVIM v0.11.4"
     local_version=$("$TARGET" --version | head -n1 | grep -Eo 'v[0-9]+\.[0-9]+\.[0-9]+')
     latest_version=$(fetch_latest_release_tag)
 
     if [ -z "$latest_version" ]; then
-        echo "⚠️  Could not fetch latest version info."
+        echo -e "${YELLOW}⚠️  Could not fetch latest version info.${RESET}"
         exit 1
     fi
 
-    echo "Local version:  $local_version"
-    echo "Latest version: $latest_version"
+    echo -e "${BOLD}Local version:${RESET}  $local_version"
+    echo -e "${BOLD}Latest version:${RESET} $latest_version"
 
     if [ "$local_version" = "$latest_version" ]; then
-        echo "✅ You already have the newest stable version."
+        echo -e "${GREEN}✅ You already have the newest stable version.${RESET}"
     else
-        echo "⬆️  Update available! Run: $0 install"
+        echo -e "${YELLOW}⬆️  Update available! Run:${RESET} $0 install"
     fi
 }
 
@@ -112,6 +148,7 @@ Usage: $(basename "$0") [OPTION]
 
 Options:
   install     - Download and install latest Neovim AppImage
+    --force   - Force install even if latest version is already installed
   uninstall   - Remove installed AppImage
   check       - Show current installed version
   compare     - Check if your version is up to date with GitHub
@@ -124,14 +161,23 @@ EOF
 
 # === MAIN ===
 opt="${1:-}"
+subopt="${2:-}"
+
 case "$opt" in
-    install) install_nvim ;;
+    install)
+        if [[ "$subopt" == "--force" ]]; then
+            FORCE_INSTALL=true
+        else
+            FORCE_INSTALL=false
+        fi
+        install_nvim
+        ;;
     uninstall) uninstall_nvim ;;
     check) check_nvim ;;
     compare) compare_versions ;;
     help) help_menu ;;
     *)
-        echo "Error: '${opt:- }' is an invalid option."
+        echo -e "${RED}Error:${RESET} '${opt:- }' is an invalid option."
         help_menu
         exit 1 ;;
 esac
