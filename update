@@ -26,7 +26,7 @@ function update_rust() {
 function update_bob() {
     if command -v bob &>/dev/null; then
         echo -e "\n🎛️ Updating Bob..."
-        bob update
+        bob install
     fi
 }
 
