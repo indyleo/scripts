@@ -1,0 +1,21 @@
+#!/bin/env bash
+
+echo "🔍 Detecting capture video device..."
+
+# Auto-detect first connected USB/UVC/HDMI capture device
+VIDEO_DEV=$(v4l2-ctl --list-devices 2>/dev/null | awk '/usb|UVC|HDMI|Capture/{getline; print $1; exit}')
+VIDEO_DEV=${VIDEO_DEV:-/dev/video0}
+
+echo "🎥 Using video device: $VIDEO_DEV"
+echo "🔊 Audio disabled; route separately if needed via PipeWire/qpwgraph"
+echo "Press q to quit."
+
+# Run MPV preview (video only)
+mpv av://v4l2:"$VIDEO_DEV" \
+    --no-audio \
+    --profile=low-latency \
+    --untimed \
+    --no-cache \
+    --force-window=yes \
+    --title="USB3.0 Capture Preview" \
+    --fs
