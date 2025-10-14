@@ -1,11 +1,7 @@
 #!/bin/env bash
 
-# Source utils
-[[ -f "${XDG_SCRIPTS_HOME:-$HOME/.local/scripts}/utils" ]] && \
-    source "${XDG_SCRIPTS_HOME:-$HOME/.local/scripts}/utils"
-
 # Command to run when Chromium starts playing media
-on_browser_play() {
+function on_browser_play() {
     echo "Browser started playing media at $(date)"
 }
 

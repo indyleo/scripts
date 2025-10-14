@@ -8,10 +8,6 @@ if ! command -v playerctl &> /dev/null; then
     exit 1
 fi
 
-# Source utils
-[[ -f "${XDG_SCRIPTS_HOME:-$HOME/.local/scripts}/utils" ]] && \
-    source "${XDG_SCRIPTS_HOME:-$HOME/.local/scripts}/utils"
-
 # Preferred players in order
 players=("chromium" "firefox" "brave")
 

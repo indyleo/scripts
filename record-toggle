@@ -6,10 +6,6 @@ if ! command -v ffmpeg &> /dev/null; then
     exit 1
 fi
 
-# Source utils
-[[ -f "${XDG_SCRIPTS_HOME:-$HOME/.local/scripts}/utils" ]] && \
-    source "${XDG_SCRIPTS_HOME:-$HOME/.local/scripts}/utils"
-
 function record() {
     # Create output directory
     now="$(date '+%a__%b%d__%H_%M_%S')"

@@ -8,10 +8,6 @@ if ! command -v pamixer &> /dev/null; then
     exit 1
 fi
 
-# Source utils
-[[ -f "${XDG_SCRIPTS_HOME:-$HOME/.local/scripts}/utils" ]] && \
-    source "${XDG_SCRIPTS_HOME:-$HOME/.local/scripts}/utils"
-
 opt="${1:-}"
 num="${2:-5}"
 

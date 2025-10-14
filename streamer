@@ -1,5 +1,11 @@
 #!/bin/env bash
 
+# Ensure ffmpeg is installed
+if ! command -v ffmpeg &> /dev/null; then
+    echo "Error: ffmpeg not found. Please install it first."
+    exit 1
+fi
+
 INRES="1280x720" # input resolution
 OUTRES="1280" # output resolution horizontal. vertical is calculated.
 FPS="30" # target FPS
