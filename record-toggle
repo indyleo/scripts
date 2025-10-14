@@ -6,6 +6,9 @@ if ! command -v ffmpeg &> /dev/null; then
     exit 1
 fi
 
+# Vars
+FPS=60
+
 function record() {
     # Create output directory
     now="$(date '+%a__%b%d__%H_%M_%S')"
@@ -19,7 +22,7 @@ function record() {
     offset=${offset//+/,}
 
     # Screen capture only the primary monitor
-    ffmpeg -video_size "$res" -f x11grab -r 30 -i "$DISPLAY+${offset}" -c:v h264 -qp 0 \
+    ffmpeg -video_size "$res" -f x11grab -r "$FPS" -i "$DISPLAY+${offset}" -c:v h264 -qp 0 \
         "${outputloc}/vid/video_${now}.mkv" &
     echo $! > /tmp/recpid
 
