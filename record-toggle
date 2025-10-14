@@ -40,7 +40,6 @@ function record() {
     # Metadata
     echo "$now" > /tmp/recording_timestamp
     echo "$outputloc" > /tmp/recording_outputdir
-    echo "󰑊 Recording" > /tmp/recordingicon
 
     notify-send "Recording started"
 }
@@ -48,9 +47,6 @@ function record() {
 function end() {
     kill -15 "$(cat /tmp/recpid)" "$(cat /tmp/audpid)" "$(cat /tmp/deskaudpid)"
     wait
-
-    # Update statusbar
-    rm -fv  /tmp/recordingicon
 
     now=$(cat /tmp/recording_timestamp)
     outputloc=$(cat /tmp/recording_outputdir)

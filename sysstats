@@ -55,11 +55,19 @@ function tail_status() {
     fi
 }
 
-function issrec() {
-    if [[ -f "/tmp/recordingicon" ]]; then
-        cat "/tmp/recordingicon"
-    elif [[ ! -f "/tmp/recordicon" ]]; then
+function is_rec() {
+    if [[ -f "/tmp/recpid" ]]; then
+        echo "󰑊 Recording"
+    elif [[ ! -f "/tmp/recpid" ]]; then
         echo "  Not Recording"
+    fi
+}
+
+function is_stream() {
+    if [[ -f "/tmp/streampid" ]]; then
+        echo "󰑊 Streaming"
+    elif [[ ! -f "/tmp/streampid" ]]; then
+        echo "  Not Streaming"
     fi
 }
 
@@ -180,7 +188,7 @@ function bbrightness() {
 
 
 function all_stats() {
-    echo "$(issrec) | $(disk_usage) | $(memory_usage) | $(cpu_load) | $(bbrightness) | $(vvolume) | $(bbattery) | $(wifi_status) | $(tail_status) | $(ddate) | $(ttime)"
+    echo "$(is_stream) | $(is_rec) | $(disk_usage) | $(memory_usage) | $(cpu_load) | $(bbrightness) | $(vvolume) | $(bbattery) | $(wifi_status) | $(tail_status) | $(ddate) | $(ttime)"
 }
 
 function help_menu() {
@@ -198,6 +206,7 @@ function help_menu() {
     time        Display time
     date_time   Display date and time
     isrec       Display recording status
+    isstream    Display streaming status
     battery     Display battery status
     volume      Display volume
     brightness  Display brightness
@@ -231,7 +240,10 @@ case "$opt" in
         date_time
         ;;
     isrec)
-        issrec
+        is_rec
+        ;;
+    isstream)
+        is_stream
         ;;
     battery)
         bbattery

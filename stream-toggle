@@ -1,0 +1,60 @@
+#!/bin/env bash
+
+# Ensure ffmpeg is installed
+if ! command -v ffmpeg &> /dev/null; then
+    echo "Error: ffmpeg not found. Please install it first."
+    exit 1
+fi
+
+# --- Detect primary monitor ---
+primary_info=$(xrandr | awk '/ primary / {print $4}')
+INRES=${primary_info%%+*}       # Resolution (WIDTHxHEIGHT)
+offset=${primary_info#*+}       # Offset (X+Y)
+offset=${offset//+/,}           # Format for ffmpeg : X,Y
+
+# Split width and height
+screen_width=${INRES%x*}
+screen_height=${INRES#*x}
+
+# --- Set output width automatically ---
+OUTRES=$screen_width
+
+# --- Stream Settings ---
+FPS="30"               # target FPS
+GOP="60"               # i-frame interval
+GOPMIN="30"            # min i-frame interval
+THREADS="3"            # max threads
+CBR="1500k"            # constant bitrate
+QUALITY="ultrafast"    # ffmpeg preset
+AUDIO_SRATE="44100"
+AUDIO_CHANNELS="2"     # 1 for mono, 2 for stereo
+AUDIO_ERATE="96k"      # audio bitrate
+STREAM_KEY="$TWITCH_TOKEN" # twitch stream key
+SERVER="ingest.global-contribute"
+
+# --- Stream Function ---
+function start_stream() {
+    ffmpeg -f x11grab -s "$INRES" -r "$FPS" -i :0.0 \
+        -f alsa -i pulse -f alsa -i pulse \
+        -f flv -filter_complex amix=inputs=2 -ac $AUDIO_CHANNELS -b:a $AUDIO_ERATE -ar $AUDIO_SRATE \
+        -vcodec libx264 -g $GOP -keyint_min $GOPMIN -b:v $CBR -minrate $CBR \
+        -maxrate $CBR -vf "scale=$OUTRES:-1,format=yuv420p" \
+        -preset $QUALITY -acodec libmp3lame -threads $THREADS -strict normal \
+        -bufsize $CBR "rtmp://$SERVER.live-video.net/app/$STREAM_KEY" &
+    echo $! > /tmp/streampid
+
+    notify-send "Twitch stream started"
+}
+
+# --- Stop Stream Function ---
+function stop_stream() {
+    kill -15 "$(cat /tmp/streampid)"
+    wait
+
+    rm -fv /tmp/streampid
+
+    notify-send "Twitch stream stopped"
+}
+
+# --- Toggle Stream ---
+([[ -f /tmp/streampid ]] && stop_stream) || start_stream
