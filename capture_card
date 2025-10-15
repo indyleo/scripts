@@ -17,5 +17,4 @@ mpv av://v4l2:"$VIDEO_DEV" \
     --untimed \
     --no-cache \
     --force-window=yes \
-    --title="USB3.0 Capture Preview" \
-    --fs
+    --title="USB3.0 Capture Preview"
