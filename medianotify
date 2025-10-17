@@ -1,0 +1,118 @@
+#!/bin/env bash
+# medianotify
+
+set -euo pipefail
+
+TMPDIR="${XDG_RUNTIME_DIR:-/tmp}/media-notify"
+mkdir -p "$TMPDIR"
+ICON_FALLBACK="/usr/share/icons/hicolor/64x64/apps/multimedia-player.png"
+
+# ---- Configurable ----
+SONG_PLAYERS=("SubsonicTUI")
+BROWSER_PLAYERS=("firefox" "chromium" "brave" "google-chrome")
+
+# -----------------------
+
+function notify_song() {
+    local title="$1"
+    local artist="$2"
+    local album="$3"
+    local arturl="$4"
+
+    local body=""
+    [ -n "$artist" ] && body="$artist"
+    [ -n "$album" ] && body="${body}${body:+ — }$album"
+
+    local icon_path="$ICON_FALLBACK"
+
+    if [ -n "$arturl" ]; then
+        arturl="${arturl#file://}"
+        local fname="$(echo "$arturl" | sed 's/[^a-zA-Z0-9._-]/_/g')"
+        icon_path="$TMPDIR/$fname"
+
+        if [[ "$arturl" =~ ^https?:// ]]; then
+            curl -s -L --fail "$arturl" -o "$icon_path" || icon_path="$ICON_FALLBACK"
+        elif [ -f "$arturl" ]; then
+            cp "$arturl" "$icon_path" || icon_path="$ICON_FALLBACK"
+        fi
+    fi
+
+    notify-send "$title" "$body" --icon="$icon_path"
+}
+
+function find_player() {
+    local -n list=$1
+    local active
+    active=$(playerctl -l 2>/dev/null || true)
+    for p in "${list[@]}"; do
+        match=$(echo "$active" | grep -i "^$p" | head -n1 || true)
+        if [[ -n "$match" ]]; then
+            echo "$match"
+            return 0
+        fi
+    done
+    return 1
+}
+
+function watch_player() {
+    local player="$1"
+    local type="$2" # song or browser
+    local last_title=""
+
+    echo "🎧 Watching $type player: $player"
+
+    playerctl -p "$player" metadata --follow | while read -r _; do
+        local title artist album arturl
+        title=$(playerctl -p "$player" metadata title 2>/dev/null || echo "")
+        artist=$(playerctl -p "$player" metadata artist 2>/dev/null || echo "")
+        album=$(playerctl -p "$player" metadata album 2>/dev/null || echo "")
+        arturl=$(playerctl -p "$player" metadata mpris:artUrl 2>/dev/null || echo "")
+
+        # Only notify if the title changed
+        if [[ -n "$title" && "$title" != "$last_title" ]]; then
+            # Reuse notify_song logic for both song and browser
+            notify_song "$title" "$artist" "$album" "$arturl"
+            last_title="$title"
+        fi
+    done
+}
+
+# ---- Argument handling ----
+mode="${1:-both}"
+
+case "$mode" in
+    song)
+        song_player=$(find_player SONG_PLAYERS || true)
+        if [[ -z "$song_player" ]]; then
+            notify-send "No music player found" "Open Spotify/VLC/etc."
+            exit 0
+        fi
+        watch_player "$song_player" "song"
+        ;;
+    browser)
+        browser_player=$(find_player BROWSER_PLAYERS || true)
+        if [[ -z "$browser_player" ]]; then
+            notify-send "No browser media found" "Play something on YouTube"
+            exit 0
+        fi
+        watch_player "$browser_player" "browser"
+        ;;
+    both)
+        song_player=$(find_player SONG_PLAYERS || true)
+        browser_player=$(find_player BROWSER_PLAYERS || true)
+
+        if [[ -z "$song_player" && -z "$browser_player" ]]; then
+            notify-send "No media players found" "Open Spotify or YouTube"
+            exit 0
+        fi
+
+        [[ -n "$song_player" ]] && watch_player "$song_player" "song" &
+        [[ -n "$browser_player" ]] && watch_player "$browser_player" "browser" &
+
+        wait
+        ;;
+    *)
+        echo "Usage: $(basename "$0") [song|browser|both]"
+        exit 1
+        ;;
+esac
