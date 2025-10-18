@@ -1,0 +1,15 @@
+#!/bin/env bash
+
+choice=$(printf "Record Toggle\nStream Toggle" | dmenu -p "Select action:")
+
+case "$choice" in
+    "Record Toggle")
+        record-toggle && notify-send "🎙 Recording toggled"
+        ;;
+    "Stream Toggle")
+        stream-toggle && notify-send "📡 Streaming toggled"
+        ;;
+    *)
+        exit 1
+        ;;
+esac

@@ -1,5 +1,5 @@
 #!/bin/env bash
-# medianotify
+# medianotify (auto-reconnect version)
 
 set -euo pipefail
 
@@ -13,7 +13,7 @@ BROWSER_PLAYERS=("firefox" "chromium" "brave" "google-chrome")
 
 # -----------------------
 
-function notify_song() {
+notify_song() {
     local title="$1"
     local artist="$2"
     local album="$3"
@@ -27,7 +27,8 @@ function notify_song() {
 
     if [ -n "$arturl" ]; then
         arturl="${arturl#file://}"
-        local fname="$(echo "$arturl" | sed 's/[^a-zA-Z0-9._-]/_/g')"
+        local fname
+        fname="$(echo "$arturl" | sed 's/[^a-zA-Z0-9._-]/_/g')"
         icon_path="$TMPDIR/$fname"
 
         if [[ "$arturl" =~ ^https?:// ]]; then
@@ -40,7 +41,7 @@ function notify_song() {
     notify-send "$title" "$body" --icon="$icon_path"
 }
 
-function find_player() {
+find_player() {
     local -n list=$1
     local active
     active=$(playerctl -l 2>/dev/null || true)
@@ -54,7 +55,7 @@ function find_player() {
     return 1
 }
 
-function watch_player() {
+watch_player() {
     local player="$1"
     local type="$2" # song or browser
     local last_title=""
@@ -70,10 +71,29 @@ function watch_player() {
 
         # Only notify if the title changed
         if [[ -n "$title" && "$title" != "$last_title" ]]; then
-            # Reuse notify_song logic for both song and browser
             notify_song "$title" "$artist" "$album" "$arturl"
             last_title="$title"
         fi
+    done
+}
+
+# Keeps retrying until a player appears
+wait_for_player() {
+    local listname="$1"
+    local notify_on_fail="${2:-false}"
+    local player=""
+
+    while true; do
+        player=$(find_player "$listname" || true)
+        if [[ -n "$player" ]]; then
+            echo "$player"
+            return 0
+        fi
+        if [[ "$notify_on_fail" == true ]]; then
+            notify-send "No music player found" "Waiting for Spotify/VLC/SubsonicTUI..."
+            notify_on_fail=false # only show once
+        fi
+        sleep 1
     done
 }
 
@@ -82,32 +102,23 @@ mode="${1:-both}"
 
 case "$mode" in
     song)
-        song_player=$(find_player SONG_PLAYERS || true)
-        if [[ -z "$song_player" ]]; then
-            notify-send "No music player found" "Open Spotify/VLC/etc."
-            exit 0
-        fi
+        song_player=$(wait_for_player SONG_PLAYERS true)
         watch_player "$song_player" "song"
         ;;
     browser)
-        browser_player=$(find_player BROWSER_PLAYERS || true)
-        if [[ -z "$browser_player" ]]; then
-            notify-send "No browser media found" "Play something on YouTube"
-            exit 0
-        fi
+        browser_player=$(wait_for_player BROWSER_PLAYERS false)
         watch_player "$browser_player" "browser"
         ;;
     both)
-        song_player=$(find_player SONG_PLAYERS || true)
-        browser_player=$(find_player BROWSER_PLAYERS || true)
+        (
+            song_player=$(wait_for_player SONG_PLAYERS true)
+            watch_player "$song_player" "song"
+        ) &
 
-        if [[ -z "$song_player" && -z "$browser_player" ]]; then
-            notify-send "No media players found" "Open Spotify or YouTube"
-            exit 0
-        fi
-
-        [[ -n "$song_player" ]] && watch_player "$song_player" "song" &
-        [[ -n "$browser_player" ]] && watch_player "$browser_player" "browser" &
+        (
+            browser_player=$(wait_for_player BROWSER_PLAYERS false)
+            watch_player "$browser_player" "browser"
+        ) &
 
         wait
         ;;
