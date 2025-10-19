@@ -1,0 +1,92 @@
+#!/bin/env bash
+
+DOWNLOADS="$HOME/Downloads"
+
+# === Define category folders ===
+declare -A DIRS=(
+    [Pictures]="$HOME/Pictures"
+    [Videos]="$HOME/Videos"
+    [Documents]="$HOME/Documents"
+    [Archives]="$HOME/Archives"
+    [Music]="$HOME/Music"
+    [Code]="$HOME/Code"
+    [Diffs]="$HOME/Diffs"
+    [Bin]="$HOME/Bin"
+    [Applications]="$HOME/Applications"
+    [Img]="$HOME/Img"
+    [Other]="$HOME/Other"
+)
+
+# === Define extensions for each category ===
+declare -A EXTENSIONS=(
+    [Pictures]="jpg jpeg png gif bmp webp svg"
+    [Videos]="mp4 mkv mov avi webm"
+    [Documents]="pdf docx doc txt md odt"
+    [Archives]="zip tar gz 7z rar"
+    [Music]="mp3 wav flac ogg m4a"
+    [Code]="py cpp h c js html css sh rb go"
+    [Diffs]="diff patch"
+    [Bin]="bin o obj"
+    [Applications]="deb rpm exe msi pkg AppImage"
+    [Img]="iso img vdi vmdk qcow2"
+)
+
+# === Ensure target directories exist ===
+for dir in "${DIRS[@]}"; do
+    mkdir -p "$dir"
+done
+
+# === Function to move a file ===
+move_file() {
+    local file="$1"
+    [[ ! -f "$file" ]] && return
+
+    local filename=$(basename "$file")
+    local ext="${filename##*.}"
+    ext=$(echo "$ext" | tr '[:upper:]' '[:lower:]')
+    local moved=false
+
+    # Skip in-progress downloads
+    case "$filename" in
+        *.part|*.crdownload|*.tmp|*.download|.org.chromium.*)
+            return
+            ;;
+    esac
+
+    for category in "${!EXTENSIONS[@]}"; do
+        for e in ${EXTENSIONS[$category]}; do
+            if [[ "$ext" == "$e" ]]; then
+                target="${DIRS[$category]}/$filename"
+                counter=1
+                while [[ -e "$target" ]]; do
+                    target="${DIRS[$category]}/${filename%.*}_$counter.${ext}"
+                    ((counter++))
+                done
+                mv "$file" "$target"
+                echo "[Moved] $filename → ${DIRS[$category]}"
+                moved=true
+                break 2
+            fi
+        done
+    done
+
+    if ! $moved; then
+        target="${DIRS[Other]}/$filename"
+        counter=1
+        while [[ -e "$target" ]]; do
+            target="${DIRS[Other]}/${filename%.*}_$counter.${ext}"
+            ((counter++))
+        done
+        mv "$file" "$target"
+        echo "[Moved] $filename → ${DIRS[Other]}"
+    fi
+}
+
+# === Watch for new or closed files ===
+echo "📂 Watching $DOWNLOADS with inotifywait..."
+
+# Requires inotify-tools package
+# Install: sudo apt install inotify-tools
+inotifywait -m -e close_write --format "%f" "$DOWNLOADS" | while read FILENAME; do
+    move_file "$DOWNLOADS/$FILENAME"
+done
