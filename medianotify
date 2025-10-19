@@ -1,5 +1,5 @@
 #!/bin/env bash
-# medianotify (auto-reconnect version)
+# medianotify (song + browser, auto-reconnect)
 
 set -euo pipefail
 
@@ -10,10 +10,9 @@ ICON_FALLBACK="/usr/share/icons/hicolor/64x64/apps/multimedia-player.png"
 # ---- Configurable ----
 SONG_PLAYERS=("SubsonicTUI")
 BROWSER_PLAYERS=("firefox" "chromium" "brave" "google-chrome")
-
 # -----------------------
 
-notify_song() {
+function notify_song() {
     local title="$1"
     local artist="$2"
     local album="$3"
@@ -41,7 +40,7 @@ notify_song() {
     notify-send "$title" "$body" --icon="$icon_path"
 }
 
-find_player() {
+function find_player() {
     local -n list=$1
     local active
     active=$(playerctl -l 2>/dev/null || true)
@@ -55,30 +54,7 @@ find_player() {
     return 1
 }
 
-watch_player() {
-    local player="$1"
-    local type="$2" # song or browser
-    local last_title=""
-
-    echo "🎧 Watching $type player: $player"
-
-    playerctl -p "$player" metadata --follow | while read -r _; do
-        local title artist album arturl
-        title=$(playerctl -p "$player" metadata title 2>/dev/null || echo "")
-        artist=$(playerctl -p "$player" metadata artist 2>/dev/null || echo "")
-        album=$(playerctl -p "$player" metadata album 2>/dev/null || echo "")
-        arturl=$(playerctl -p "$player" metadata mpris:artUrl 2>/dev/null || echo "")
-
-        # Only notify if the title changed
-        if [[ -n "$title" && "$title" != "$last_title" ]]; then
-            notify_song "$title" "$artist" "$album" "$arturl"
-            last_title="$title"
-        fi
-    done
-}
-
-# Keeps retrying until a player appears
-wait_for_player() {
+function wait_for_player() {
     local listname="$1"
     local notify_on_fail="${2:-false}"
     local player=""
@@ -90,10 +66,41 @@ wait_for_player() {
             return 0
         fi
         if [[ "$notify_on_fail" == true ]]; then
-            notify-send "No music player found" "Waiting for Spotify/VLC/SubsonicTUI..."
-            notify_on_fail=false # only show once
+            notify-send "No player found" "Waiting for ${listname[*]}..."
+            notify_on_fail=false
         fi
         sleep 1
+    done
+}
+
+function watch_player() {
+    local listname="$1"
+    local type="$2"
+    local last_title=""
+
+    while true; do
+        player=$(wait_for_player "$listname" true)
+        echo "🎧 Connected to $type player: $player"
+
+        while true; do
+            title=$(playerctl -p "$player" metadata title 2>/dev/null || echo "")
+            artist=$(playerctl -p "$player" metadata artist 2>/dev/null || echo "")
+            album=$(playerctl -p "$player" metadata album 2>/dev/null || echo "")
+            arturl=$(playerctl -p "$player" metadata mpris:artUrl 2>/dev/null || echo "")
+
+            if [[ "$type" == "song" ]]; then
+                restatus rt 3
+            elif [[ "$type" == "browser" ]]; then
+                restatus rt 4
+            fi
+
+            if [[ -n "$title" && "$title" != "$last_title" ]]; then
+                notify_song "$title" "$artist" "$album" "$arturl"
+                last_title="$title"
+            fi
+
+            sleep 1
+        done
     done
 }
 
@@ -102,24 +109,14 @@ mode="${1:-both}"
 
 case "$mode" in
     song)
-        song_player=$(wait_for_player SONG_PLAYERS true)
-        watch_player "$song_player" "song"
+        watch_player SONG_PLAYERS "song"
         ;;
     browser)
-        browser_player=$(wait_for_player BROWSER_PLAYERS false)
-        watch_player "$browser_player" "browser"
+        watch_player BROWSER_PLAYERS "browser"
         ;;
     both)
-        (
-            song_player=$(wait_for_player SONG_PLAYERS true)
-            watch_player "$song_player" "song"
-        ) &
-
-        (
-            browser_player=$(wait_for_player BROWSER_PLAYERS false)
-            watch_player "$browser_player" "browser"
-        ) &
-
+        watch_player SONG_PLAYERS "song" &
+        watch_player BROWSER_PLAYERS "browser" &
         wait
         ;;
     *)

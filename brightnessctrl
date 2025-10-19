@@ -10,6 +10,7 @@ fi
 
 opt="${1:-}"
 num="${2:-5}"
+status="restatus rt 2"
 
 function brightness_inc() {
     if [[ "${num}" =~ ^[0-9]+$ ]]; then
@@ -17,6 +18,7 @@ function brightness_inc() {
     else
         exit 1
     fi
+    $status
 }
 
 function brightness_dec() {
@@ -25,7 +27,7 @@ function brightness_dec() {
     else
         exit 1
     fi
-
+    $status
 }
 
 function help_menu() {

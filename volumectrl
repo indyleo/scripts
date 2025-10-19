@@ -10,17 +10,21 @@ fi
 
 opt="${1:-}"
 num="${2:-5}"
+status="restatus rt 1"
 
 function volume_inc() {
     pamixer -i "$num"
+    $status
 }
 
 function volume_dec() {
     pamixer -d "$num"
+    $status
 }
 
 function volume_togglemute() {
     pamixer --toggle-mute
+    $status
 }
 
 function help_menu() {

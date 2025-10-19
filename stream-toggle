@@ -43,6 +43,9 @@ function start_stream() {
         -bufsize $CBR "rtmp://$SERVER.live-video.net/app/$STREAM_KEY" &
     echo $! > /tmp/streampid
 
+    # Update Status bar
+    restatus usr 1
+
     notify-send "Twitch stream started"
 }
 
@@ -52,6 +55,9 @@ function stop_stream() {
     wait
 
     rm -fv /tmp/streampid
+
+    # Update Status bar
+    restatus usr 1
 
     notify-send "Twitch stream stopped"
 }

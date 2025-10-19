@@ -55,19 +55,21 @@ function tail_status() {
     fi
 }
 
-function is_rec() {
-    if [[ -f "/tmp/recpid" ]]; then
-        echo "󰑊 Recording"
-    elif [[ ! -f "/tmp/recpid" ]]; then
-        echo "  Not Recording"
-    fi
-}
+function is_media() {
+    local rec=0
+    local stream=0
 
-function is_stream() {
-    if [[ -f "/tmp/streampid" ]]; then
+    [[ -f "/tmp/recpid" ]] && rec=1
+    [[ -f "/tmp/streampid" ]] && stream=1
+
+    if [[ $rec -eq 1 && $stream -eq 1 ]]; then
+        echo "󰑊 Recording & Streaming"
+    elif [[ $rec -eq 1 ]]; then
+        echo "󰑊 Recording"
+    elif [[ $stream -eq 1 ]]; then
         echo "󰑊 Streaming"
-    elif [[ ! -f "/tmp/streampid" ]]; then
-        echo "  Not Streaming"
+    else
+        echo "  Not Recording/Streaming"
     fi
 }
 
@@ -205,8 +207,7 @@ function help_menu() {
     date        Display date
     time        Display time
     date_time   Display date and time
-    isrec       Display recording status
-    isstream    Display streaming status
+    ismedia     Display rec/stream status
     battery     Display battery status
     volume      Display volume
     brightness  Display brightness
@@ -239,11 +240,8 @@ case "$opt" in
     date_time)
         date_time
         ;;
-    isrec)
-        is_rec
-        ;;
-    isstream)
-        is_stream
+    ismedia)
+        is_media
         ;;
     battery)
         bbattery

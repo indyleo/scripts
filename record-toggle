@@ -41,6 +41,9 @@ function record() {
     echo "$now" > /tmp/recording_timestamp
     echo "$outputloc" > /tmp/recording_outputdir
 
+    # Update Status bar
+    restatus usr 1
+
     notify-send "Recording started"
 }
 
@@ -66,6 +69,9 @@ function end() {
         -c:v copy -c:a aac -shortest "${outputloc}/final.mkv"
 
     rm -fv /tmp/*pid /tmp/recording_timestamp /tmp/recording_outputdir
+
+    # Update Status bar
+    restatus usr 1
 
     notify-send "Recording merged"
 }

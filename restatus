@@ -1,0 +1,37 @@
+#!/bin/env bash
+
+set -euo pipefail
+
+if [[ $# -lt 2 ]]; then
+    echo "Usage: $(basename "$0") <type> <value>"
+    echo "  type: usr | rt"
+    echo "  value: signal number (1/2 for usr, offset for rt)"
+    exit 1
+fi
+
+type="$1"
+value="$2"
+status="bar.py"
+
+case "$type" in
+    usr)
+        # Standard signal: SIGUSR1 = 1, SIGUSR2 = 2
+        if [[ "$value" -eq 1 ]]; then
+            sig="-USR1"
+        elif [[ "$value" -eq 2 ]]; then
+            sig="-USR2"
+        else
+            echo "Invalid USR signal number: $value"
+            exit 1
+        fi
+        pkill "$sig" -f "$status"
+        ;;
+    rt)
+        # Real-time signal: SIGRTMIN+offset
+        pkill -RTMIN+"$value" -f "$status"
+        ;;
+    *)
+        echo "Invalid type: $type (use 'usr' or 'rt')"
+        exit 1
+        ;;
+esac
