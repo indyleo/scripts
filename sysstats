@@ -190,7 +190,7 @@ function bbrightness() {
 
 
 function all_stats() {
-    echo "$(is_stream) | $(is_rec) | $(disk_usage) | $(memory_usage) | $(cpu_load) | $(bbrightness) | $(vvolume) | $(bbattery) | $(wifi_status) | $(tail_status) | $(ddate) | $(ttime)"
+    echo "$(is_media) | $(disk_usage) | $(memory_usage) | $(cpu_load) | $(bbrightness) | $(vvolume) | $(bbattery) | $(wifi_status) | $(tail_status) | $(ddate) | $(ttime)"
 }
 
 function help_menu() {
