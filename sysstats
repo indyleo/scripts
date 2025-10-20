@@ -124,7 +124,6 @@ function is_media() {
 }
 
 function bbattery() {
-    # --- Get battery info ---
     battery_info=$(acpi -b 2>/dev/null)
     valid_batteries=$(echo "$battery_info" | grep -v "Unknown" | grep -v "rate information unavailable")
     if [ -n "$valid_batteries" ]; then
@@ -136,7 +135,6 @@ function bbattery() {
     percent=$(echo "$active_battery_line" | grep -o '[0-9]\+%' | tr -d '%')
     status=$(echo "$active_battery_line" | cut -d: -f2 | cut -d, -f1 | xargs)
 
-    # --- Pick icon based on status/percentage ---
     case "$status" in
         Charging|Not\ charging)
             if   [[ $percent -ge 100 ]]; then icon="󰂅 "
@@ -151,7 +149,12 @@ function bbattery() {
             elif [[ $percent -ge 10 ]];  then icon="󰢜 "
             else                          icon="󰢟 "
             fi
-            color="$COL_GREEN"
+            # --- Standard red→green gradient ---
+            if   [[ $percent -le 20 ]]; then color="$COL_RED"
+            elif [[ $percent -le 40 ]]; then color="$COL_ORANGE"
+            elif [[ $percent -le 60 ]]; then color="$COL_YELLOW"
+            else color="$COL_GREEN"
+            fi
             ;;
         Discharging)
             if   [[ $percent -ge 100 ]]; then icon="󰁹 "
@@ -166,11 +169,15 @@ function bbattery() {
             elif [[ $percent -ge 10 ]];  then icon="󰁺 "
             else                          icon="󰂎 "
             fi
-            color="$COL_YELLOW"
+            if   [[ $percent -le 20 ]]; then color="$COL_RED"
+            elif [[ $percent -le 40 ]]; then color="$COL_ORANGE"
+            elif [[ $percent -le 60 ]]; then color="$COL_YELLOW"
+            else color="$COL_GREEN"
+            fi
             ;;
         Full)
             icon="󰂄 "
-            color="$COL_PURPLE"
+            color="$COL_GREEN"
             ;;
         *)
             icon="󰂑 "
@@ -178,46 +185,39 @@ function bbattery() {
             ;;
     esac
 
-    # --- Output for status2d ---
-    # White icon, colored percentage
     echo "^c${COL_WHITE}^${icon}^c${color}^${percent}%^d^"
 }
-
 
 function vvolume() {
     vol="$(pamixer --get-volume)"
     muted=$(pamixer --get-mute)
+
     if [[ "$vol" -eq 100 && "$muted" == "false" ]]; then
         icon=""
-        color="$COL_PURPLE"
-        msg="${vol}%"  # Max volume
+        color="$COL_GREEN"
+        msg="${vol}%"
     elif [[ "$vol" -ge 75 && "$muted" == "false" ]]; then
         icon="󰕾"
-        color="$COL_BLUE"
-        msg="${vol}%"  # High volume
+        color="$COL_GREEN"
+        msg="${vol}%"
     elif [[ "$vol" -ge 50 && "$muted" == "false" ]]; then
         icon="󰕾"
-        color="$COL_GREEN"
-        msg="${vol}%"  # High volume
+        color="$COL_YELLOW"
+        msg="${vol}%"
     elif [[ "$vol" -ge 25 && "$muted" == "false" ]]; then
         icon="󰖀"
-        color="$COL_YELLOW"
-        msg="${vol}%"  # Medium volume
+        color="$COL_ORANGE"
+        msg="${vol}%"
     elif [[ "$vol" -gt 0 && "$muted" == "false" ]]; then
         icon="󰕿"
-        msg="${vol}%"  # Low volume
-        color="$COL_ORANGE"
+        color="$COL_RED"
+        msg="${vol}%"
     else
-        if [[ "$muted" == "true" ]]; then
-            icon="󰝟"
-            msg="${vol}%"  # Muted
-            color="$COL_RED"
-        else
-            icon="󰝟"
-            msg="Muted"  # 0
-            color="$COL_RED"
-        fi
+        icon="󰝟"
+        color="$COL_RED"
+        msg="Muted"
     fi
+
     echo "^c${COL_WHITE}^${icon} ^c${color}^${msg}^d^"
 }
 
@@ -227,22 +227,14 @@ function bbrightness() {
     [[ -z "$brightness_raw" || -z "$max_brightness" ]] && brightness=0
     brightness=$(( brightness_raw * 100 / max_brightness ))
 
-    # --- Determine color based on brightness using vvolume colors ---
-    if [[ "$brightness" -ge 100 ]]; then
-        color="$COL_PURPLE"
-    elif [[ "$brightness" -ge 75 ]]; then
-        color="$COL_BLUE"
-    elif [[ "$brightness" -ge 50 ]]; then
-        color="$COL_GREEN"
-    elif [[ "$brightness" -ge 25 ]]; then
-        color="$COL_YELLOW"
-    elif [[ "$brightness" -gt 0 ]]; then
-        color="$COL_ORANGE"
-    else
-        color="$COL_RED"
+    # --- Standard red→green gradient ---
+    if   [[ $brightness -le 20 ]]; then color="$COL_RED"
+    elif [[ $brightness -le 40 ]]; then color="$COL_ORANGE"
+    elif [[ $brightness -le 60 ]]; then color="$COL_YELLOW"
+    else color="$COL_GREEN"
     fi
 
-    # --- Map icons (keep your existing ones) ---
+    # --- Map icons (unchanged) ---
     if [[ "$brightness" -ge 100 ]]; then icon="󰛨"
     elif [[ "$brightness" -ge 90 ]]; then icon="󱩖"
     elif [[ "$brightness" -ge 80 ]]; then icon="󱩖"
@@ -256,7 +248,6 @@ function bbrightness() {
     else icon="󱩎"
     fi
 
-    # --- Output for status2d ---
     echo "^c${COL_WHITE}^${icon} ^c${color}^${brightness}%^d^"
 }
 
