@@ -42,7 +42,7 @@ function record() {
     echo "$outputloc" > /tmp/recording_outputdir
 
     # Update Status bar
-    restatus usr 1
+    restatus rt 20
 
     notify-send "Recording started"
 }
@@ -71,7 +71,7 @@ function end() {
     rm -fv /tmp/*pid /tmp/recording_timestamp /tmp/recording_outputdir
 
     # Update Status bar
-    restatus usr 1
+    restatus rt 20
 
     notify-send "Recording merged"
 }

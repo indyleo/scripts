@@ -89,9 +89,9 @@ function watch_player() {
             arturl=$(playerctl -p "$player" metadata mpris:artUrl 2>/dev/null || echo "")
 
             if [[ "$type" == "song" ]]; then
-                restatus rt 3
+                restatus rt 22
             elif [[ "$type" == "browser" ]]; then
-                restatus rt 4
+                restatus rt 21
             fi
 
             if [[ -n "$title" && "$title" != "$last_title" ]]; then

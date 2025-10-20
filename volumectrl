@@ -10,7 +10,7 @@ fi
 
 opt="${1:-}"
 num="${2:-5}"
-status="restatus rt 1"
+status="restatus rt 23"
 
 function volume_inc() {
     pamixer -i "$num"

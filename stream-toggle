@@ -44,7 +44,7 @@ function start_stream() {
     echo $! > /tmp/streampid
 
     # Update Status bar
-    restatus usr 1
+    restatus rt 20
 
     notify-send "Twitch stream started"
 }
@@ -57,7 +57,7 @@ function stop_stream() {
     rm -fv /tmp/streampid
 
     # Update Status bar
-    restatus usr 1
+    restatus rt 20
 
     notify-send "Twitch stream stopped"
 }
