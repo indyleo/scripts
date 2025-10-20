@@ -4,6 +4,36 @@ set -euo pipefail
 
 opt="${1:-}"
 
+# ===== GLOBAL THEME CONFIG =====
+THEME_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/theme"
+THEME="$(cat "$THEME_FILE" 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+[[ -z "$THEME" ]] && THEME="gruvbox"
+
+# Gruvbox (default)
+if [[ $THEME == *gruvbox* ]]; then
+    # Default
+    COL_WHITE="#ebdbb2"
+    COL_GREEN="#98971a"
+    COL_YELLOW="#d79921"
+    COL_RED="#cc241d"
+    COL_ORANGE="#d65d0e"
+    COL_BLUE="#458588"
+    COL_PURPLE="#b16286"
+    COL_BG="#282828"
+
+    # Nord
+elif [[ $THEME == *nord* ]]; then
+    # Default
+    COL_WHITE="#ECEFF4"
+    COL_GREEN="#A3BE8C"
+    COL_YELLOW="#EBCB8B"
+    COL_RED="#BF616A"
+    COL_ORANGE="#D08770"
+    COL_BLUE="#81A1C1"
+    COL_PURPLE="#B48EAD"
+    COL_BG="#2E3440"
+fi
+
 function ttime() {
     date +"󰥔  %I:%M %p"
 }
@@ -37,157 +67,198 @@ function memory_usage() {
 function wifi_status() {
     current=$(iwgetid -r)
     if [[ -z "$current" ]]; then
-        echo "󰖪 Disconnected"
+        icon="󰖪"
+        msg="Disconnected"
+        color="$COL_RED"
     else
-        echo "󰖩 $current"
+        icon="󰖩"
+        msg="$current"
+        color="$COL_GREEN"
     fi
+    echo "^c${COL_WHITE}^${icon} ^c${color}^${msg}^d^"
 }
 
 function tail_status() {
     if tailscale status &>/dev/null; then
         if tailscale status | grep -q "Logged out"; then
-            echo "󰈂 Not connected"
+            icon="󰈂"
+            msg="Not connected"
+            color="$COL_RED"
         else
-            echo "󰈁 Connected"
+            icon="󰈁"
+            msg="Connected"
+            color="$COL_GREEN"
         fi
     else
-        echo "󰈂 Not connected"
+        icon="󰈂"
+        msg="󰈂 Not connected"
+        color="$COL_RED"
     fi
+    echo "^c${COL_WHITE}^${icon} ^c${color}^${msg}^d^"
 }
 
 function is_media() {
-    local rec=0
-    local stream=0
-
+    local rec=0 stream=0
     [[ -f "/tmp/recpid" ]] && rec=1
     [[ -f "/tmp/streampid" ]] && stream=1
 
     if [[ $rec -eq 1 && $stream -eq 1 ]]; then
-        echo "󰑊 Recording & Streaming"
+        icon="󰑊"
+        msg="Recording & Streaming"
+        color="$COL_GREEN"
     elif [[ $rec -eq 1 ]]; then
-        echo "󰑊 Recording"
+        icon="󰑊"
+        msg="Recording"
+        color="$COL_GREEN"
     elif [[ $stream -eq 1 ]]; then
-        echo "󰑊 Streaming"
+        icon="󰑊"
+        msg="Streaming"
+        color="$COL_GREEN"
     else
-        echo "  Not Recording/Streaming"
+        icon=""
+        msg="Not Recording/Streaming"
+        color="$COL_RED"
     fi
+
+    echo "^c${COL_WHITE}^${icon} ^c${color}^${msg}^d^"
 }
 
 function bbattery() {
-    # Get battery info
-    battery_info=$(acpi -b)
-
-    # Filter out lines with "Unknown" or "rate information unavailable"
+    # --- Get battery info ---
+    battery_info=$(acpi -b 2>/dev/null)
     valid_batteries=$(echo "$battery_info" | grep -v "Unknown" | grep -v "rate information unavailable")
-
-    # Use the first valid battery, or fallback to the first available
     if [ -n "$valid_batteries" ]; then
         active_battery_line=$(echo "$valid_batteries" | head -n 1)
     else
         active_battery_line=$(echo "$battery_info" | head -n 1)
     fi
 
-    # Extract the percentage
     percent=$(echo "$active_battery_line" | grep -o '[0-9]\+%' | tr -d '%')
-
-    # Extract the status: Charging, Discharging, Full, etc.
     status=$(echo "$active_battery_line" | cut -d: -f2 | cut -d, -f1 | xargs)
 
-    # Choose an icon based on status
+    # --- Pick icon based on status/percentage ---
     case "$status" in
         Charging|Not\ charging)
-            if [[ $percent -ge 100 ]]; then icon="󰂅 "
-            elif [[ $percent -ge 90 ]]; then icon="󰂋 "
-            elif [[ $percent -ge 80 ]]; then icon="󰂊 "
-            elif [[ $percent -ge 70 ]]; then icon="󰢞 "
-            elif [[ $percent -ge 60 ]]; then icon="󰂉 "
-            elif [[ $percent -ge 50 ]]; then icon="󰢝 "
-            elif [[ $percent -ge 40 ]]; then icon="󰂈 "
-            elif [[ $percent -ge 30 ]]; then icon="󰂇 "
-            elif [[ $percent -ge 20 ]]; then icon="󰂆 "
-            elif [[ $percent -ge 10 ]]; then icon="󰢜 "
-            elif [[ $percent -ge 0 ]]; then icon="󰢟 "
+            if   [[ $percent -ge 100 ]]; then icon="󰂅 "
+            elif [[ $percent -ge 90 ]];  then icon="󰂋 "
+            elif [[ $percent -ge 80 ]];  then icon="󰂊 "
+            elif [[ $percent -ge 70 ]];  then icon="󰢞 "
+            elif [[ $percent -ge 60 ]];  then icon="󰂉 "
+            elif [[ $percent -ge 50 ]];  then icon="󰢝 "
+            elif [[ $percent -ge 40 ]];  then icon="󰂈 "
+            elif [[ $percent -ge 30 ]];  then icon="󰂇 "
+            elif [[ $percent -ge 20 ]];  then icon="󰂆 "
+            elif [[ $percent -ge 10 ]];  then icon="󰢜 "
+            else                          icon="󰢟 "
             fi
+            color="$COL_GREEN"
             ;;
         Discharging)
-            if [[ $percent -ge 100 ]]; then icon="󰁹 "
-            elif [[ $percent -ge 90 ]]; then icon="󰂂 "
-            elif [[ $percent -ge 80 ]]; then icon="󰂁 "
-            elif [[ $percent -ge 70 ]]; then icon="󰂀 "
-            elif [[ $percent -ge 60 ]]; then icon="󰁿 "
-            elif [[ $percent -ge 50 ]]; then icon="󰁾 "
-            elif [[ $percent -ge 40 ]]; then icon="󰁽 "
-            elif [[ $percent -ge 30 ]]; then icon="󰁼 "
-            elif [[ $percent -ge 20 ]]; then icon="󰁻 "
-            elif [[ $percent -ge 10 ]]; then icon="󰁺 "
-            elif [[ $percent -ge 0 ]]; then icon="󰂎 "
+            if   [[ $percent -ge 100 ]]; then icon="󰁹 "
+            elif [[ $percent -ge 90 ]];  then icon="󰂂 "
+            elif [[ $percent -ge 80 ]];  then icon="󰂁 "
+            elif [[ $percent -ge 70 ]];  then icon="󰂀 "
+            elif [[ $percent -ge 60 ]];  then icon="󰁿 "
+            elif [[ $percent -ge 50 ]];  then icon="󰁾 "
+            elif [[ $percent -ge 40 ]];  then icon="󰁽 "
+            elif [[ $percent -ge 30 ]];  then icon="󰁼 "
+            elif [[ $percent -ge 20 ]];  then icon="󰁻 "
+            elif [[ $percent -ge 10 ]];  then icon="󰁺 "
+            else                          icon="󰂎 "
             fi
+            color="$COL_YELLOW"
             ;;
         Full)
             icon="󰂄 "
+            color="$COL_PURPLE"
             ;;
         *)
             icon="󰂑 "
+            color="$COL_WHITE"
             ;;
     esac
 
-    # Output
-    echo "$icon $percent%"
+    # --- Output for status2d ---
+    # White icon, colored percentage
+    echo "^c${COL_WHITE}^${icon}^c${color}^${percent}%^d^"
 }
+
 
 function vvolume() {
     vol="$(pamixer --get-volume)"
     muted=$(pamixer --get-mute)
     if [[ "$vol" -eq 100 && "$muted" == "false" ]]; then
-        echo " ${vol}%"  # Max volume
+        icon=""
+        color="$COL_PURPLE"
+        msg="${vol}%"  # Max volume
+    elif [[ "$vol" -ge 75 && "$muted" == "false" ]]; then
+        icon="󰕾"
+        color="$COL_BLUE"
+        msg="${vol}%"  # High volume
     elif [[ "$vol" -ge 50 && "$muted" == "false" ]]; then
-        echo "󰕾 ${vol}%"  # High volume
+        icon="󰕾"
+        color="$COL_GREEN"
+        msg="${vol}%"  # High volume
     elif [[ "$vol" -ge 25 && "$muted" == "false" ]]; then
-        echo "󰖀 ${vol}%"  # Medium volume
+        icon="󰖀"
+        color="$COL_YELLOW"
+        msg="${vol}%"  # Medium volume
     elif [[ "$vol" -gt 0 && "$muted" == "false" ]]; then
-        echo "󰕿 ${vol}%"  # Low volume
+        icon="󰕿"
+        msg="${vol}%"  # Low volume
+        color="$COL_ORANGE"
     else
         if [[ "$muted" == "true" ]]; then
-            echo "󰝟  ${vol}%"  # Muted
+            icon="󰝟"
+            msg="${vol}%"  # Muted
+            color="$COL_RED"
         else
-            echo "󰝟  Muted"  # 0
+            icon="󰝟"
+            msg="Muted"  # 0
+            color="$COL_RED"
         fi
     fi
+    echo "^c${COL_WHITE}^${icon} ^c${color}^${msg}^d^"
 }
 
 function bbrightness() {
-    line="$(brightnessctl | grep "%")"
-    brightness_raw=$(echo "$line" | grep -oP '\(\K[0-9]+%')
-    brightness=${brightness_raw%\%}
+    brightness_raw=$(cat /sys/class/backlight/*/brightness 2>/dev/null)
+    max_brightness=$(cat /sys/class/backlight/*/max_brightness 2>/dev/null)
+    [[ -z "$brightness_raw" || -z "$max_brightness" ]] && brightness=0
+    brightness=$(( brightness_raw * 100 / max_brightness ))
 
-    if [[ "$brightness" -eq 100 ]]; then
-        echo "󰛨  ${brightness_raw}"
-    elif [[ "$brightness" -ge 90 ]]; then
-        echo "󱩖 ${brightness_raw}"
-    elif [[ "$brightness" -ge 80 ]]; then
-        echo "󱩖 ${brightness_raw}"
-    elif [[ "$brightness" -ge 70 ]]; then
-        echo "󱩕 ${brightness_raw}"
-    elif [[ "$brightness" -ge 60 ]]; then
-        echo "󱩔 ${brightness_raw}"
+    # --- Determine color based on brightness using vvolume colors ---
+    if [[ "$brightness" -ge 100 ]]; then
+        color="$COL_PURPLE"
+    elif [[ "$brightness" -ge 75 ]]; then
+        color="$COL_BLUE"
     elif [[ "$brightness" -ge 50 ]]; then
-        echo "󱩓 ${brightness_raw}"
-    elif [[ "$brightness" -ge 40 ]]; then
-        echo "󱩒 ${brightness_raw}"
-    elif [[ "$brightness" -ge 30 ]]; then
-        echo "󱩑 ${brightness_raw}"
-    elif [[ "$brightness" -ge 20 ]]; then
-        echo "󱩐 ${brightness_raw}"
-    elif [[ "$brightness" -ge 10 ]]; then
-        echo "󱩏 ${brightness_raw}"
-    elif [[ "$brightness" -ge 0 ]]; then
-        echo "󱩎 ${brightness_raw}"
+        color="$COL_GREEN"
+    elif [[ "$brightness" -ge 25 ]]; then
+        color="$COL_YELLOW"
+    elif [[ "$brightness" -gt 0 ]]; then
+        color="$COL_ORANGE"
     else
-        echo "󰹐 "
+        color="$COL_RED"
     fi
+
+    # --- Map icons (keep your existing ones) ---
+    if [[ "$brightness" -ge 100 ]]; then icon="󰛨"
+    elif [[ "$brightness" -ge 90 ]]; then icon="󱩖"
+    elif [[ "$brightness" -ge 80 ]]; then icon="󱩖"
+    elif [[ "$brightness" -ge 70 ]]; then icon="󱩕"
+    elif [[ "$brightness" -ge 60 ]]; then icon="󱩔"
+    elif [[ "$brightness" -ge 50 ]]; then icon="󱩓"
+    elif [[ "$brightness" -ge 40 ]]; then icon="󱩒"
+    elif [[ "$brightness" -ge 30 ]]; then icon="󱩑"
+    elif [[ "$brightness" -ge 20 ]]; then icon="󱩐"
+    elif [[ "$brightness" -ge 10 ]]; then icon="󱩏"
+    else icon="󱩎"
+    fi
+
+    # --- Output for status2d ---
+    echo "^c${COL_WHITE}^${icon} ^c${color}^${brightness}%^d^"
 }
-
-
 
 function all_stats() {
     echo "$(is_media) | $(disk_usage) | $(memory_usage) | $(cpu_load) | $(bbrightness) | $(vvolume) | $(bbattery) | $(wifi_status) | $(tail_status) | $(ddate) | $(ttime)"
