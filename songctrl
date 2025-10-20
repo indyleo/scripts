@@ -62,7 +62,7 @@ function song_state() {
             echo " "
             ;;
         *)
-            if flatpak ps 2>/dev/null | awk '{print $3}' | grep -Fxq "io.github.dweymouth.supersonic"; then
+            if playerctl status --player="$player" 2>/dev/null; then
                 echo " "
             else
                 echo " "
