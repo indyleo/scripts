@@ -27,7 +27,6 @@ fi
 HOME_CONFIG="${XDG_CONFIG_HOME:-"$HOME/.config"}"
 WALLPAPERS_DIR="$HOME/Pictures/Wallpapers"
 SUCKLESS_DIR="$HOME/Github/suckless"
-NEOVIM_PLUGIN="$HOME_CONFIG/nvim/lua/plugins"
 ALACRITTY_CONFIG="$HOME_CONFIG/alacritty"
 DUNST_CONFIG="$HOME_CONFIG/dunst"
 QUTEBROWSER_CONFIG="$HOME_CONFIG/qutebrowser"
@@ -58,7 +57,7 @@ ln -sf "${XRESOURCES}/.Xresources_${THEME}" "${XRESOURCES}/.Xresources"
 xrdb "${XRESOURCES}/.Xresources"
 
 # Suckless apps to theme
-APPS=(dmenu dwm slock st tabbed)
+APPS=(dmenu dwm slock st)
 for APP in "${APPS[@]}"; do
     APP_DIR="${SUCKLESS_DIR}/${APP}"
     if [[ -d "$APP_DIR" ]]; then
@@ -71,10 +70,6 @@ for APP in "${APPS[@]}"; do
         echo "Warning: $APP directory not found at $APP_DIR"
     fi
 done
-
-# Neovim: symlink colourscheme.lua, and indent-blankline.lua
-ln -sf "${NEOVIM_PLUGIN}/colourscheme.lua_${THEME}" "${NEOVIM_PLUGIN}/colourscheme.lua"
-ln -sf "${NEOVIM_PLUGIN}/indent-blankline.lua_${THEME}" "${NEOVIM_PLUGIN}/indent-blankline.lua"
 
 # Tmux: symlink the correct config
 ln -sf "${TMUX_CONFIG}/tmux_${THEME}.conf" "${TMUX_CONFIG}/tmux.conf"
