@@ -29,7 +29,6 @@ WALLPAPERS_DIR="$HOME/Pictures/Wallpapers"
 SUCKLESS_DIR="$HOME/Github/suckless"
 ALACRITTY_CONFIG="$HOME_CONFIG/alacritty"
 DUNST_CONFIG="$HOME_CONFIG/dunst"
-QUTEBROWSER_CONFIG="$HOME_CONFIG/qutebrowser"
 TMUX_CONFIG="$HOME_CONFIG/tmux"
 XRESOURCES="$HOME"
 STARTPAGE="$HOME/Github/portfilio/startpage/"
@@ -82,9 +81,6 @@ if [[ -d "$STARTPAGE" ]]; then
         echo "$THEME" >> "${STARTPAGE}/theme.txt"
     fi
 fi
-
-# Qutebrowser: symlink the correct config
-ln -sf "${QUTEBROWSER_CONFIG}/config_${THEME}.py" "${QUTEBROWSER_CONFIG}/config.py"
 
 # Reload dwm
 pgrep -x dwm && pkill dwm
