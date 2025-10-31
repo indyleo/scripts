@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# projtool - unified project management helper (full update)
 set -euo pipefail
 
 PROJECTS_DIR="${PROJECTS_DIR:-$HOME/Projects}"
@@ -19,21 +20,23 @@ def main():
     print('Hello from Python')
 if __name__ == '__main__':
     main()"
-    [lua]=""
+    [lua]=""   # handled separately
     [c]="#include <stdio.h>
 int main() { printf(\"Hello from C\\n\"); return 0; }"
     [cpp]="#include <iostream>
 int main() { std::cout << \"Hello from C++\" << std::endl; return 0; }"
-    [rs]=""
+    [rs]=""    # rust handled by cargo
     [go]="package main
 import \"fmt\"
 func main() { fmt.Println(\"Hello from Go\") }"
-    [zig]=""
+    [zig]=""   # zig init will supply defaults
 )
 
+# aliases
 TEMPLATES[bash]="${TEMPLATES[sh]}"
 TEMPLATES[rust]="${TEMPLATES[rs]}"
 
+# Globals
 AUTO_YES=false
 PROJECT_NAME=""
 LANGUAGE=""
@@ -53,57 +56,50 @@ function mkproj() {
         esac
     done
 
-    # -----------------------------
-    # Interactive prompts
-    # -----------------------------
     [[ -z "$PROJECT_NAME" ]] && read -rp " Project Name: " PROJECT_NAME
     [[ -z "$PROJECT_NAME" ]] && print_color "$RED" "❌ No name given." && return 1
     [[ "$PROJECT_NAME" =~ [^a-zA-Z0-9_-] ]] && print_color "$RED" "❌ Invalid project name." && return 1
 
-    if [[ -z "$LANGUAGE" ]]; then
+    if [[ -z "${LANGUAGE:-}" ]]; then
         LANGS=$(IFS=,; echo "${!TEMPLATES[*]}")
         read -rp " Language ($LANGS): " LANGUAGE
     fi
     LANGUAGE=$(echo "$LANGUAGE" | tr '[:upper:]' '[:lower:]')
-
-    # Normalize some languages
     [[ "$LANGUAGE" == "c++" ]] && LANGUAGE="cpp"
     [[ "$LANGUAGE" == "bash" ]] && LANGUAGE="sh"
     [[ "$LANGUAGE" == "python" ]] && LANGUAGE="py"
     [[ "$LANGUAGE" == "rust" ]] && LANGUAGE="rs"
 
-    [[ -z "${TEMPLATES[$LANGUAGE]+x}" ]] && print_color "$YELLOW" "⚠️  Unknown language. Creating empty folder."
+    [[ -z "${TEMPLATES[$LANGUAGE]+x}" ]] && print_color "$YELLOW" "⚠️  Unknown language. Creating basic scaffolding."
 
-    # -----------------------------
-    # Folder structure
-    # -----------------------------
     proj_path="$PROJECTS_DIR/$PROJECT_NAME"
+    case "$LANGUAGE" in
+        py|sh) mkdir -pv "$proj_path/src" ;;
+        lua) mkdir -pv "$proj_path/lua/$PROJECT_NAME/functions" "$proj_path/plugin" ;;
+        rs) mkdir -pv "$proj_path" ;;
+        c|cpp|go) mkdir -pv "$proj_path/src" "$proj_path/include" "$proj_path/bin" ;;
+        zig) mkdir -pv "$proj_path/src" "$proj_path/include" ;;
+        *) mkdir -pv "$proj_path/src" ;;
+    esac
 
-    # Rust does not need bin/
-    if [[ "$LANGUAGE" == "rs" ]]; then
-        mkdir -pv "$proj_path/src" "$proj_path/include"
-    else
-        mkdir -pv "$proj_path/src" "$proj_path/include" "$proj_path/bin"
-    fi
-
-    [[ "$LANGUAGE" == "lua" ]] && mkdir -pv "$proj_path/lua/$PROJECT_NAME/functions" "$proj_path/plugin"
     cd "$proj_path" || return
 
-    # -----------------------------
-    # Language creation
-    # -----------------------------
     case "$LANGUAGE" in
-        sh|py|c|cpp|go)
-            file_ext="$LANGUAGE"
-            [[ "$LANGUAGE" == "py" ]] && file_ext="py" && python3 -m venv "../$PROJECT_NAME"
-            [[ "$LANGUAGE" == "sh" ]] && file_ext="sh"
-            [[ "$LANGUAGE" == "c" ]] && file_ext="c"
-            [[ "$LANGUAGE" == "cpp" ]] && file_ext="cpp"
-            [[ -n "${TEMPLATES[$LANGUAGE]}" ]] && echo "${TEMPLATES[$LANGUAGE]}" > "src/main.$file_ext"
-            chmod +x "src/main.$file_ext"
+        sh)
+            echo "${TEMPLATES[sh]}" > "src/main.sh"
+            chmod +x "src/main.sh"
+            print_color "$GREEN" "Created src/main.sh"
+            ;;
+        py)
+            echo "${TEMPLATES[py]}" > "src/main.py"
+            chmod +x "src/main.py"
+            if command -v python3 >/dev/null 2>&1; then
+                python3 -m venv "../$PROJECT_NAME" 2>/dev/null || true
+                print_color "$GREEN" "✅ Python venv created (or already existed)"
+            fi
             ;;
         lua)
-            cat << 'EOF' > "lua/$PROJECT_NAME/init.lua"
+            cat > "lua/$PROJECT_NAME/init.lua" <<'EOF'
 local M = {}
 function M.setup()
   print("Hello from Lua")
@@ -111,52 +107,63 @@ end
 return M
 EOF
             chmod a+x "lua/$PROJECT_NAME/init.lua"
+            print_color "$GREEN" "Created lua/$PROJECT_NAME/init.lua"
             ;;
         rs)
-            cargo init --name "$PROJECT_NAME" .
-            cargo build --release && print_color "$GREEN" "✅ Rust compiled (target/release/$PROJECT_NAME)"
-            ;;
-        zig)
-            zig init
-            if [[ -f src/main.zig ]]; then
-                mkdir -pv bin
-                zig build-exe "src/main.zig" -O ReleaseFast -target native -o "bin/$PROJECT_NAME"
-                print_color "$GREEN" "✅ Zig compiled to bin/$PROJECT_NAME"
+            if command -v cargo >/dev/null 2>&1; then
+                (cargo init --name "$PROJECT_NAME" . 2>&1) | sed 's/^/cargo: /' >&2 || true
+                print_color "$GREEN" "Initialized Rust project with cargo"
+                cargo build --release >/dev/null 2>&1 && print_color "$GREEN" "✅ Rust compiled"
+            else
+                print_color "$RED" "cargo not found"
             fi
             ;;
-        *)
-            print_color "$YELLOW" "⚠️  Unknown language. Empty folder created."
+        zig)
+            print_color "$GREEN" "Preparing Zig project; using 'zig init' defaults"
+            if command -v zig >/dev/null 2>&1; then
+                [[ ! -f build.zig ]] && zig init 2> >(sed 's/^/zig: /' >&2) && print_color "$GREEN" "✅ zig init completed"
+                built=false
+                for mode in fast safe small any off; do
+                    if zig build --release="$mode" 2> >(sed 's/^/zig: /' >&2); then
+                        built=true
+                        used_mode="$mode"
+                        break
+                    fi
+                done
+                [[ $built == false ]] && zig build 2> >(sed 's/^/zig: /' >&2) && used_mode="(none)"
+                exe_path=$(find zig-out -type f -executable -print 2>/dev/null | head -n1 || true)
+                [[ -n "$exe_path" ]] && print_color "$GREEN" "✅ Zig build succeeded (mode: $used_mode). Executable: $exe_path" || print_color "$YELLOW" "zig build ran but no executable detected."
+            else
+                print_color "$RED" "zig not found"
+            fi
             ;;
-    esac
-
-    # -----------------------------
-    # Compiled language auto-build
-    # -----------------------------
-    case "$LANGUAGE" in
         c)
-            [[ -f src/main.c ]] && gcc "src/main.c" -o "bin/$PROJECT_NAME" && print_color "$GREEN" "✅ C compiled to bin/$PROJECT_NAME"
+            echo "${TEMPLATES[c]}" > "src/main.c"
+            command -v gcc >/dev/null 2>&1 && gcc "src/main.c" -o "bin/$PROJECT_NAME" && print_color "$GREEN" "✅ C compiled to bin/$PROJECT_NAME"
             ;;
         cpp)
-            [[ -f src/main.cpp ]] && g++ "src/main.cpp" -o "bin/$PROJECT_NAME" && print_color "$GREEN" "✅ C++ compiled to bin/$PROJECT_NAME"
+            echo "${TEMPLATES[cpp]}" > "src/main.cpp"
+            command -v g++ >/dev/null 2>&1 && g++ "src/main.cpp" -o "bin/$PROJECT_NAME" && print_color "$GREEN" "✅ C++ compiled to bin/$PROJECT_NAME"
             ;;
         go)
-            [[ -f src/main.go ]] && go build -o "bin/$PROJECT_NAME" "src/main.go" && print_color "$GREEN" "✅ Go compiled to bin/$PROJECT_NAME"
+            echo "${TEMPLATES[go]}" > "src/main.go"
+            command -v go >/dev/null 2>&1 && go build -o "bin/$PROJECT_NAME" "src/main.go" && print_color "$GREEN" "✅ Go compiled to bin/$PROJECT_NAME"
+            ;;
+        *)
+            print_color "$YELLOW" "⚠️  Unknown language: created basic src/"
             ;;
     esac
 
-    # -----------------------------
-    # Gitignore and feedback
-    # -----------------------------
     setup_gitignore
     print_color "$GREEN" "✅ Project created at $proj_path"
     check_and_offer_setup
 }
 
 # -----------------------------
-# Git init
+# mkgit
 # -----------------------------
 function mkgit() {
-    [[ -d .git ]] && print_color "$YELLOW" "⚙️ Git repo exists." && return
+    [[ -d .git ]] && { print_color "$YELLOW" "⚙️ Git repo exists."; return; }
     git init
     git add .
     git commit -m "Initial commit"
@@ -164,65 +171,32 @@ function mkgit() {
 }
 
 # -----------------------------
-# Gitignore
+# .gitignore creation
 # -----------------------------
 function setup_gitignore() {
-    [[ -f .gitignore && $AUTO_YES == true ]] && return
-    case "$LANGUAGE" in
-        py) cat << EOF > .gitignore
-__pycache__/
+    overwrite=true
+    cat > .gitignore <<EOF
+# projtool:keep
+*.o
+*.exe
 *.py[cod]
+__pycache__/
+bin/
+zig-out/
 venv/
-EOF
-            ;;
-        sh) cat << EOF > .gitignore
 *.swp
 EOF
-            ;;
-        c|cpp) cat << EOF > .gitignore
-bin/
-*.o
-*.exe
-EOF
-            ;;
-        go) cat << EOF > .gitignore
-bin/
-*.exe
-EOF
-            ;;
-        rs) cat << EOF > .gitignore
-target/
-*.rs.bk
-EOF
-            ;;
-        zig) cat << EOF > .gitignore
-bin/
-*.o
-EOF
-            ;;
-        lua) cat << EOF > .gitignore
-*.luac
-EOF
-            ;;
-    esac
-    print_color "$GREEN" "✅ .gitignore created"
+    print_color "$GREEN" "✅ .gitignore created/overwritten"
 }
 
 # -----------------------------
-# Docs setup (ShellCheck compliant)
+# Docs setup
 # -----------------------------
 function setupdocs() {
     name="$(basename "$PWD")"
     year="$(date +%Y)"
     author="$(git config user.name 2>/dev/null || whoami 2>/dev/null || echo 'Unknown Author')"
-
-    # README.md
-    if [[ -f README.md && $AUTO_YES == false ]]; then
-        read -rp "📄 README.md exists. Overwrite? (y/N): " ans
-        [[ "$ans" =~ ^[Yy]$ ]] && overwrite_readme=true || overwrite_readme=false
-    fi
-    if [[ ! -f README.md || "${overwrite_readme:-true}" == true ]]; then
-        cat << EOF > README.md
+    cat > README.md <<EOF
 # $name
 A new project written in awesome code.
 
@@ -234,32 +208,18 @@ A new project written in awesome code.
 ## License
 MIT
 EOF
-        print_color "$GREEN" "✅ README.md created"
-    else
-        print_color "$YELLOW" "📄 README.md skipped"
-    fi
-
-    # LICENSE
-    if [[ -f LICENSE && $AUTO_YES == false ]]; then
-        read -rp "📜 LICENSE exists. Overwrite? (y/N): " ans
-        [[ "$ans" =~ ^[Yy]$ ]] && overwrite_license=true || overwrite_license=false
-    fi
-    if [[ ! -f LICENSE || "${overwrite_license:-true}" == true ]]; then
-        cat << EOF > LICENSE
+    cat > LICENSE <<EOF
 MIT License
 
 Copyright (c) $year $author
 
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 EOF
-        print_color "$GREEN" "✅ LICENSE created"
-    else
-        print_color "$YELLOW" "📜 LICENSE skipped"
-    fi
+    print_color "$GREEN" "✅ README.md and LICENSE created"
 }
 
 # -----------------------------
@@ -268,7 +228,7 @@ EOF
 function check_and_offer_setup() {
     if $AUTO_YES; then
         setupdocs
-        [[ "$LANGUAGE" != "rs" ]] && mkgit
+        [[ "$LANGUAGE" != "rs" && ! -d .git ]] && mkgit
     else
         [[ ! -f README.md || ! -f LICENSE ]] && read -rp "❔ Set up docs now? (y/N): " ans && [[ "$ans" =~ ^[Yy]$ ]] && setupdocs
         [[ "$LANGUAGE" != "rs" && ! -d .git ]] && read -rp "❔ Initialize Git? (y/N): " ans && [[ "$ans" =~ ^[Yy]$ ]] && mkgit
@@ -279,7 +239,7 @@ function check_and_offer_setup() {
 # Usage/help
 # -----------------------------
 function usage() {
-    cat << 'EOF'
+    cat <<'EOF'
 Usage: projtool <command> [options]
 
 Commands:
