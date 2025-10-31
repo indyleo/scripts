@@ -1,62 +1,162 @@
-#!/bin/env bash
+#!/usr/bin/env bash
+# chtsh - interactive cheat.sh helper
+# Improved: caching with TTL, safer tempfile writes, better arg parsing, fallbacks, and helpful messages.
 
-# Enable error handling
-set -e
+set -euo pipefail
+IFS=$'\n\t'
 
-# Define cache directory
-CACHE_DIR="$HOME/.cache/chtsh"
+# --- Configuration ---
+CACHE_DIR="${HOME:-/tmp}/.cache/chtsh"
 mkdir -p "$CACHE_DIR"
+CACHE_TTL=${CACHE_TTL:-86400}   # seconds; default 1 day (change via env var)
+CHEAT_BASE="https://cheat.sh"
+FZF_CMD="${FZF_CMD:-fzf}"
+CURL_CMD="${CURL_CMD:-curl}"
+LESS_CMD="${LESS_CMD:-less}"
 
-# Function to fetch list with caching
-fetch_list() {
+# --- Helpers ---
+function die() { printf '%s\n' "$@" >&2; exit 1; }
+function info() { printf '%s\n' "$@" >&2; }
+
+# compute cache filename for URL (safe & deterministic)
+function cache_file_for_url() {
     local url=$1
-    local cache_file="$CACHE_DIR/$(echo "$url" | md5sum | cut -d' ' -f1)"
+    local key
+    # use printf (no trailing newline) for stable hash
+    key=$(printf '%s' "$url" | md5sum | cut -d' ' -f1)
+    printf '%s/%s' "$CACHE_DIR" "$key"
+}
 
-    # If cache exists and is recent (less than 1 day old), use it
-    if [[ -f "$cache_file" && $(find "$cache_file" -mtime -1 2>/dev/null) ]]; then
-        cat "$cache_file"
+# atomic fetch with caching
+function fetch_list() {
+    local url=$1
+    local cache_file
+    cache_file=$(cache_file_for_url "$url")
+
+    # if cache exists and is fresh, print it
+    if [[ -f "$cache_file" ]]; then
+        local mod
+        mod=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || echo 0)
+        local now
+        now=$(date +%s)
+        if (( now - mod < CACHE_TTL )); then
+            cat "$cache_file"
+            return 0
+        fi
+    fi
+
+    # fetch to a tempfile then atomically move into cache
+    local tmp
+    tmp=$(mktemp) || die "mktemp failed"
+    if ! "$CURL_CMD" -fsS "$url" >"$tmp"; then
+        rm -f "$tmp"
+        die "Failed to fetch: $url"
+    fi
+    mv -f "$tmp" "$cache_file"
+    cat "$cache_file"
+}
+
+# pick an item with fzf (or fallback to numbered select)
+function choose_item() {
+    local prompt="$1"
+    if command -v "$FZF_CMD" >/dev/null 2>&1; then
+        "$FZF_CMD" --prompt="$prompt" --height=40% --border
     else
-        curl -s "$url" | tee "$cache_file"
+        # fallback: number the options and let user type number
+        nl -ba -w3 -s'. ' | sed 's/^/ /'
+        printf '\nEnter the number of your choice (or blank to cancel): '
+        read -r idx
+        if [[ -z "$idx" ]]; then
+            printf ''
+            return 0
+        fi
+        sed -n "${idx}p"
     fi
 }
 
-# Default topic constraint (none)
-topic_constraint="none"
+function usage() {
+    cat <<EOF
+Usage: ${0##*/} [OPTIONS] [QUERY]
+Interactive cheat.sh client.
 
-# Parse command-line arguments
-while [[ "$#" -gt 0 ]]; do
+Options:
+  -l, --lang        Show only common programming languages first (interactive filter)
+  --no-cache        Ignore cache (force re-fetch)
+  -t, --ttl SEC     Set cache TTL seconds for this run (overrides CACHE_TTL)
+  -h, --help        Show this help
+If QUERY is provided, it will be used to filter topics (fzf -q or grep).
+EOF
+}
+
+# --- Argument parsing ---
+topic_constraint="none"
+NO_CACHE=0
+query=""
+while [[ ${#@} -gt 0 ]]; do
     case "$1" in
-        l|lang)
-            topic_constraint="lang"
-            shift
-            ;;
-        *)
-            echo "Unknown option: $1"
-            exit 1
-            ;;
+        -l|--lang) topic_constraint="lang"; shift ;;
+        --no-cache) NO_CACHE=1; shift ;;
+        -t|--ttl) shift; CACHE_TTL="${1:-$CACHE_TTL}"; shift ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift; break ;;
+        -*) die "Unknown option: $1" ;;
+        *) query="$1"; shift; break ;;
     esac
 done
 
-# Select topic based on constraint
-if [[ "$topic_constraint" == "lang" ]]; then
-    # Fetch programming languages dynamically
-    topic=$(fetch_list "https://cheat.sh/:list" | grep -E "^(c|cpp|python|go|rust|java|javascript|typescript|bash|zsh|lua|git|perl|ruby|haskell|kotlin|swift|powershell|scala|clojure|r|elixir|dart|php|make|docker|ansible|terraform|sql|html|css|json|yaml|xml)$" | fzf)
-else
-    # Fetch all available topics
-    topic=$(fetch_list "https://cheat.sh/:list" | fzf)
+# honor --no-cache by temporarily setting TTL to 0
+if (( NO_CACHE == 1 )); then
+    CACHE_TTL=0
 fi
 
-# Exit if no topic was selected
-if [[ -z "$topic" ]]; then
+# --- Main flow ---
+# fetch master topic list once
+topics_raw=$(fetch_list "$CHEAT_BASE/:list")
+
+# optionally filter to languages
+if [[ "$topic_constraint" == "lang" ]]; then
+    # curated language list (keeps the interactive set smaller)
+    languages_regex='^(c|cpp|python|go|rust|java|javascript|typescript|bash|zsh|lua|git|perl|ruby|haskell|kotlin|swift|powershell|scala|clojure|r|elixir|dart|php|make|docker|ansible|terraform|sql|html|css|json|yaml|xml)$'
+    topics_filtered=$(printf '%s\n' "$topics_raw" | grep -E -i "$languages_regex" || true)
+else
+    topics_filtered="$topics_raw"
+fi
+
+# if user provided a QUERY, prefilter using grep (case-insensitive)
+if [[ -n "${query:-}" ]]; then
+    # try fzf's query option if available; else fallback to grep
+    if command -v "$FZF_CMD" >/dev/null 2>&1; then
+        topic=$(printf '%s\n' "$topics_filtered" | "$FZF_CMD" -q "$query" --prompt="Topic> " --height=40% --border)
+    else
+        topic=$(printf '%s\n' "$topics_filtered" | grep -i -- "$query" | choose_item "Topic> ")
+    fi
+else
+    # interactive pick
+    topic=$(printf '%s\n' "$topics_filtered" | choose_item "Topic> ")
+fi
+
+# exit quietly if nothing selected
+if [[ -z "${topic:-}" ]]; then
+    info "No topic selected. Exiting."
     exit 0
 fi
 
-# Fetch available sheets for the selected topic
-sheet=$(fetch_list "https://cheat.sh/$topic/:list" | fzf)
+# fetch available sheets for selected topic
+sheets_list=$(fetch_list "$CHEAT_BASE/$topic/:list" || true)
 
-# Display the selected cheat sheet
-if [[ -z "$sheet" ]]; then
-    curl -s "https://cheat.sh/$topic?style=rrt" | less -R
-else
-    curl -s "https://cheat.sh/$topic/$sheet?style=rrt" | less -R
+# If no sheets or only info, display the topic directly
+if [[ -z "${sheets_list:-}" ]]; then
+    # display main page
+    "$CURL_CMD" -fsS "$CHEAT_BASE/$topic?style=rrt" | "$LESS_CMD" -R
+    exit 0
 fi
+
+# Choose sheet (if multiple); empty choice => show main topic
+sheet=$(printf '%s\n' "$sheets_list" | choose_item "Sheet> ")
+
+if [[ -z "${sheet:-}" ]]; then
+    "$CURL_CMD" -fsS "$CHEAT_BASE/$topic?style=rrt" | "$LESS_CMD" -R
+else
+    "$CURL_CMD" -fsS "$CHEAT_BASE/$topic/$sheet?style=rrt" | "$LESS_CMD" -R
+fi
+
