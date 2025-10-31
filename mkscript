@@ -60,7 +60,8 @@ done
 
 # --- Get script name if missing ---
 if [[ -z "$script_name" ]]; then
-    read -rp "File Name: " script_name
+    printf "File Name: "
+    read -r script_name
     if [[ -z "$script_name" ]]; then
         echo "❌ Error: No filename provided."
         exit 1
@@ -82,7 +83,8 @@ else
         echo "  1) Basic script"
         echo "  2) Script with help menu and argument parsing"
         echo
-        read -rp "Choice [1-2]: " choice
+        printf "Choice [1-2]: "
+        read -r choice
         if [[ "$choice" == "2" ]]; then
             template="advanced"
         else

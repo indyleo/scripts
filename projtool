@@ -56,13 +56,13 @@ function mkproj() {
         esac
     done
 
-    [[ -z "$PROJECT_NAME" ]] && read -rp " Project Name: " PROJECT_NAME
+    [[ -z "$PROJECT_NAME" ]] && read -rp "Project Name: " PROJECT_NAME
     [[ -z "$PROJECT_NAME" ]] && print_color "$RED" "❌ No name given." && return 1
     [[ "$PROJECT_NAME" =~ [^a-zA-Z0-9_-] ]] && print_color "$RED" "❌ Invalid project name." && return 1
 
     if [[ -z "${LANGUAGE:-}" ]]; then
         LANGS=$(IFS=,; echo "${!TEMPLATES[*]}")
-        read -rp " Language ($LANGS): " LANGUAGE
+        read -rp "Language ($LANGS): " LANGUAGE
     fi
     LANGUAGE=$(echo "$LANGUAGE" | tr '[:upper:]' '[:lower:]')
     [[ "$LANGUAGE" == "c++" ]] && LANGUAGE="cpp"
