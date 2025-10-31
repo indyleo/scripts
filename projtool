@@ -174,20 +174,70 @@ function mkgit() {
 # .gitignore creation
 # -----------------------------
 function setup_gitignore() {
-    overwrite=true
-    cat > .gitignore <<EOF
-# projtool:keep
-*.o
-*.exe
-*.py[cod]
-__pycache__/
-bin/
-zig-out/
-venv/
+    case "$LANGUAGE" in
+        sh)
+            cat > .gitignore <<EOF
+# Shell scripts
 *.swp
 EOF
-    print_color "$GREEN" "✅ .gitignore created/overwritten"
+            ;;
+        py)
+            cat > .gitignore <<EOF
+# Python
+__pycache__/
+*.py[cod]
+*.swp
+venv/
+EOF
+            ;;
+        lua)
+            cat > .gitignore <<EOF
+# Lua
+*.swp
+EOF
+            ;;
+        c|cpp)
+            cat > .gitignore <<EOF
+# C/C++
+*.o
+*.exe
+bin/
+*.swp
+EOF
+            ;;
+        go)
+            cat > .gitignore <<EOF
+# Go
+bin/
+*.exe
+*.swp
+EOF
+            ;;
+        rs)
+            cat > .gitignore <<EOF
+# Rust
+target/
+*.swp
+EOF
+            ;;
+        zig)
+            cat > .gitignore <<EOF
+# Zig
+zig-out/
+*.swp
+EOF
+            ;;
+        *)
+            cat > .gitignore <<EOF
+# General
+*.swp
+EOF
+            ;;
+    esac
+
+    print_color "$GREEN" "✅ .gitignore created/overwritten for $LANGUAGE"
 }
+
 
 # -----------------------------
 # Docs setup
