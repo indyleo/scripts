@@ -4,7 +4,7 @@ set -euo pipefail
 
 opt="${1:-}"
 url="${2:-}"
-output_folder="$HOME/Downloads"
+output_folder="$HOME/Music"
 
 if ! command -v spotdl &> /dev/null; then
     echo "spotdl is not installed. Please install spotdl and try again."

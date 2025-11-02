@@ -4,7 +4,7 @@ set -euo pipefail
 
 opt="${1:- }"
 url="${2:- }"
-output_folder="$HOME/Downloads"
+output_folder="$HOME/Music/"
 
 # Validate input
 if [[ -z "$opt" || -z "$url" ]]; then
