@@ -1,24 +1,46 @@
-#!/bin/env bash
+#!/usr/bin/env bash
 # medianotify (song + browser, auto-reconnect)
-
 set -euo pipefail
 
 TMPDIR="${XDG_RUNTIME_DIR:-/tmp}/media-notify"
 mkdir -p "$TMPDIR"
 ICON_FALLBACK="/usr/share/icons/hicolor/64x64/apps/multimedia-player.png"
+LOG_FILE="${TMPDIR}/medianotify.log"
+MAX_CACHE_SIZE_MB=50
 
 # ---- Configurable ----
-SONG_PLAYERS=("SubsonicTUI")
-BROWSER_PLAYERS=("firefox" "chromium" "brave" "google-chrome")
+SONG_PLAYERS=("SubsonicTUI" "spotify" "mpd")
+BROWSER_PLAYERS=("firefox" "chromium" "brave" "google-chrome" "edge")
+NOTIFICATION_TIMEOUT=5000  # milliseconds
 # -----------------------
+
+# Logging function
+function log() {
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"
+}
+
+# Clean old cache files
+function clean_cache() {
+    local cache_size
+    cache_size=$(du -sm "$TMPDIR" 2>/dev/null | cut -f1 || echo "0")
+    if [ "$cache_size" -gt "$MAX_CACHE_SIZE_MB" ]; then
+        log "Cache size ${cache_size}MB exceeds ${MAX_CACHE_SIZE_MB}MB, cleaning..."
+        find "$TMPDIR" -type f -name "*.jpg" -o -name "*.png" -o -name "*.jpeg" |
+        xargs -r stat --format '%Y %n' |
+        sort -n |
+        head -n -10 |
+        cut -d' ' -f2- |
+        xargs -r rm -f
+    fi
+}
 
 function notify_song() {
     local title="$1"
     local artist="$2"
     local album="$3"
     local arturl="$4"
-
     local body=""
+
     [ -n "$artist" ] && body="$artist"
     [ -n "$album" ] && body="${body}${body:+ — }$album"
 
@@ -27,25 +49,39 @@ function notify_song() {
     if [ -n "$arturl" ]; then
         arturl="${arturl#file://}"
         local fname
-        fname="$(echo "$arturl" | sed 's/[^a-zA-Z0-9._-]/_/g')"
+        fname="$(echo -n "$arturl" | md5sum | cut -d' ' -f1).jpg"
         icon_path="$TMPDIR/$fname"
 
-        if [[ "$arturl" =~ ^https?:// ]]; then
-            curl -s -L --fail "$arturl" -o "$icon_path" || icon_path="$ICON_FALLBACK"
-        elif [ -f "$arturl" ]; then
-            cp "$arturl" "$icon_path" || icon_path="$ICON_FALLBACK"
+        # Check if cached
+        if [ ! -f "$icon_path" ]; then
+            if [[ "$arturl" =~ ^https?:// ]]; then
+                if curl -s -L --fail --max-time 5 "$arturl" -o "$icon_path" 2>/dev/null; then
+                    log "Downloaded artwork: $arturl"
+                else
+                    icon_path="$ICON_FALLBACK"
+                    log "Failed to download artwork: $arturl"
+                fi
+            elif [ -f "$arturl" ]; then
+                cp "$arturl" "$icon_path" 2>/dev/null || icon_path="$ICON_FALLBACK"
+            else
+                icon_path="$ICON_FALLBACK"
+            fi
         fi
+
+        clean_cache
     fi
 
-    notify-send "$title" "$body" --icon="$icon_path"
+    notify-send -t "$NOTIFICATION_TIMEOUT" "$title" "$body" --icon="$icon_path"
 }
 
 function find_player() {
     local -n list=$1
     local active
     active=$(playerctl -l 2>/dev/null || true)
+
     for p in "${list[@]}"; do
-        match=$(echo "$active" | grep -i "^$p" | head -n1 || true)
+        local match
+        match=$(echo "$active" | grep -iE "^${p}[.:@]?" | head -n1 || true)
         if [[ -n "$match" ]]; then
             echo "$match"
             return 0
@@ -58,6 +94,7 @@ function wait_for_player() {
     local listname="$1"
     local notify_on_fail="${2:-false}"
     local player=""
+    local wait_count=0
 
     while true; do
         player=$(find_player "$listname" || true)
@@ -65,11 +102,15 @@ function wait_for_player() {
             echo "$player"
             return 0
         fi
-        if [[ "$notify_on_fail" == true ]]; then
-            notify-send "No player found" "Waiting for ${listname[*]}..."
-            notify_on_fail=false
+
+        if [[ "$notify_on_fail" == true ]] && [[ $wait_count -eq 0 ]]; then
+            local -n list_ref=$listname
+            notify-send "Media Notify" "Waiting for player: ${list_ref[*]}" -t 3000
+            log "Waiting for ${listname} player..."
         fi
-        sleep 1
+
+        ((wait_count++))
+        sleep 2
     done
 }
 
@@ -77,35 +118,59 @@ function watch_player() {
     local listname="$1"
     local type="$2"
     local last_title=""
+    local last_artist=""
+    local reconnect_count=0
 
     while true; do
         player=$(wait_for_player "$listname" true)
-        echo "🎧 Connected to $type player: $player"
+        log "Connected to $type player: $player (reconnect #$reconnect_count)"
+
+        # Send status update if restatus command exists
+        if command -v restatus &> /dev/null; then
+            if [[ "$type" == "song" ]]; then
+                restatus rt 22 2>/dev/null || true
+            elif [[ "$type" == "browser" ]]; then
+                restatus rt 21 2>/dev/null || true
+            fi
+        fi
 
         while true; do
+            # Check if player still exists
+            if ! playerctl -l 2>/dev/null | grep -q "^$player$"; then
+                log "Player $player disconnected"
+                last_title=""
+                last_artist=""
+                ((reconnect_count++))
+                break
+            fi
+
             title=$(playerctl -p "$player" metadata title 2>/dev/null || echo "")
             artist=$(playerctl -p "$player" metadata artist 2>/dev/null || echo "")
             album=$(playerctl -p "$player" metadata album 2>/dev/null || echo "")
             arturl=$(playerctl -p "$player" metadata mpris:artUrl 2>/dev/null || echo "")
 
-            if [[ "$type" == "song" ]]; then
-                restatus rt 22
-            elif [[ "$type" == "browser" ]]; then
-                restatus rt 21
-            fi
-
-            if [[ -n "$title" && "$title" != "$last_title" ]]; then
+            # Only notify if title OR artist changed (handles title-only streams)
+            if [[ -n "$title" && ("$title" != "$last_title" || "$artist" != "$last_artist") ]]; then
                 notify_song "$title" "$artist" "$album" "$arturl"
+                log "Now playing: $title ${artist:+by $artist}"
                 last_title="$title"
+                last_artist="$artist"
             fi
 
             sleep 1
         done
+
+        sleep 2  # Brief pause before reconnecting
     done
 }
 
+# Trap to handle cleanup
+trap 'log "Shutting down medianotify"; exit 0' SIGINT SIGTERM
+
 # ---- Argument handling ----
 mode="${1:-both}"
+
+log "Starting medianotify in '$mode' mode"
 
 case "$mode" in
     song)
@@ -121,6 +186,9 @@ case "$mode" in
         ;;
     *)
         echo "Usage: $(basename "$0") [song|browser|both]"
+        echo "  song    - Monitor music players only"
+        echo "  browser - Monitor browser players only"
+        echo "  both    - Monitor all players (default)"
         exit 1
         ;;
 esac
