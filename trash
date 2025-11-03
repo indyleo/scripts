@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# ======================================
+# Standalone Trash Utility (no trash-cli)
+# ======================================
+# Features:
+#   - Move files to ~/.local/share/Trash
+#   - Restore files interactively (fzf)
+#   - List and empty trash safely
+# ======================================
+
+set -euo pipefail
+
+TRASH_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/Trash"
+FILES_DIR="$TRASH_DIR/files"
+INFO_DIR="$TRASH_DIR/info"
+FZF=$(command -v fzf || true)
+mkdir -p "$FILES_DIR" "$INFO_DIR"
+
+function usage() {
+    cat <<'EOF'
+Usage:
+  trash put <file...>         Move files to trash
+  trash list                  List trashed files
+  trash restore               Interactively restore trashed files
+  trash empty [days]          Empty trash (optionally older than N days)
+  trash size                  Show total trash size
+  help                        Show this help
+
+Examples:
+  trash put old.txt
+  trash list
+  trash restore
+  trash empty 30
+EOF
+    exit 1
+}
+
+function timestamp() { date +"%Y-%m-%dT%H:%M:%S"; }
+
+# --- Move files to trash ---
+function put_trash() {
+    [[ $# -lt 1 ]] && echo "Error: specify files to trash" && exit 1
+
+    for f in "$@"; do
+        if [[ ! -e "$f" ]]; then
+            echo "⚠️  Skipping: $f (not found)"
+            continue
+        fi
+
+        base=$(basename "$f")
+        dest="$FILES_DIR/$base"
+        # avoid overwriting files with same name
+        while [[ -e "$dest" ]]; do
+            dest="$FILES_DIR/${base%.*}_$(date +%s%N).${base##*.}"
+        done
+
+        mv "$f" "$dest"
+
+        # create metadata file
+        cat > "$INFO_DIR/$(basename "$dest").trashinfo" <<EOF
+[Trash Info]
+Path=$(realpath "$f")
+DeletionDate=$(timestamp)
+EOF
+
+        echo "🗑️  Moved to trash: $f"
+    done
+}
+
+# --- List trashed files ---
+function list_trash() {
+    echo "🗑️  Trash contents:"
+    echo "----------------------------------------------"
+    if ! ls "$FILES_DIR"/* &>/dev/null; then
+        echo "(empty)"
+        return
+    fi
+    for info in "$INFO_DIR"/*.trashinfo; do
+        [[ -f "$info" ]] || continue
+        name=$(basename "$info" .trashinfo)
+        path=$(grep '^Path=' "$info" | cut -d= -f2-)
+        date=$(grep '^DeletionDate=' "$info" | cut -d= -f2-)
+        size=$(du -sh "$FILES_DIR/$name" 2>/dev/null | awk '{print $1}')
+        echo "$date  [$size]  $(basename "$path")"
+    done | sort -r
+}
+
+# --- Restore trashed files ---
+function restore_trash() {
+    if [[ -z "$FZF" ]]; then
+        echo "Error: fzf not found. Please install fzf for interactive restore."
+        exit 1
+    fi
+
+    mapfile -t choices < <(
+        list_trash | fzf -m --ansi --prompt="Select files to restore> " | awk '{print $NF}'
+    )
+
+    [[ ${#choices[@]} -eq 0 ]] && echo "No files selected." && exit 0
+
+    for base in "${choices[@]}"; do
+        info="$INFO_DIR/$base.trashinfo"
+        file="$FILES_DIR/$base"
+        [[ -f "$info" && -e "$file" ]] || continue
+        orig_path=$(grep '^Path=' "$info" | cut -d= -f2-)
+        mkdir -p "$(dirname "$orig_path")"
+        mv "$file" "$orig_path" && rm "$info"
+        echo "✅ Restored: $orig_path"
+    done
+}
+
+# --- Empty trash (optionally older than N days) ---
+function empty_trash() {
+    local days="${1:-0}"
+
+    if [[ "$days" -gt 0 ]]; then
+        echo "🧹 Removing items older than $days days..."
+        find "$INFO_DIR" -type f -mtime +"$days" -exec basename {} .trashinfo \; | while read -r f; do
+            rm -rf "$FILES_DIR/$f" "$INFO_DIR/$f.trashinfo"
+        done
+    else
+        printf "⚠️  Permanently delete all trashed files? [y/N]: "
+        read -r ans
+        [[ "$ans" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
+        rm -rf "$FILES_DIR"/* "$INFO_DIR"/*
+        echo "✅ Trash emptied."
+    fi
+}
+
+# --- Show total trash size ---
+function trash_size() {
+    echo "📦 Trash size:"
+    du -sh "$FILES_DIR" 2>/dev/null || echo "(empty)"
+}
+
+# --- Main ---
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+    put) put_trash "$@" ;;
+    list|ls) list_trash ;;
+    restore) restore_trash ;;
+    empty|clean) empty_trash "${1:-}" ;;
+    size|du) trash_size ;;
+    help|--help|-h) usage ;;
+    *)
+        echo "Unknown command: $cmd"
+        usage
+        ;;
+esac
+

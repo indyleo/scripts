@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# =====================================
+# Archive Utility Script
+# Supports: extract | archive
+# =====================================
+
+set -e
+
+function usage() {
+    cat <<'EOF'
+Usage:
+  archives extract <archive_file>
+  archives archive <archive_name> <file1> [file2 ... fileN]
+
+Description:
+  A simple archive utility to extract or create common archive formats.
+
+Supported extraction formats:
+  .tar.bz2, .tar.gz, .bz2, .rar, .gz, .tar, .tbz2, .tgz, .zip, .Z, .7z, .deb, .tar.xz, .tar.zst
+
+Supported archive formats:
+  .tar.gz, .zip, .rar
+
+Examples:
+  archives extract data.tar.gz
+  archives archive backup.zip file1.txt file2.txt
+EOF
+    exit 1
+}
+
+# --- Extraction function ---
+function extract() {
+    local file="$1"
+    if [[ -z "$file" ]]; then
+        echo "Error: No file specified for extraction."
+        usage
+    fi
+
+    if [[ -f "$file" ]]; then
+        case "$file" in
+            *.tar.bz2) tar xjf "$file" ;;
+            *.tar.gz)  tar xzf "$file" ;;
+            *.bz2)     bunzip2 "$file" ;;
+            *.rar)     unrar x "$file" ;;
+            *.gz)      gunzip "$file" ;;
+            *.tar)     tar xf "$file" ;;
+            *.tbz2)    tar xjf "$file" ;;
+            *.tgz)     tar xzf "$file" ;;
+            *.zip)     unzip "$file" ;;
+            *.Z)       uncompress "$file" ;;
+            *.7z)      7z x "$file" ;;
+            *.deb)     ar x "$file" ;;
+            *.tar.xz)  tar xf "$file" ;;
+            *.tar.zst) unzstd "$file" ;;
+            *)         echo "Error: '$file' cannot be extracted via this script." ;;
+        esac
+    else
+        echo "Error: '$file' is not a valid file."
+        exit 1
+    fi
+}
+
+# --- Archiving function ---
+function archive() {
+    local archive_name="$1"
+    shift
+    local files=("$@")
+
+    if [[ -z "$archive_name" || "${#files[@]}" -lt 1 ]]; then
+        echo "Error: Missing archive name or files."
+        usage
+    fi
+
+    if [[ -e "$archive_name" ]]; then
+        echo "Error: Archive '$archive_name' already exists."
+        exit 1
+    fi
+
+    case "$archive_name" in
+        *.tar.gz)
+            tar -czf "$archive_name" "${files[@]}"
+            ;;
+        *.zip)
+            zip -r "$archive_name" "${files[@]}"
+            ;;
+        *.rar)
+            if command -v rar > /dev/null; then
+                rar a "$archive_name" "${files[@]}"
+            else
+                echo "Error: 'rar' command not found. Please install RAR to create .rar archives."
+                exit 1
+            fi
+            ;;
+        *)
+            echo "Error: Unsupported archive format."
+            echo "Supported: .tar.gz, .zip, .rar"
+            exit 1
+            ;;
+    esac
+
+    echo "✅ Archive created: $archive_name"
+}
+
+# --- Main dispatcher ---
+if [[ $# -lt 1 ]]; then
+    usage
+fi
+
+command="$1"
+shift
+
+case "$command" in
+    extract) extract "$@" ;;
+    archive) archive "$@" ;;
+    help|--help|-h) usage ;;
+    *)
+        echo "Error: Unknown command '$command'"
+        usage
+        ;;
+esac
+
