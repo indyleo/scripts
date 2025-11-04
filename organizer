@@ -1,6 +1,16 @@
-#!/bin/env bash
+#!/usr/bin/env bash
 
-DOWNLOADS="$HOME/Downloads"
+# Download Organizer - Auto-organizes downloads with LF integration
+# Requires: inotify-tools
+
+set -euo pipefail
+
+# === Configuration ===
+DOWNLOADS="${DOWNLOADS_DIR:-$HOME/Downloads}"
+LOG_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/download-organizer.log"
+PID_FILE="${XDG_RUNTIME_DIR:-/tmp}/download-organizer.pid"
+MAX_LOG_SIZE=1048576  # 1MB
+PROGNAME=$(basename "$0")
 
 # === Define category folders ===
 declare -A DIRS=(
@@ -19,74 +29,346 @@ declare -A DIRS=(
 
 # === Define extensions for each category ===
 declare -A EXTENSIONS=(
-    [Pictures]="jpg jpeg png gif bmp webp svg"
-    [Videos]="mp4 mkv mov avi webm"
-    [Documents]="pdf docx doc txt md odt"
-    [Archives]="zip tar gz 7z rar"
-    [Music]="mp3 wav flac ogg m4a"
-    [Code]="py cpp h c js html css sh rb go"
+    [Pictures]="jpg jpeg png gif bmp webp svg ico tiff"
+    [Videos]="mp4 mkv mov avi webm flv m4v mpg mpeg wmv"
+    [Documents]="pdf docx doc txt md odt rtf epub mobi tex"
+    [Archives]="zip tar gz 7z rar xz bz2 tgz"
+    [Music]="mp3 wav flac ogg m4a aac wma opus"
+    [Code]="py cpp h c js html css sh rb go rs java php ts tsx jsx"
     [Diffs]="diff patch"
-    [Bin]="bin o obj"
-    [Applications]="deb rpm exe msi pkg AppImage"
-    [Img]="iso img vdi vmdk qcow2"
+    [Bin]="bin o obj so a dylib"
+    [Applications]="deb rpm exe msi pkg AppImage flatpak snap"
+    [Img]="iso img vdi vmdk qcow2 vhd"
 )
 
+# === Logging functions ===
+function log() {
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] $*" | tee -a "$LOG_FILE"
+
+    # Rotate log if too large
+    if [[ -f "$LOG_FILE" ]] && [[ $(stat -f%z "$LOG_FILE" 2>/dev/null || stat -c%s "$LOG_FILE" 2>/dev/null) -gt $MAX_LOG_SIZE ]]; then
+        mv "$LOG_FILE" "${LOG_FILE}.old"
+        echo "[$timestamp] Log rotated" > "$LOG_FILE"
+    fi
+}
+
+function log_error() {
+    log "ERROR: $*" >&2
+}
+
+# === LF reload functions ===
+function reload_lf() {
+    local dir="$1"
+
+    # Send reload command to all LF instances
+    if command -v lf &> /dev/null; then
+        lf -remote "send reload" 2>/dev/null || true
+    fi
+
+    # Alternative: Use lfrc remote commands if available
+    if [[ -n "${LFID:-}" ]]; then
+        lf -remote "send $LFID cd \"$dir\"" 2>/dev/null || true
+        lf -remote "send $LFID reload" 2>/dev/null || true
+    fi
+}
+
 # === Ensure target directories exist ===
-for dir in "${DIRS[@]}"; do
-    mkdir -p "$dir"
-done
+function setup_dirs() {
+    for dir in "${DIRS[@]}"; do
+        if [[ ! -d "$dir" ]]; then
+            mkdir -p "$dir" && log "Created directory: $dir"
+        fi
+    done
 
-# === Function to move a file ===
-move_file() {
-    local file="$1"
-    [[ ! -f "$file" ]] && return
+    # Create log directory
+    mkdir -p "$(dirname "$LOG_FILE")"
+}
 
-    local filename=$(basename "$file")
-    local ext="${filename##*.}"
+# === Function to get file category ===
+function get_category() {
+    local ext="$1"
     ext=$(echo "$ext" | tr '[:upper:]' '[:lower:]')
-    local moved=false
-
-    # Skip in-progress downloads
-    case "$filename" in
-        *.part|*.crdownload|*.tmp|*.download|.org.chromium.*)
-            return
-            ;;
-    esac
 
     for category in "${!EXTENSIONS[@]}"; do
         for e in ${EXTENSIONS[$category]}; do
             if [[ "$ext" == "$e" ]]; then
-                target="${DIRS[$category]}/$filename"
-                counter=1
-                while [[ -e "$target" ]]; do
-                    target="${DIRS[$category]}/${filename%.*}_$counter.${ext}"
-                    ((counter++))
-                done
-                mv "$file" "$target"
-                echo "[Moved] $filename → ${DIRS[$category]}"
-                moved=true
-                break 2
+                echo "$category"
+                return 0
             fi
         done
     done
 
-    if ! $moved; then
-        target="${DIRS[Other]}/$filename"
-        counter=1
-        while [[ -e "$target" ]]; do
-            target="${DIRS[Other]}/${filename%.*}_$counter.${ext}"
-            ((counter++))
-        done
-        mv "$file" "$target"
-        echo "[Moved] $filename → ${DIRS[Other]}"
+    echo "Other"
+}
+
+# === Function to generate unique filename ===
+function get_unique_filename() {
+    local target="$1"
+    local dir=$(dirname "$target")
+    local filename=$(basename "$target")
+    local name="${filename%.*}"
+    local ext="${filename##*.}"
+
+    # If no extension, treat entire filename as name
+    [[ "$name" == "$ext" ]] && ext=""
+
+    local counter=1
+    local new_target="$target"
+
+    while [[ -e "$new_target" ]]; do
+        if [[ -n "$ext" ]]; then
+            new_target="${dir}/${name}_${counter}.${ext}"
+        else
+            new_target="${dir}/${name}_${counter}"
+        fi
+        ((counter++))
+    done
+
+    echo "$new_target"
+}
+
+# === Function to check if file is in progress ===
+function is_download_in_progress() {
+    local filename="$1"
+
+    case "$filename" in
+        *.part|*.crdownload|*.tmp|*.download|.org.chromium.*|*.!qB)
+            return 0
+            ;;
+    esac
+
+    return 1
+}
+
+# === Function to move a file ===
+function move_file() {
+    local file="$1"
+
+    # Verify file exists and is a regular file
+    if [[ ! -f "$file" ]]; then
+        log_error "Not a file or doesn't exist: $file"
+        return 1
+    fi
+
+    local filename=$(basename "$file")
+    local ext="${filename##*.}"
+
+    # Skip in-progress downloads
+    if is_download_in_progress "$filename"; then
+        return 0
+    fi
+
+    # Skip hidden files unless they have known extensions
+    if [[ "$filename" == .* ]] && [[ "$filename" != *.* ]]; then
+        return 0
+    fi
+
+    # Get category and target directory
+    local category=$(get_category "$ext")
+    local target_dir="${DIRS[$category]}"
+    local target="${target_dir}/${filename}"
+
+    # Get unique filename if target exists
+    target=$(get_unique_filename "$target")
+
+    # Move the file
+    if mv "$file" "$target"; then
+        log "✓ Moved: $filename → $category/"
+        reload_lf "$target_dir"
+        reload_lf "$DOWNLOADS"
+        return 0
+    else
+        log_error "Failed to move: $filename"
+        return 1
     fi
 }
 
-# === Watch for new or closed files ===
-echo "📂 Watching $DOWNLOADS with inotifywait..."
+# === Function to organize existing files ===
+function organize_existing() {
+    log "Organizing existing files in $DOWNLOADS..."
+    local count=0
 
-# Requires inotify-tools package
-# Install: sudo apt install inotify-tools
-inotifywait -m -e close_write --format "%f" "$DOWNLOADS" | while read FILENAME; do
-    move_file "$DOWNLOADS/$FILENAME"
-done
+    while IFS= read -r -d '' file; do
+        if move_file "$file"; then
+            ((count++))
+        fi
+    done < <(find "$DOWNLOADS" -maxdepth 1 -type f -print0)
+
+    log "Organized $count existing files"
+}
+
+# === Check dependencies ===
+function check_dependencies() {
+    if ! command -v inotifywait &> /dev/null; then
+        log_error "inotifywait not found. Install inotify-tools:"
+        log_error "  Arch: sudo pacman -S inotify-tools"
+        log_error "  Debian/Ubuntu: sudo apt install inotify-tools"
+        exit 1
+    fi
+}
+
+# === Show usage ===
+function show_usage() {
+    cat << EOF
+Usage: $PROGNAME [OPTIONS]
+
+Auto-organize downloads into categorized folders with LF integration.
+
+Options:
+  -o, --organize    Organize existing files then exit
+  -d, --daemon      Run as daemon (watch for new files)
+  -s, --stop        Stop running daemon
+  -r, --status      Check daemon status
+  -h, --help        Show this help message
+
+Environment Variables:
+  DOWNLOADS_DIR     Override downloads directory (default: ~/Downloads)
+
+Log file: $LOG_FILE
+PID file: $PID_FILE
+
+Categories and extensions:
+EOF
+    for category in "${!EXTENSIONS[@]}"; do
+        printf "  %-15s: %s\n" "$category" "${EXTENSIONS[$category]}"
+    done
+}
+
+# === Check if already running ===
+function check_already_running() {
+    if [[ -f "$PID_FILE" ]]; then
+        local old_pid=$(cat "$PID_FILE")
+        if kill -0 "$old_pid" 2>/dev/null; then
+            log "Already running with PID $old_pid"
+            echo "Download organizer is already running (PID: $old_pid)"
+            echo "To stop it: kill $old_pid"
+            exit 0
+        else
+            # Stale PID file, remove it
+            rm -f "$PID_FILE"
+        fi
+    fi
+
+    # Write current PID
+    echo $ > "$PID_FILE"
+}
+
+# === Cleanup on exit ===
+function cleanup() {
+    log "Shutting down $PROGNAME"
+    rm -f "$PID_FILE"
+    exit 0
+}
+
+trap cleanup SIGINT SIGTERM EXIT
+
+# === Main function ===
+function main() {
+    local mode="daemon"
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -o|--organize)
+                mode="organize"
+                shift
+                ;;
+            -d|--daemon)
+                mode="daemon"
+                shift
+                ;;
+            -s|--stop)
+                mode="stop"
+                shift
+                ;;
+            -r|--status)
+                mode="status"
+                shift
+                ;;
+            -h|--help)
+                show_usage
+                exit 0
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                show_usage
+                exit 1
+                ;;
+        esac
+    done
+
+    # Handle stop and status without other checks
+    case "$mode" in
+        stop)
+            if [[ -f "$PID_FILE" ]]; then
+                local pid=$(cat "$PID_FILE")
+                if kill -0 "$pid" 2>/dev/null; then
+                    kill "$pid"
+                    echo "Stopped daemon (PID: $pid)"
+                else
+                    echo "No running daemon found (stale PID file removed)"
+                    rm -f "$PID_FILE"
+                fi
+            else
+                echo "No daemon running"
+            fi
+            exit 0
+            ;;
+        status)
+            if [[ -f "$PID_FILE" ]]; then
+                local pid=$(cat "$PID_FILE")
+                if kill -0 "$pid" 2>/dev/null; then
+                    echo "✓ Daemon is running (PID: $pid)"
+                    echo "Watching: $DOWNLOADS"
+                    exit 0
+                else
+                    echo "✗ Daemon not running (stale PID file found)"
+                    rm -f "$PID_FILE"
+                    exit 1
+                fi
+            else
+                echo "✗ Daemon not running"
+                exit 1
+            fi
+            ;;
+    esac
+
+    # Check dependencies
+    check_dependencies
+
+    # Setup directories
+    setup_dirs
+
+    # Verify downloads directory
+    if [[ ! -d "$DOWNLOADS" ]]; then
+        log_error "Downloads directory not found: $DOWNLOADS"
+        exit 1
+    fi
+
+    case "$mode" in
+        organize)
+            organize_existing
+            ;;
+        daemon)
+            # Check if already running
+            check_already_running
+
+            log "Starting $PROGNAME daemon"
+            log "Watching: $DOWNLOADS"
+
+            # Organize existing files first
+            organize_existing
+
+            # Watch for new files
+            inotifywait -m -e close_write -e moved_to --format "%f" "$DOWNLOADS" 2>/dev/null | while read -r filename; do
+                # Small delay to ensure file is fully written
+                sleep 0.2
+                move_file "$DOWNLOADS/$filename"
+            done
+            ;;
+    esac
+}
+
+# Run main function
+main "$@"
