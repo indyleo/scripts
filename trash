@@ -37,7 +37,7 @@ EOF
 
 function timestamp() { date +"%Y-%m-%dT%H:%M:%S"; }
 
-# --- Move files to trash ---
+# --- Move files to trash (interactive like rm -i) ---
 function put_trash() {
     [[ $# -lt 1 ]] && echo "Error: specify files to trash" && exit 1
 
@@ -47,16 +47,19 @@ function put_trash() {
             continue
         fi
 
+        # ask once per argument (file or directory)
+        printf "trash: move '%s' to trash? [y/N]: " "$f"
+        read -r ans
+        [[ "$ans" =~ ^[Yy]$ ]] || { echo "Skipped."; continue; }
+
         base=$(basename "$f")
         dest="$FILES_DIR/$base"
-        # avoid overwriting files with same name
         while [[ -e "$dest" ]]; do
             dest="$FILES_DIR/${base%.*}_$(date +%s%N).${base##*.}"
         done
 
         mv "$f" "$dest"
 
-        # create metadata file
         cat > "$INFO_DIR/$(basename "$dest").trashinfo" <<EOF
 [Trash Info]
 Path=$(realpath "$f")
