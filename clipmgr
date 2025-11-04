@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+
+# Clipboard Manager for dwm
+# Stores clipboard history and allows selection via dmenu
+
+CLIP_DIR="$HOME/.cache/clipboard"
+MAX_CLIPS=50
+CLIP_FILE="$CLIP_DIR/history"
+PIN_FILE="$CLIP_DIR/pinned"
+PROGNAME=$(basename "$0")
+
+# Create cache directory if it doesn't exist
+mkdir -p "$CLIP_DIR"
+touch "$CLIP_FILE"
+touch "$PIN_FILE"
+
+# Function to show usage
+function show_usage() {
+    cat << EOF
+Usage: $PROGNAME {daemon|select|pin|clear}
+
+Commands:
+  daemon   Run in background to monitor clipboard
+  select   Show clipboard history menu (default)
+  pin      Show menu to pin/unpin clipboard items
+  clear    Clear clipboard history (keeps pinned items)
+
+Description:
+  A clipboard manager for dwm that stores clipboard history
+  and allows selection via dmenu. Pinned items stay at the top.
+
+Examples:
+  $PROGNAME daemon &     # Start monitoring clipboard
+  $PROGNAME select       # Show history menu
+  $PROGNAME pin          # Manage pinned items
+  $PROGNAME clear        # Clear history
+EOF
+}
+
+# Function to add to clipboard history
+function add_clip() {
+    local new_clip="$1"
+
+    # Skip if empty or whitespace only
+    [[ -z "${new_clip// }" ]] && return
+
+    # Don't add if already pinned
+    if grep -Fxq "$new_clip" "$PIN_FILE" 2>/dev/null; then
+        return
+    fi
+
+    # Remove if already exists (to move to top)
+    sed -i "\|^${new_clip}$|d" "$CLIP_FILE" 2>/dev/null
+
+    # Add to top of file
+    echo "$new_clip" | cat - "$CLIP_FILE" > "$CLIP_FILE.tmp"
+    mv "$CLIP_FILE.tmp" "$CLIP_FILE"
+
+    # Keep only MAX_CLIPS entries
+    sed -i "$((MAX_CLIPS + 1)),\$d" "$CLIP_FILE"
+}
+
+# Function to monitor clipboard (daemon mode)
+function daemon() {
+    local last_clip=""
+
+    while true; do
+        # Get current clipboard content
+        current_clip=$(xclip -o -selection clipboard 2>/dev/null)
+
+        # If clipboard changed, add to history
+        if [[ -n "$current_clip" && "$current_clip" != "$last_clip" ]]; then
+            add_clip "$current_clip"
+            last_clip="$current_clip"
+        fi
+
+        sleep 0.5
+    done
+}
+
+# Function to show history and select (dmenu mode)
+function select_clip() {
+    local selection
+    local menu_items=""
+    local counter=1
+
+    # Add pinned items first with [P] prefix
+    if [[ -s "$PIN_FILE" ]]; then
+        while IFS= read -r line; do
+            menu_items+="[P${counter}] ${line}"$'\n'
+            ((counter++))
+        done < "$PIN_FILE"
+    fi
+
+    # Reset counter for regular items
+    counter=1
+
+    # Add regular history items with number prefix
+    if [[ -s "$CLIP_FILE" ]]; then
+        while IFS= read -r line; do
+            menu_items+="[${counter}] ${line}"$'\n'
+            ((counter++))
+        done < "$CLIP_FILE"
+    fi
+
+    # Show in dmenu
+    selection=$(echo -n "$menu_items" | dmenu -l 15 -p "Clipboard History:")
+
+    # If something selected, extract content and copy to clipboard
+    if [[ -n "$selection" ]]; then
+        # Remove the prefix [1], [2], [P1], etc.
+        local content="${selection#\[*\] }"
+        echo -n "$content" | xclip -selection clipboard
+    fi
+}
+
+# Function to manage pinned items
+function pin_menu() {
+    local selection
+    local menu_items=""
+    local counter=1
+
+    # Show current pinned items with [UNPIN] option
+    if [[ -s "$PIN_FILE" ]]; then
+        menu_items="=== PINNED (select to unpin) ==="$'\n'
+        while IFS= read -r line; do
+            menu_items+="[P${counter}] ${line}"$'\n'
+            ((counter++))
+        done < "$PIN_FILE"
+        menu_items+=$'\n'
+    fi
+
+    # Show regular history items with [PIN] option
+    if [[ -s "$CLIP_FILE" ]]; then
+        menu_items+="=== HISTORY (select to pin) ==="$'\n'
+        counter=1
+        while IFS= read -r line; do
+            menu_items+="[${counter}] ${line}"$'\n'
+            ((counter++))
+        done < "$CLIP_FILE"
+    fi
+
+    # Show in dmenu
+    selection=$(echo -n "$menu_items" | dmenu -l 15 -p "Pin/Unpin:")
+
+    # Skip if header selected or empty
+    if [[ -z "$selection" ]] || [[ "$selection" == "==="* ]]; then
+        return
+    fi
+
+    # Remove the prefix
+    local content="${selection#\[*\] }"
+
+    # Check if it's pinned (has [P] prefix)
+    if [[ "$selection" == \[P*\]* ]]; then
+        # Unpin: remove from pinned file
+        sed -i "\|^${content}$|d" "$PIN_FILE" 2>/dev/null
+        # Add back to history
+        add_clip "$content"
+    else
+        # Pin: add to pinned file
+        echo "$content" >> "$PIN_FILE"
+        # Remove from history
+        sed -i "\|^${content}$|d" "$CLIP_FILE" 2>/dev/null
+    fi
+}
+
+# Function to clear history
+function clear_history() {
+    true > "$CLIP_FILE"
+    echo "Clipboard history cleared (pinned items preserved)"
+}
+
+# Main script logic
+case "${1:-select}" in
+    daemon)
+        daemon
+        ;;
+    select)
+        select_clip
+        ;;
+    pin)
+        pin_menu
+        ;;
+    clear)
+        clear_history
+        ;;
+    -h|--help|help)
+        show_usage
+        ;;
+    *)
+        echo "Error: Unknown command '$1'"
+        echo ""
+        show_usage
+        exit 1
+        ;;
+esac
