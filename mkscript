@@ -6,7 +6,8 @@ SCRIPTS_DIR="$HOME/Scripts"
 mkdir -p "$SCRIPTS_DIR"
 
 # Defaults
-template="ask" # "basic" or "advanced"
+template="ask"      # "basic" or "advanced"
+language="ask"      # "bash" or "python"
 open_in_editor=true
 script_name=""
 
@@ -17,16 +18,17 @@ Usage: mkscript [OPTIONS] [NAME]
 Create or open a script in ~/Scripts.
 
 Options:
-  -b, --basic       Create a basic script template
-  -a, --advanced    Create a script with help/arg parsing
-  -n, --noedit      Do not open in editor after creation
-  -h, --help        Show this help message
+  -b, --basic          Create a basic script template
+  -a, --advanced       Create a script with help/arg parsing
+  -l, --lang LANG      Language (bash/sh/shell or python3/python/py)
+  -n, --noedit         Do not open in editor after creation
+  -h, --help           Show this help message
 
 Examples:
-  mkscript mytool.sh            # Interactive mode
-  mkscript -b cleanup.sh        # Basic template
-  mkscript -a runner.sh         # Advanced template
-  mkscript -a -n test.sh        # Advanced, skip opening editor
+  mkscript mytool.sh               # Interactive Bash
+  mkscript -b cleanup.sh           # Basic Bash template
+  mkscript -a runner.sh            # Advanced Bash template
+  mkscript -a -l python3 test.py   # Advanced Python
 EOF
 }
 
@@ -38,6 +40,21 @@ while [[ $# -gt 0 ]]; do
             ;;
         -a|--advanced)
             template="advanced"
+            ;;
+        -l|--lang)
+            shift
+            if [[ $# -eq 0 ]]; then
+                echo "❌ Error: --lang requires an argument"
+                exit 1
+            fi
+            case "$1" in
+                bash|sh|shell) language="bash" ;;
+                python3|python|py) language="python" ;;
+                *)
+                    echo "❌ Unknown language: $1"
+                    exit 1
+                    ;;
+            esac
             ;;
         -n|--noedit)
             open_in_editor=false
@@ -70,6 +87,21 @@ fi
 
 file_path="$SCRIPTS_DIR/$script_name"
 
+# --- Ask language if not specified ---
+if [[ "$language" == "ask" ]]; then
+    echo
+    echo "Select language:"
+    echo "  1) Bash"
+    echo "  2) Python"
+    printf "Choice [1-2]: "
+    read -r lang_choice
+    if [[ "$lang_choice" == "2" ]]; then
+        language="python"
+    else
+        language="bash"
+    fi
+fi
+
 # --- Create or open file ---
 if [[ -e "$file_path" ]]; then
     echo "📂 Opening existing script: $file_path"
@@ -82,7 +114,6 @@ else
         echo "Select script type:"
         echo "  1) Basic script"
         echo "  2) Script with help menu and argument parsing"
-        echo
         printf "Choice [1-2]: "
         read -r choice
         if [[ "$choice" == "2" ]]; then
@@ -93,23 +124,25 @@ else
     fi
 
     # --- Generate template content ---
-    basic_template='#!/bin/env bash
+    if [[ "$language" == "bash" ]]; then
+        basic_template='#!/bin/env bash
 
 set -euo pipefail
 
 # Your code here
+echo "Hello from Bash basic script!"
 '
 
-    advanced_template='#!/bin/env bash
+        advanced_template="#!/bin/env bash
 
 set -euo pipefail
 
-opt="${1:-}"
+opt=\"\${1:-}\"
 
 help_menu() {
     cat << EOF
 
-Usage: $(basename "$0") [OPTION]
+Usage: \$(basename \"\$0\") [OPTION]
 
 Options:
   -h, --help        Show this help message
@@ -117,20 +150,62 @@ Options:
 EOF
 }
 
-case "$opt" in
+case \"\$opt\" in
     -h|--help)
         help_menu
         ;;
-    "")
-        echo "⚙️  No option provided. Add logic here."
+    \"\")
+        echo \"Hello from Bash advanced script!\"
         ;;
     *)
-        echo "❌ Error: ${opt} is not a valid option."
+        echo \"❌ Error: \${opt} is not a valid option.\"
         help_menu
         exit 1
         ;;
 esac
+"
+
+    else
+        # Python templates
+        basic_template='#!/usr/bin/env python3
+"""
+Basic Python script template.
+"""
+
+def main():
+    """Main function."""
+    print("Hello from Python basic script!")
+
+if __name__ == "__main__":
+    main()
 '
+
+        advanced_template='#!/usr/bin/env python3
+"""
+Advanced Python script template with argument parsing.
+"""
+
+import argparse
+import sys
+
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="Description of your script")
+    parser.add_argument("--example", help="Example argument")
+    return parser.parse_args()
+
+def main():
+    """Main function."""
+    args = parse_args()
+    if args.example:
+        print(f"Example arg: {args.example}")
+    else:
+        print("Hello from Python advanced script!")
+
+if __name__ == "__main__":
+    main()
+'
+    fi
 
     # Write template
     if [[ "$template" == "advanced" ]]; then
