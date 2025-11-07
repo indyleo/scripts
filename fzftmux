@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+
+# tmux-project-session.sh
+# A script to create tmux sessions with neovim windows for project directories
+
+set -e
+
+SEARCH_DIRS=(
+    "$HOME/Projects"
+    "$HOME/Github"
+)
+
+function show_help() {
+    cat << EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Create a tmux session with neovim and command windows for a selected project.
+
+OPTIONS:
+    -h, --help      Show this help message
+    -p, --project   Search for project folders (default)
+    -g, --git       Search for git repositories only
+
+DESCRIPTION:
+    This script searches ~/Projects and ~/Github directories for projects,
+    allows you to select one with fzf, then creates a tmux session with:
+    - Window 1: neovim
+    - Window 2: shell/command window
+
+    The session is named after the selected folder.
+
+EXAMPLES:
+    $(basename "$0")              # Search all folders (default)
+    $(basename "$0") --project    # Search all folders
+    $(basename "$0") --git        # Search only git repositories
+
+EOF
+}
+
+function search_projects() {
+    local search_dirs=("$@")
+    local folders=()
+    local excluded_dirs=("bin" "lib" "include" "utils" "example" "examples" "node_modules" "vendor" "dist" "build" "zig-out" "cmd" "demo" "scripts" "test" "tests" "schema" "pkg" "docs" "src" "res")
+
+    for dir in "${search_dirs[@]}"; do
+        if [[ -d "$dir" ]]; then
+            while IFS= read -r -d '' folder; do
+                local basename=$(basename "$folder")
+                local exclude=0
+
+                # Check if folder name matches any excluded directory
+                for excluded in "${excluded_dirs[@]}"; do
+                    if [[ "$basename" == "$excluded" ]]; then
+                        exclude=1
+                        break
+                    fi
+                done
+
+                if [[ $exclude -eq 0 ]]; then
+                    folders+=("$folder")
+                fi
+            done < <(find "$dir" -mindepth 1 -maxdepth 2 -type d -not -path '*/.*' -print0 2>/dev/null)
+        fi
+    done
+
+    printf '%s\n' "${folders[@]}"
+}
+
+function search_git_repos() {
+    local search_dirs=("$@")
+    local repos=()
+
+    for dir in "${search_dirs[@]}"; do
+        if [[ -d "$dir" ]]; then
+            while IFS= read -r -d '' repo; do
+                repos+=("$(dirname "$repo")")
+            done < <(find "$dir" -mindepth 2 -maxdepth 3 -type d -name ".git" -print0 2>/dev/null)
+        fi
+    done
+
+    printf '%s\n' "${repos[@]}" | sort -u
+}
+
+function create_tmux_session() {
+    local project_path="$1"
+    local session_name
+
+    # Extract folder name for session name
+    session_name=$(basename "$project_path")
+
+    # Replace dots and special chars with underscores for valid tmux session name
+    session_name=$(echo "$session_name" | tr '.' '_' | tr ' ' '_')
+
+    # Check if session already exists
+    if tmux has-session -t "$session_name" 2>/dev/null; then
+        echo "Session '$session_name' already exists. Attaching..."
+        if [[ -z "$TMUX" ]]; then
+            tmux attach-session -t "$session_name"
+        else
+            tmux switch-client -t "$session_name"
+        fi
+        return 0
+    fi
+
+    # Create new session with first neovim window (detached)
+    tmux new-session -d -s "$session_name" -c "$project_path" -n "nvim"
+    tmux send-keys -t "$session_name:1" "nvim" C-m
+
+    # Create shell window
+    tmux new-window -t "$session_name:2" -n "shell" -c "$project_path"
+
+    # Select the first window
+    tmux select-window -t "$session_name:1"
+
+    # Attach to the session
+    if [[ -z "$TMUX" ]]; then
+        tmux attach-session -t "$session_name"
+    else
+        tmux switch-client -t "$session_name"
+    fi
+}
+
+function main() {
+    local search_mode="project"
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            -p|--project)
+                search_mode="project"
+                shift
+                ;;
+            -g|--git)
+                search_mode="git"
+                shift
+                ;;
+            *)
+                echo "Unknown option: $1"
+                show_help
+                exit 1
+                ;;
+        esac
+    done
+
+    # Check if fzf is installed
+    if ! command -v fzf &> /dev/null; then
+        echo "Error: fzf is not installed. Please install fzf first."
+        exit 1
+    fi
+
+    # Check if tmux is installed
+    if ! command -v tmux &> /dev/null; then
+        echo "Error: tmux is not installed. Please install tmux first."
+        exit 1
+    fi
+
+    # Search for projects based on mode
+    local projects
+    if [[ "$search_mode" == "git" ]]; then
+        echo "Searching for git repositories..." >&2
+        projects=$(search_git_repos "${SEARCH_DIRS[@]}")
+    else
+        echo "Searching for projects..." >&2
+        projects=$(search_projects "${SEARCH_DIRS[@]}")
+    fi
+
+    # Check if any projects found
+    if [[ -z "$projects" ]]; then
+        echo "No projects found in search directories."
+        exit 1
+    fi
+
+    # Use fzf to select a project
+    local selected_project
+    selected_project=$(echo "$projects" | fzf --prompt="Select project: " --height=40% --reverse --preview='ls -la {}' --preview-window=right:50%)
+
+    # Check if user cancelled selection
+    if [[ -z "$selected_project" ]]; then
+        echo "No project selected."
+        exit 0
+    fi
+
+    # Create tmux session
+    create_tmux_session "$selected_project"
+}
+
+main "$@"
