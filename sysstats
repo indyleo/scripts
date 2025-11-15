@@ -148,7 +148,7 @@ function is_media() {
         color="${COLORS[GREEN]}"
     else
         icon=""
-        msg="Not Recording/Streaming"
+        msg="Idle"
         color="${COLORS[RED]}"
     fi
 
