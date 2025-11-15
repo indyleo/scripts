@@ -92,9 +92,9 @@ function browser_state() {
     local icon status
 
     case "$active_browser" in
-        firefox)     icon="" ;;
-        chromium)    icon="" ;;
-        *)           icon="󰖟" ;;
+        firefox)     icon=" " ;;
+        chromium)    icon=" " ;;
+        *)           icon="󰖟 " ;;
     esac
 
     if [[ -z "$match" ]]; then
