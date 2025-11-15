@@ -83,7 +83,7 @@ function song_state() {
 
     # Check if player exists
     if ! playerctl -l 2>/dev/null | grep -q "^$player"; then
-        echo " "
+        echo ""
         return
     fi
 
