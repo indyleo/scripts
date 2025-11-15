@@ -1,26 +1,28 @@
-#!/bin/env bash
+#!/usr/bin/env bash
 
 set -euo pipefail
 
 # Check if playerctl is installed
 if ! command -v playerctl &> /dev/null; then
-    echo "Error: playerctl is not installed."
+    echo "Error: playerctl is not installed." >&2
     exit 1
 fi
 
 # Preferred players in order
-players=("chromium" "firefox" "brave")
-
-# Get the list of active playerctl names
-active_players=$(playerctl -l 2>/dev/null || true)
+readonly PLAYERS=("chromium" "firefox" "brave")
+readonly BROWSERS=("qutebrowser" "firefox" "brave" "chromium")
 
 opt="${1:-}"
 cutpoint="${2:-25}"
 
+# Cache active players to avoid multiple calls
+active_players=$(playerctl -l 2>/dev/null || true)
+
 # Select the most preferred available player
 function sel_player() {
-    for preferred in "${players[@]}"; do
-        match=$(echo "$active_players" | grep -i "^$preferred" | head -n 1)
+    for preferred in "${PLAYERS[@]}"; do
+        local match
+        match=$(echo "$active_players" | grep -i "^$preferred" | head -n 1 || true)
         if [[ -n "$match" ]]; then
             echo "$match"
             return 0
@@ -29,27 +31,28 @@ function sel_player() {
     return 1
 }
 
-# Cache the selected player
-match=$(sel_player || true)
-if [[ -z "${match:-}" ]]; then
-    echo "No player found"
-    exit 1
-fi
-
 # Get the first running browser from the preferred list
-browsers=("qutebrowser" "firefox" "brave" "chromium")
 function get_running_browser() {
-    for browser in "${browsers[@]}"; do
-        if pgrep -x "$browser" > /dev/null; then
+    for browser in "${BROWSERS[@]}"; do
+        if pgrep -x "$browser" > /dev/null 2>&1; then
             echo "$browser"
             return 0
         fi
     done
     return 1
 }
+
+# Cache selected player and browser
+match=$(sel_player || true)
 active_browser=$(get_running_browser || true)
+
+if [[ -z "${match:-}" ]]; then
+    echo "No player found" >&2
+    exit 1
+fi
+
 if [[ -z "${active_browser:-}" ]]; then
-    echo "No browser found"
+    echo "No browser found" >&2
     exit 1
 fi
 
@@ -66,15 +69,19 @@ function browser_previous() {
 }
 
 function browser_title() {
+    local status title
     status=$(playerctl status --player="$match" 2>/dev/null || true)
 
     if [[ "$status" == "Playing" ]]; then
         title=$(playerctl metadata title --player="$match" 2>/dev/null || true)
 
         if [[ -n "$cutpoint" && ${#title} -gt "$cutpoint" ]]; then
-            truncated=$(echo "$title" | cut -c 1-"$cutpoint")
-            clean_cut=$(echo "$truncated" | awk -v cp="$cutpoint" '{ for (i=1;i<=NF;i++) { if (length(s $i) + 1 <= cp) s = s $i " "; else break } print s }' | sed 's/ *$//')
-            echo "$clean_cut ..."
+            # Improved truncation - cut at word boundary
+            local truncated="${title:0:$cutpoint}"
+            local clean_cut
+            clean_cut=$(echo "$truncated" | sed -E 's/[[:space:]]+[^[:space:]]*$//')
+            [[ -z "$clean_cut" ]] && clean_cut="$truncated"
+            echo "$clean_cut..."
         else
             echo "$title"
         fi
@@ -84,6 +91,8 @@ function browser_title() {
 }
 
 function browser_state() {
+    local icon status
+
     case "$active_browser" in
         qutebrowser) icon=" " ;;
         firefox)     icon=" " ;;
@@ -93,16 +102,16 @@ function browser_state() {
     esac
 
     if [[ -z "$match" ]]; then
-        echo "$icon  "
+        echo "$icon  "
         return
     fi
 
     status=$(playerctl status --player="$match" 2>/dev/null || true)
     case "$status" in
-        Playing) echo "$icon " ;;
-        Paused)  echo "$icon " ;;
-        Stopped) echo "$icon " ;;
-        *)       echo "$icon " ;;
+        Playing) echo "$icon" ;;
+        Paused)  echo "$icon" ;;
+        Stopped) echo "$icon" ;;
+        *)       echo "$icon" ;;
     esac
 }
 
@@ -115,16 +124,25 @@ function browser_state_title() {
 
 function help_menu() {
     cat <<EOF
-Usage: $(basename "$0") [OPTION]
+Usage: $(basename "$0") [OPTION] [CUTPOINT]
+
+Control browser media playback via playerctl.
 
 Options:
     --help, -h                 Show this help message
     --togglepause, -tp         Toggle pause media
-    --skip, -s                 Skip browser media
-    --previous, -p             Previous browser media
-    --browsertitle, -bt        Show browser title
-    --browserstate, -bs        Show browser state
+    --skip, -s                 Skip to next track
+    --previous, -p             Go to previous track
+    --browsertitle, -bt        Show browser title (truncated at CUTPOINT)
+    --browserstate, -bs        Show browser state icon
     --browserstatetitle, -bst  Show browser state and title
+
+Arguments:
+    CUTPOINT                   Maximum title length before truncation (default: 25)
+
+Examples:
+    $(basename "$0") -bt 30    Show title truncated at 30 characters
+    $(basename "$0") -tp       Toggle play/pause
 EOF
 }
 
@@ -145,7 +163,7 @@ case "$opt" in
     --help|-h)
         help_menu ;;
     *)
-        echo "Error: '${opt:- }' is an invalid option."
+        echo "Error: '${opt:- }' is an invalid option." >&2
         help_menu
         exit 1 ;;
 esac
