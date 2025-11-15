@@ -48,12 +48,10 @@ active_browser=$(get_running_browser || true)
 
 if [[ -z "${match:-}" ]]; then
     echo "No player found" >&2
-    exit 1
 fi
 
 if [[ -z "${active_browser:-}" ]]; then
     echo "No browser found" >&2
-    exit 1
 fi
 
 function browser_togglepause() {
@@ -94,22 +92,22 @@ function browser_state() {
     local icon status
 
     case "$active_browser" in
-        firefox)     icon=" " ;;
-        chromium)    icon=" " ;;
-        *)           icon="󰖟 " ;;
+        firefox)     icon="" ;;
+        chromium)    icon="" ;;
+        *)           icon="󰖟" ;;
     esac
 
     if [[ -z "$match" ]]; then
-        echo "$icon  "
+        echo "$icon"
         return
     fi
 
     status=$(playerctl status --player="$match" 2>/dev/null || true)
     case "$status" in
-        Playing) echo "$icon" ;;
-        Paused)  echo "$icon" ;;
-        Stopped) echo "$icon" ;;
-        *)       echo "$icon" ;;
+        Playing) echo "$icon " ;;
+        Paused)  echo "$icon " ;;
+        Stopped) echo "$icon " ;;
+        *)       echo "$icon " ;;
     esac
 }
 
