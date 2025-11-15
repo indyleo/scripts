@@ -43,6 +43,7 @@ function record() {
     echo "$outputloc" > /tmp/recording_outputdir
 
     notify-send "🎙 Recording started"
+		restatus rt 20
 }
 
 function end_record() {
@@ -53,6 +54,7 @@ function end_record() {
     outputloc=$(cat /tmp/recording_outputdir)
 
     notify-send "Recording ended, merging files"
+		restatus rt 20
 
     ffmpeg \
         -i "${outputloc}/vid/video_${now}.mkv" \
@@ -86,6 +88,7 @@ function start_stream() {
         -acodec libmp3lame -threads 3 -strict normal \
         -bufsize 1500k "rtmp://$SERVER.live-video.net/app/$STREAM_KEY" &
     echo $! > /tmp/streampid
+		restatus rt 20
     notify-send "📡 Twitch stream started"
 }
 
@@ -93,6 +96,7 @@ function stop_stream() {
     kill -15 "$(cat /tmp/streampid)"
     wait
     rm -fv /tmp/streampid
+		restatus rt 20
     notify-send "Twitch stream stopped"
 }
 
