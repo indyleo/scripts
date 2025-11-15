@@ -1,37 +1,155 @@
-#!/bin/env bash
+#!/usr/bin/env bash
 
 set -euo pipefail
 
+readonly STATUS_PROCESS="dwmblocks"
+readonly MAX_RT_OFFSET=32  # SIGRTMIN to SIGRTMIN+32 are typically available
+
+function show_usage() {
+    cat <<EOF
+Usage: $(basename "$0") <type> <value>
+
+Send signals to $STATUS_PROCESS for status bar updates.
+
+Signal Types:
+  usr     Standard user signals (SIGUSR1, SIGUSR2)
+  rt      Real-time signals (SIGRTMIN+offset)
+
+Arguments:
+  type    Signal type: 'usr' or 'rt'
+  value   For usr: 1 (SIGUSR1) or 2 (SIGUSR2)
+          For rt: offset from SIGRTMIN (0-$MAX_RT_OFFSET)
+
+Examples:
+  $(basename "$0") usr 1      Send SIGUSR1
+  $(basename "$0") usr 2      Send SIGUSR2
+  $(basename "$0") rt 21      Send SIGRTMIN+21
+  $(basename "$0") rt 0       Send SIGRTMIN
+
+Notes:
+  - Real-time signals allow more granular control (up to 33 different signals)
+  - User signals are simpler but limited to 2 signals
+  - Make sure $STATUS_PROCESS is running before sending signals
+EOF
+}
+
+function check_process() {
+    if ! pgrep -f "$STATUS_PROCESS" > /dev/null 2>&1; then
+        echo "Warning: '$STATUS_PROCESS' is not running" >&2
+        return 1
+    fi
+    return 0
+}
+
+function validate_usr_signal() {
+    local value=$1
+
+    if [[ ! "$value" =~ ^[12]$ ]]; then
+        echo "Error: USR signal must be 1 (SIGUSR1) or 2 (SIGUSR2), got: $value" >&2
+        return 1
+    fi
+    return 0
+}
+
+function validate_rt_signal() {
+    local value=$1
+
+    if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+        echo "Error: RT signal offset must be a positive integer, got: $value" >&2
+        return 1
+    fi
+
+    if [[ "$value" -gt "$MAX_RT_OFFSET" ]]; then
+        echo "Error: RT signal offset must be between 0 and $MAX_RT_OFFSET, got: $value" >&2
+        return 1
+    fi
+
+    return 0
+}
+
+function send_usr_signal() {
+    local value=$1
+    local sig
+
+    validate_usr_signal "$value" || exit 1
+    check_process || exit 1
+
+    case "$value" in
+        1) sig="-USR1" ;;
+        2) sig="-USR2" ;;
+    esac
+
+    if pkill "$sig" -f "$STATUS_PROCESS"; then
+        echo "Sent SIGUSR$value to $STATUS_PROCESS"
+    else
+        echo "Error: Failed to send signal to $STATUS_PROCESS" >&2
+        exit 1
+    fi
+}
+
+function send_rt_signal() {
+    local value=$1
+
+    validate_rt_signal "$value" || exit 1
+    check_process || exit 1
+
+    if pkill -RTMIN+"$value" -f "$STATUS_PROCESS"; then
+        echo "Sent SIGRTMIN+$value to $STATUS_PROCESS"
+    else
+        echo "Error: Failed to send signal to $STATUS_PROCESS" >&2
+        exit 1
+    fi
+}
+
+function show_signal_map() {
+    cat <<EOF
+Common dwmblocks-async signal mappings:
+
+Real-time signals (SIGRTMIN+):
+  0-10   : System stats (CPU, memory, disk, etc.)
+  11-20  : Network and connectivity
+  21     : Browser media status
+  22     : Music player status
+  23-32  : Custom modules
+
+User signals:
+  SIGUSR1: Global refresh
+  SIGUSR2: Secondary global action
+
+Note: Actual mappings depend on your dwmblocks configuration.
+Check your config.h for your specific setup.
+EOF
+}
+
+# Main logic
 if [[ $# -lt 2 ]]; then
-    echo "Usage: $(basename "$0") <type> <value>"
-    echo "  type: usr | rt"
-    echo "  value: signal number (1/2 for usr, offset for rt)"
+    echo "Error: Insufficient arguments" >&2
+    echo ""
+    show_usage
     exit 1
 fi
 
 type="$1"
 value="$2"
-status="bar.py"
 
 case "$type" in
     usr)
-        # Standard signal: SIGUSR1 = 1, SIGUSR2 = 2
-        if [[ "$value" -eq 1 ]]; then
-            sig="-USR1"
-        elif [[ "$value" -eq 2 ]]; then
-            sig="-USR2"
-        else
-            echo "Invalid USR signal number: $value"
-            exit 1
-        fi
-        pkill "$sig" -f "$status"
+        send_usr_signal "$value"
         ;;
     rt)
-        # Real-time signal: SIGRTMIN+offset
-        pkill -RTMIN+"$value" -f "$status"
+        send_rt_signal "$value"
+        ;;
+    --help|-h)
+        show_usage
+        ;;
+    --map|-m)
+        show_signal_map
         ;;
     *)
-        echo "Invalid type: $type (use 'usr' or 'rt')"
+        echo "Error: Invalid signal type '$type'" >&2
+        echo "       Must be 'usr' or 'rt'" >&2
+        echo ""
+        show_usage
         exit 1
         ;;
 esac
