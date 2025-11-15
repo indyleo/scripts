@@ -94,9 +94,7 @@ function browser_state() {
     local icon status
 
     case "$active_browser" in
-        qutebrowser) icon=" " ;;
         firefox)     icon=" " ;;
-        brave)       icon=" " ;;
         chromium)    icon=" " ;;
         *)           icon="󰖟 " ;;
     esac
