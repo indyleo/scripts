@@ -67,7 +67,7 @@ function ddate() {
 }
 
 function date_time() {
-    date +"󰥔  %I:%M %p |  %A %B %d %Y"
+    date +"󰥔  %I:%M %p |   %A %B %d %Y"
 }
 
 function cpu_load() {

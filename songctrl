@@ -110,7 +110,7 @@ function song_state_title() {
     local state title
     state=$(song_state)
     title=$(song_title)
-    echo "$state$title"
+    echo "$state $title"
 }
 
 function list_players() {
