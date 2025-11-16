@@ -135,19 +135,19 @@ function is_media() {
     [[ -f "/tmp/streampid" ]] && stream=1
 
     if [[ $rec -eq 1 && $stream -eq 1 ]]; then
-        icon="󰑊"
+        icon=" 󰑊"
         msg="Recording & Streaming"
         color="${COLORS[GREEN]}"
     elif [[ $rec -eq 1 ]]; then
-        icon="󰑊"
+        icon=" 󰑊"
         msg="Recording"
         color="${COLORS[GREEN]}"
     elif [[ $stream -eq 1 ]]; then
-        icon="󰑊"
+        icon=" 󰑊"
         msg="Streaming"
         color="${COLORS[GREEN]}"
     else
-        icon=""
+        icon=" "
         msg="Idle"
         color="${COLORS[RED]}"
     fi
@@ -227,7 +227,7 @@ function vvolume() {
         color="${COLORS[RED]}"
         msg="Muted"
     elif [[ "$vol" -eq 100 ]]; then
-        icon=""
+        icon="󰶬"
         color="${COLORS[GREEN]}"
         msg="${vol}%"
     elif [[ "$vol" -ge 75 ]]; then
