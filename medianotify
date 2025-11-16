@@ -170,7 +170,6 @@ function send_notification() {
     }
 
     log "Notification sent: $notif_title - $new_title"
-    restatus rt 22
 }
 
 # ============================================================================
@@ -178,36 +177,39 @@ function send_notification() {
 # ============================================================================
 
 function monitor_loop() {
-    log "Starting media monitoring (poll interval: ${POLL_INTERVAL}s)"
+	log "Starting media monitoring (poll interval: ${POLL_INTERVAL}s)"
 
-    local last_state
-    last_state=$(load_state)
+	local last_state
+	last_state=$(load_state)
 
-    while true; do
-        # Get current state from mediactl
-        local current_state
-        current_state=$(mediactl status 2>/dev/null || echo "idle||Idle|||")
+	while true; do
+		# Get current state from mediactl
+		local current_state
+		current_state=$(mediactl status 2>/dev/null || echo "idle||Idle|||")
 
-        # Extract relevant fields for comparison and notification
-        local type player status title artist album art_url
-        IFS='|' read -r type player status title artist album art_url <<< "$current_state"
+		# Extract relevant fields for comparison and notification
+		local type player status title artist album art_url
+		IFS='|' read -r type player status title artist album art_url <<< "$current_state"
 
-        # Create state key for comparison (without art_url)
-        local state_key="$type|$player|$status|$title|$artist|$album"
+		# Create state key for comparison (without art_url)
+		local state_key="$type|$player|$status|$title|$artist|$album"
 
-        # Check if notification is needed
-        if should_notify "$last_state" "$state_key"; then
-            # Pass the full state including art_url for notification
-            send_notification "$last_state" "$state_key" "$art_url"
-        fi
+		# Check if notification is needed
+		if should_notify "$last_state" "$state_key"; then
+			# Pass the full state including art_url for notification
+			send_notification "$last_state" "$state_key" "$art_url"
+		fi
+		if [[ "$state_key" != "$last_state" ]]; then
+			restatus rt 22
+		fi
 
-        # Update state (save without art_url to avoid comparison issues)
-        last_state="$state_key"
-        save_state "$state_key"
+		# Update state (save without art_url to avoid comparison issues)
+		last_state="$state_key"
+		save_state "$state_key"
 
-        # Wait for next poll
-        sleep "$POLL_INTERVAL"
-    done
+		# Wait for next poll
+		sleep "$POLL_INTERVAL"
+	done
 }
 
 # ============================================================================
