@@ -10,9 +10,8 @@ set -euo pipefail
 # ============================================================================
 
 readonly SCRIPT_NAME="mediactl"
-readonly VERSION="1.0.0"
+readonly VERSION="1.2.0"  # updated version
 
-# Player categories - used for priority resolution
 readonly BROWSER_PLAYERS=(
     "firefox"
     "chromium"
@@ -30,18 +29,18 @@ readonly SONG_PLAYERS=(
     "rhythmbox"
 )
 
-# Cache configuration
 readonly CACHE_DIR="${XDG_RUNTIME_DIR:-/tmp}/mediactl"
 readonly PLAYER_LIST_CACHE="$CACHE_DIR/players"
 readonly CACHE_LIFETIME=1  # seconds
 
-# Visual indicators
 readonly ICON_BROWSER="🌐"
 readonly ICON_SONG="🎵"
-readonly ICON_PLAYING="▶"
-readonly ICON_PAUSED="⏸"
-readonly ICON_STOPPED="⏹"
-readonly ICON_IDLE="⏹"  # Use stopped icon for idle
+readonly ICON_PLAYING=" "
+readonly ICON_PAUSED=" "
+readonly ICON_STOPPED=" "
+readonly ICON_IDLE=" "
+
+SOURCE=""  # global source filter
 
 # ============================================================================
 # UTILITY FUNCTIONS
@@ -62,7 +61,6 @@ function init_cache_dir() {
     mkdir -p "$CACHE_DIR"
 }
 
-# Check if cache file is fresh (modified within CACHE_LIFETIME seconds)
 function is_cache_fresh() {
     local cache_file="$1"
     [[ -f "$cache_file" ]] || return 1
@@ -79,7 +77,6 @@ function is_cache_fresh() {
 # PLAYER DETECTION & CLASSIFICATION
 # ============================================================================
 
-# Get list of all active players (with 1-second caching)
 function get_all_players() {
     if is_cache_fresh "$PLAYER_LIST_CACHE"; then
         cat "$PLAYER_LIST_CACHE"
@@ -91,7 +88,6 @@ function get_all_players() {
     echo "$players" | tee "$PLAYER_LIST_CACHE"
 }
 
-# Determine if a player is a browser player
 function is_browser_player() {
     local player="$1"
     for bp in "${BROWSER_PLAYERS[@]}"; do
@@ -100,7 +96,6 @@ function is_browser_player() {
     return 1
 }
 
-# Determine if a player is a song player
 function is_song_player() {
     local player="$1"
     for sp in "${SONG_PLAYERS[@]}"; do
@@ -109,9 +104,8 @@ function is_song_player() {
     return 1
 }
 
-# Get all browser players with their status
 function get_browser_players() {
-    local players all_players
+    local all_players
     all_players=$(get_all_players)
 
     while IFS= read -r player; do
@@ -124,9 +118,8 @@ function get_browser_players() {
     done <<< "$all_players"
 }
 
-# Get all song players with their status
 function get_song_players() {
-    local players all_players
+    local all_players
     all_players=$(get_all_players)
 
     while IFS= read -r player; do
@@ -143,43 +136,36 @@ function get_song_players() {
 # PRIORITY RESOLUTION
 # ============================================================================
 
-# Implements the core priority logic:
-# 1. If ANY player is Playing → show it (browser takes priority)
-# 2. Otherwise → Idle (ignore paused/stopped players)
 function get_active_player() {
-    local browser_players song_players
-    browser_players=$(get_browser_players)
-    song_players=$(get_song_players)
+    local filter="${1:-}"
 
-    # Check for any Playing browser player
-    while IFS='|' read -r player status; do
-        [[ -z "$player" ]] && continue
-        if [[ "$status" == "Playing" ]]; then
-            echo "browser|$player|$status"
-            return 0
-        fi
-    done <<< "$browser_players"
+    local active_info
 
-    # Check for any Playing song player
-    while IFS='|' read -r player status; do
-        [[ -z "$player" ]] && continue
-        if [[ "$status" == "Playing" ]]; then
-            echo "song|$player|$status"
-            return 0
-        fi
-    done <<< "$song_players"
+    if [[ "$filter" == "browser" ]]; then
+        active_info=$(get_browser_players | awk -F'|' '$2=="Playing" || $2=="Paused"{print "browser|"$1"|"$2; exit}')
+        [[ -z "$active_info" ]] && active_info="idle||Idle"
+        echo "$active_info"
+        return
+    fi
 
-    # Nothing is actively playing → Idle
-    # (We ignore paused/stopped players entirely)
-    echo "idle||Idle"
+    if [[ "$filter" == "song" ]]; then
+        active_info=$(get_song_players | awk -F'|' '$2=="Playing" || $2=="Paused"{print "song|"$1"|"$2; exit}')
+        [[ -z "$active_info" ]] && active_info="idle||Idle"
+        echo "$active_info"
+        return
+    fi
+
+    # Default: browser > song
+    active_info=$(get_browser_players | awk -F'|' '$2=="Playing"{print "browser|"$1"|"$2; exit}')
+    [[ -z "$active_info" ]] && active_info=$(get_song_players | awk -F'|' '$2=="Playing"{print "song|"$1"|"$2; exit}')
+    [[ -z "$active_info" ]] && active_info="idle||Idle"
+    echo "$active_info"
 }
 
 # ============================================================================
 # METADATA RETRIEVAL
 # ============================================================================
 
-# Get metadata for a specific player
-# Returns: status|title|artist|album|art_url
 function get_player_metadata() {
     local player="$1"
 
@@ -202,15 +188,12 @@ function get_player_metadata() {
 # STATE MANAGEMENT
 # ============================================================================
 
-# Get complete state of active media
-# Returns: type|player|status|title|artist|album|art_url
 function get_state() {
+    local filter="${1:-}"
     local active_info type player status metadata
-    active_info=$(get_active_player)
-
+    active_info=$(get_active_player "$filter")
     IFS='|' read -r type player status <<< "$active_info"
 
-    # For idle state, return minimal info
     if [[ "$type" == "idle" ]]; then
         echo "idle||Idle|||"
         return
@@ -220,7 +203,6 @@ function get_state() {
     echo "$type|$player|$metadata"
 }
 
-# Get status icon based on playback state
 function get_status_icon() {
     local status="$1"
     case "$status" in
@@ -232,7 +214,6 @@ function get_status_icon() {
     esac
 }
 
-# Get source icon based on player type
 function get_source_icon() {
     local type="$1"
     case "$type" in
@@ -242,11 +223,6 @@ function get_source_icon() {
     esac
 }
 
-# ============================================================================
-# OUTPUT FORMATTING
-# ============================================================================
-
-# Format title with optional cutoff
 function format_title() {
     local title="$1"
     local cutpoint="${2:-50}"
@@ -267,15 +243,14 @@ function format_title() {
 # CONTROL COMMANDS
 # ============================================================================
 
-# Send control command to active player
 function send_control() {
     local command="$1"
-    local active_info type player
-    active_info=$(get_active_player)
-    IFS='|' read -r type player _ <<< "$active_info"
+    local active_info type player status
+    active_info=$(get_active_player "$SOURCE")
+    IFS='|' read -r type player status <<< "$active_info"
 
     [[ "$player" == "idle" ]] && {
-        echo "No active player" >&2
+        echo "No active player for source '$SOURCE'" >&2
         return 1
     }
 
@@ -289,71 +264,40 @@ function send_control() {
 # COMMAND HANDLERS
 # ============================================================================
 
-function cmd_status() {
-    # Returns: type|player|status|title|artist|album|art_url
-    get_state
-}
-
+function cmd_status() { get_state "$SOURCE"; }
 function cmd_title() {
     local cutpoint="${1:-50}"
     local state title
-    state=$(get_state)
+    state=$(get_state "$SOURCE")
     IFS='|' read -r _ _ _ title _ _ _ <<< "$state"
     format_title "$title" "$cutpoint"
 }
-
 function cmd_state() {
-    # Icon-only state indicator
     local state type status
-    state=$(get_state)
+    state=$(get_state "$SOURCE")
     IFS='|' read -r type _ status _ _ _ _ <<< "$state"
-
-    # Only show playing icon, otherwise show idle
-    if [[ "$type" == "idle" || "$status" != "Playing" ]]; then
-        echo "$ICON_IDLE"
-        return
-    fi
-
+    [[ "$type" == "idle" ]] || [[ "$status" != "Playing" ]] && { echo "$ICON_IDLE"; return; }
     get_status_icon "$status"
 }
-
 function cmd_state_title() {
-    # Combined icon + title
     local cutpoint="${1:-50}"
     local state type status title icon
-    state=$(get_state)
+    state=$(get_state "$SOURCE")
     IFS='|' read -r type _ status title _ _ _ <<< "$state"
-
-    # If nothing is playing (idle or non-Playing status), show stopped icon + Idle
-    if [[ "$type" == "idle" || "$status" != "Playing" ]]; then
-        echo "$ICON_IDLE Idle"
-        return
-    fi
-
+    [[ "$type" == "idle" ]] || [[ "$status" != "Playing" ]] && { echo "$ICON_IDLE Idle"; return; }
     icon=$(get_status_icon "$status")
     title=$(format_title "$title" "$cutpoint")
-
     echo "$icon $title"
 }
-
 function cmd_get_active_player() {
     local active_info type
-    active_info=$(get_active_player)
+    active_info=$(get_active_player "$SOURCE")
     IFS='|' read -r type _ _ <<< "$active_info"
     echo "$type"
 }
-
-function cmd_play_pause() {
-    send_control play-pause
-}
-
-function cmd_next() {
-    send_control next
-}
-
-function cmd_previous() {
-    send_control previous
-}
+function cmd_play_pause() { send_control play-pause; }
+function cmd_next()       { send_control next; }
+function cmd_previous()   { send_control previous; }
 
 # ============================================================================
 # HELP & VERSION
@@ -364,7 +308,7 @@ function show_help() {
 $SCRIPT_NAME v$VERSION - Unified media player controller
 
 USAGE:
-    $SCRIPT_NAME <command> [options]
+    $SCRIPT_NAME [--source <browser|song>] <command> [options]
 
 COMMANDS:
     status              Get full state (type|player|status|title|artist|album|art_url)
@@ -372,34 +316,24 @@ COMMANDS:
     state               Get status icon only
     state-title [cut]   Get icon + title
     get-active-player   Get active source type (browser|song|idle)
-
     play-pause          Toggle playback
     next                Next track
     previous            Previous track
-
     help                Show this help message
     version             Show version
 
+SOURCE FILTER:
+    --source <browser|song>  Restrict commands to a specific category
+
 EXAMPLES:
-    $SCRIPT_NAME status
+    $SCRIPT_NAME --source browser play-pause
+    $SCRIPT_NAME -s song next
     $SCRIPT_NAME state-title 30
-    $SCRIPT_NAME play-pause
-
-PRIORITY LOGIC:
-    Only shows players that are actively Playing
-    Browser players take priority over song players
-    Shows Idle if nothing is Playing (ignores paused/stopped)
-
-SIGNALS:
-    Send SIGRTMIN+21 or SIGRTMIN+22 to trigger status bar updates
-    (configure in your status bar: pkill -RTMIN+21 dwmblocks)
 
 EOF
 }
 
-function show_version() {
-    echo "$SCRIPT_NAME v$VERSION"
-}
+function show_version() { echo "$SCRIPT_NAME v$VERSION"; }
 
 # ============================================================================
 # MAIN
@@ -408,6 +342,13 @@ function show_version() {
 function main() {
     check_dependencies
     init_cache_dir
+
+    # Parse optional source flag
+    if [[ $# -ge 2 ]] && [[ "$1" == "--source" || "$1" == "-s" ]]; then
+        SOURCE="$2"
+        shift 2
+        [[ "$SOURCE" != "browser" && "$SOURCE" != "song" ]] && die "Invalid source: $SOURCE"
+    fi
 
     local command="${1:-help}"
     shift || true
@@ -428,3 +369,4 @@ function main() {
 }
 
 main "$@"
+

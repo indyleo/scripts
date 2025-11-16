@@ -14,6 +14,7 @@ FPS_REC=60
 FPS_STREAM=30
 STREAM_KEY="$TWITCH_TOKEN"  # Ensure exported
 SERVER="ingest.global-contribute"
+SIGNAL="21"
 
 # --- Detect primary monitor ---
 primary_info=$(xrandr | awk '/ primary / {print $4}')
@@ -43,7 +44,7 @@ function record() {
     echo "$outputloc" > /tmp/recording_outputdir
 
     notify-send "🎙 Recording started"
-    restatus rt 20
+    restatus rt "$SIGNAL"
 }
 
 function end_record() {
@@ -67,7 +68,7 @@ function end_record() {
 
     rm -fv /tmp/*pid /tmp/recording_timestamp /tmp/recording_outputdir
     notify-send "Recording merged"
-    restatus rt 20
+    restatus rt "$SIGNAL"
 }
 
 function toggle_record() {
@@ -83,12 +84,12 @@ function start_stream() {
         -f alsa -i pulse -f alsa -i pulse \
         -filter_complex amix=inputs=2 -ac 2 -b:a 96k -ar 44100 \
         -vcodec libx264 -g 60 -keyint_min 30 -b:v 1500k -minrate 1500k -maxrate 1500k \
-        -vf "scale=$screen_width:-1,format=yuv420p" -preset ultrafast \
+        -vf "scale=$screen_width:-1,format=yuv4"$SIGNAL"p" -preset ultrafast \
         -acodec libmp3lame -threads 3 -strict normal \
         -bufsize 1500k "rtmp://$SERVER.live-video.net/app/$STREAM_KEY" &
     echo $! > /tmp/streampid
     notify-send "📡 Twitch stream started"
-    restatus rt 20
+    restatus rt "$SIGNAL"
 }
 
 function stop_stream() {
@@ -96,7 +97,7 @@ function stop_stream() {
     wait
     rm -fv /tmp/streampid
     notify-send "Twitch stream stopped"
-    restatus rt 20
+    restatus rt "$SIGNAL"
 }
 
 function toggle_stream() {

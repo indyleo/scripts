@@ -10,7 +10,7 @@ set -euo pipefail
 # ============================================================================
 
 readonly SCRIPT_NAME="medianotify"
-readonly POLL_INTERVAL=2  # seconds between checks
+readonly POLL_INTERVAL=1  # seconds between checks
 
 # State file for persistence across restarts
 readonly STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/medianotify"
@@ -36,6 +36,7 @@ function die() {
 function check_dependencies() {
     command -v mediactl &>/dev/null || die "mediactl not found in PATH"
     command -v notify-send &>/dev/null || die "notify-send not found"
+    command -v restatus &>/dev/null || die "restatus not found in PATH"
 }
 
 function init_state_dir() {
@@ -68,11 +69,12 @@ function should_notify() {
     local old_state="$1"
     local new_state="$2"
 
-    local old_type old_player old_status old_title old_artist old_album
-    local new_type new_player new_status new_title new_artist new_album
+    local old_status old_title old_artist
+    local new_type new_status new_title new_artist
 
-    IFS='|' read -r old_type old_player old_status old_title old_artist old_album <<< "$old_state"
-    IFS='|' read -r new_type new_player new_status new_title new_artist new_album <<< "$new_state"
+    # Only extract what we actually use; ignore unused fields with _
+    IFS='|' read -r _ _ old_status old_title old_artist _ <<< "$old_state"
+    IFS='|' read -r new_type _ new_status new_title new_artist _ <<< "$new_state"
 
     # ONLY notify when something is Playing
     [[ "$new_status" != "Playing" ]] && return 1
@@ -118,15 +120,11 @@ function get_notification_body() {
 
     local body="$title"
 
-    [[ -n "$artist" && "$artist" != "Unknown" ]] && {
-        body="$body
-by $artist"
-    }
+    [[ -n "$artist" && "$artist" != "Unknown" ]] && \
+        body="$body"$'\n'"by $artist"
 
-    [[ -n "$album" && "$album" != "Unknown" ]] && {
-        body="$body
-from $album"
-    }
+    [[ -n "$album" && "$album" != "Unknown" ]] && \
+        body="$body"$'\n'"from $album"
 
     echo "$body"
 }
@@ -172,6 +170,7 @@ function send_notification() {
     }
 
     log "Notification sent: $notif_title - $new_title"
+    restatus rt 22
 }
 
 # ============================================================================
@@ -286,3 +285,4 @@ function main() {
 }
 
 main "$@"
+
