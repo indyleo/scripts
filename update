@@ -5,94 +5,95 @@ set -euo pipefail
 # === Functions ===
 
 function update_system() {
-    echo -e "\n🔄 Updating APT packages..."
-    sudo apt-get update && sudo apt-get upgrade -y && sudo apt-get autoremove -y
+	echo -e "\n🔄 Updating APT packages..."
+	sudo apt-get update && sudo apt-get upgrade -y && sudo apt-get autoremove -y
 }
 
 function update_flatpak() {
-    if command -v flatpak &>/dev/null; then
-        echo -e "\n📦 Updating Flatpak..."
-        flatpak update -y
-    fi
+	if command -v flatpak &>/dev/null; then
+		echo -e "\n📦 Updating Flatpak..."
+		flatpak update -y
+	fi
 }
 
 function update_rust() {
-    if command -v rustup &>/dev/null; then
-        echo -e "\n🦀 Updating Rust..."
-        rustup update
-    fi
+	if command -v rustup &>/dev/null; then
+		echo -e "\n🦀 Updating Rust..."
+		rustup update
+	fi
 }
 
 function update_bob() {
-    if command -v bob &>/dev/null; then
-        echo -e "\n🎛️ Updating Bob..."
-        bob install
-    fi
+	if command -v bob &>/dev/null; then
+		echo -e "\n🎛️ Updating Bob..."
+		bob.py update stable
+		bob.py update nightly
+	fi
 }
 
 function update_pipx() {
-    if command -v pipx &>/dev/null; then
-        echo -e "\n🐍 Updating pipx..."
-        pipx upgrade-all
-    fi
+	if command -v pipx &>/dev/null; then
+		echo -e "\n🐍 Updating pipx..."
+		pipx upgrade-all
+	fi
 }
 
 function update_neovim() {
-    if command -v nvim &>/dev/null; then
-        echo -e "\n💡 Updating Neovim plugins..."
-        nvim --headless "+Lazy! sync" +qa
-    fi
+	if command -v nvim &>/dev/null; then
+		echo -e "\n💡 Updating Neovim plugins..."
+		nvim --headless "+Lazy! sync" +qa
+	fi
 }
 
 function update_tmux_plugins() {
-    TPM="$HOME/.tmux/plugins/tpm/bin/update_plugins"
-    if [ -x "$TPM" ]; then
-        echo -e "\n🔧 Updating tmux plugins..."
-        "$TPM" all
-    else
-        echo "❗ TPM not found at $TPM"
-    fi
+	TPM="$HOME/.tmux/plugins/tpm/bin/update_plugins"
+	if [ -x "$TPM" ]; then
+		echo -e "\n🔧 Updating tmux plugins..."
+		"$TPM" all
+	else
+		echo "❗ TPM not found at $TPM"
+	fi
 }
 
 function reload_tmux_config() {
-    if [ -n "$TMUX" ]; then
-        tmux source-file "${XDG_CONFIG_HOME:-$HOME/.config}/tmux/tmux.conf"
-        echo "♻️ Reloaded tmux config"
-    else
-        echo "ℹ️ Not inside a tmux session."
-    fi
+	if [ -n "$TMUX" ]; then
+		tmux source-file "${XDG_CONFIG_HOME:-$HOME/.config}/tmux/tmux.conf"
+		echo "♻️ Reloaded tmux config"
+	else
+		echo "ℹ️ Not inside a tmux session."
+	fi
 }
 
 # === Menu ===
 
 function main_menu() {
-    echo -e "🔄 System Update\n📦 Flatpak Update\n🦀 Rustup Update\n🎛️ Bob Update\n🐍 pipx Update\n💡 Neovim Plugin Update\n🔧 Tmux Plugin Update\n♻️ Reload Tmux Config\n✅ Run All\n❌ Exit" | fzf --prompt="Dashboard > "
+	echo -e "🔄 System Update\n📦 Flatpak Update\n🦀 Rustup Update\n🎛️ Bob Update\n🐍 pipx Update\n💡 Neovim Plugin Update\n🔧 Tmux Plugin Update\n♻️ Reload Tmux Config\n✅ Run All\n❌ Exit" | fzf --prompt="Dashboard > "
 }
 
 # === Run Loop ===
 
 while true; do
-    case "$(main_menu)" in
-        "🔄 System Update") update_system ;;
-        "📦 Flatpak Update") update_flatpak ;;
-        "🦀 Rustup Update") update_rust ;;
-        "🎛️ Bob Update") update_bob ;;
-        "🐍 pipx Update") update_pipx ;;
-        "💡 Neovim Plugin Update") update_neovim ;;
-        "🔧 Tmux Plugin Update") update_tmux_plugins ;;
-        "♻️ Reload Tmux Config") reload_tmux_config ;;
-        "✅ Run All")
-            update_system
-            update_flatpak
-            update_rust
-            update_bob
-            update_pipx
-            update_neovim
-            update_tmux_plugins
-            reload_tmux_config
-            ;;
-        "❌ Exit") break ;;
-    esac
-    echo -e "\n✅ Done. Press Enter to return to the dashboard..."
-    read -r
+	case "$(main_menu)" in
+		"🔄 System Update") update_system ;;
+		"📦 Flatpak Update") update_flatpak ;;
+		"🦀 Rustup Update") update_rust ;;
+		"🎛️ Bob Update") update_bob ;;
+		"🐍 pipx Update") update_pipx ;;
+		"💡 Neovim Plugin Update") update_neovim ;;
+		"🔧 Tmux Plugin Update") update_tmux_plugins ;;
+		"♻️ Reload Tmux Config") reload_tmux_config ;;
+		"✅ Run All")
+			update_system
+			update_flatpak
+			update_rust
+			update_bob
+			update_pipx
+			update_neovim
+			update_tmux_plugins
+			reload_tmux_config
+			;;
+		"❌ Exit") break ;;
+	esac
+	echo -e "\n✅ Done. Press Enter to return to the dashboard..."
+	read -r
 done
