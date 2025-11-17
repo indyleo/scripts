@@ -36,7 +36,72 @@ function extract() {
         usage
     fi
 
-    if [[ -f "$file" ]]; then
+    if [[ ! -f "$file" ]]; then
+        echo "Error: '$file' is not a valid file."
+        exit 1
+    fi
+
+    # Determine a target directory
+    local base_name
+    base_name=$(basename "$file")
+    local dir_name="${base_name%.*}"  # remove extension, may need tweak for double extensions
+
+    # Handle double extensions like .tar.gz, .tar.bz2, .tar.xz, .tar.zst
+    if [[ "$file" =~ \.tar\.gz$ || "$file" =~ \.tar\.bz2$ || "$file" =~ \.tar\.xz$ || "$file" =~ \.tar\.zst$ ]]; then
+        dir_name="${base_name%.*.*}"
+    elif [[ "$file" =~ \.tbz2$ || "$file" =~ \.tgz$ ]]; then
+        dir_name="${base_name%.*.*}"
+    fi
+
+    # Check if archive contents already have a top-level directory
+    local temp_dir
+    temp_dir=$(mktemp -d)
+    case "$file" in
+        *.tar.bz2|*.tar.gz|*.tar|*.tbz2|*.tgz|*.tar.xz|*.tar.zst)
+            tar -tf "$file" | head -1 > "$temp_dir/first_entry.txt"
+            ;;
+        *.zip)
+            unzip -l "$file" | awk 'NR>3 {print $4}' | head -1 > "$temp_dir/first_entry.txt"
+            ;;
+        *.7z)
+            7z l "$file" | awk '/^----/{flag=1;next} /^----/{flag=0} flag {print $6}' | head -1 > "$temp_dir/first_entry.txt"
+            ;;
+        *.rar)
+            unrar lb "$file" | head -1 > "$temp_dir/first_entry.txt"
+            ;;
+        *)
+            echo "Warning: Cannot determine archive structure for '$file'"
+            ;;
+    esac
+
+    local first_entry
+    first_entry=$(cat "$temp_dir/first_entry.txt" | cut -d/ -f1)
+
+    rm -rf "$temp_dir"
+
+    # If the first entry is not a directory, create one
+    if [[ ! -d "$first_entry" ]]; then
+        mkdir -p "$dir_name"
+        case "$file" in
+            *.tar.bz2) tar xjf "$file" -C "$dir_name" ;;
+            *.tar.gz)  tar xzf "$file" -C "$dir_name" ;;
+            *.bz2)     bunzip2 -c "$file" > "$dir_name/$dir_name" ;;
+            *.rar)     unrar x "$file" "$dir_name/" ;;
+            *.gz)      gunzip -c "$file" > "$dir_name/$dir_name" ;;
+            *.tar)     tar xf "$file" -C "$dir_name" ;;
+            *.tbz2)    tar xjf "$file" -C "$dir_name" ;;
+            *.tgz)     tar xzf "$file" -C "$dir_name" ;;
+            *.zip)     unzip "$file" -d "$dir_name" ;;
+            *.Z)       uncompress -c "$file" > "$dir_name/$dir_name" ;;
+            *.7z)      7z x "$file" -o"$dir_name" ;;
+            *.deb)     ar x "$file" -C "$dir_name" ;;
+            *.tar.xz)  tar xf "$file" -C "$dir_name" ;;
+            *.tar.zst) unzstd -c "$file" | tar xf - -C "$dir_name" ;;
+            *)         echo "Error: '$file' cannot be extracted via this script." ;;
+        esac
+        echo "✅ Extracted to directory: $dir_name"
+    else
+        # Archive already has a top-level directory
         case "$file" in
             *.tar.bz2) tar xjf "$file" ;;
             *.tar.gz)  tar xzf "$file" ;;
@@ -52,11 +117,8 @@ function extract() {
             *.deb)     ar x "$file" ;;
             *.tar.xz)  tar xf "$file" ;;
             *.tar.zst) unzstd "$file" ;;
-            *)         echo "Error: '$file' cannot be extracted via this script." ;;
         esac
-    else
-        echo "Error: '$file' is not a valid file."
-        exit 1
+        echo "✅ Extracted archive contents (already in top-level directory)"
     fi
 }
 
