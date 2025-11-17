@@ -271,7 +271,7 @@ def daemon_loop(manager: ClipboardManager, interval: float = POLL_INTERVAL):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Clipboard manager (Python, option B)")
+    parser = argparse.ArgumentParser(description="Clipboard manager")
     parser.add_argument(
         "command",
         nargs="?",
