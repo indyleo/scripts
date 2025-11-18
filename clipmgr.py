@@ -406,18 +406,16 @@ class ClipboardManager:
 
 
 def run_dmenu(menu_input: str, prompt: str = "") -> str:
-    """Run dmenu with given input and return selected string."""
     cmd = ["dmenu", "-l", str(DMENU_LINES), "-p", prompt]
     try:
         proc = subprocess.run(
             cmd,
             input=menu_input.encode("utf-8"),
             stdout=subprocess.PIPE,
-            timeout=10,
             check=True,
         )
         return proc.stdout.decode("utf-8").rstrip("\n")
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+    except subprocess.CalledProcessError:
         return ""
 
 
