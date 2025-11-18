@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """
 Clipboard Manager for dwm — Python with Image Support
+
 Features:
 - Keeps history in memory for fast operations with text and images
 - Persists history and pinned items to JSON files (atomic writes)
 - Saves images as PNG files and displays previews in dmenu (requires patched dmenu)
 - Integrates with xclip and dmenu
 - Commands: daemon | select | pin | clear
-Dependencies: python3 (3.8+), xclip, dmenu (with image preview patch), Pillow (PIL)
+
+Dependencies: python3 (3.8+), xclip, dmenu (with image preview patch optionally), Pillow (optional)
 Usage examples:
   python3 clipmgr.py daemon
   python3 clipmgr.py select
   python3 clipmgr.py pin
   python3 clipmgr.py clear
 """
+from __future__ import annotations
+
 import argparse
 import hashlib
 import json
@@ -23,321 +27,343 @@ import sys
 import tempfile
 import threading
 import time
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional
 
-# Check for PIL/Pillow
+# Attempt to import Pillow for image handling
 try:
-    from PIL import Image
+    from PIL import Image  # type: ignore
 
     HAS_PIL = True
 except ImportError:
     Image = None  # type: ignore
     HAS_PIL = False
-    print("Warning: Pillow not installed. Image support disabled.", file=sys.stderr)
-    print("Install with: pip install Pillow", file=sys.stderr)
 
-HOME = os.path.expanduser("~")
-CLIP_DIR = os.path.join(HOME, ".cache", "clipboard")
-HISTORY_PATH = os.path.join(CLIP_DIR, "history.json")
-PIN_PATH = os.path.join(CLIP_DIR, "pinned.json")
-IMAGE_DIR = os.path.join(CLIP_DIR, "images")
+# Configuration
+HOME = Path.home()
+CLIP_DIR = HOME.joinpath(".cache", "clipboard")
+HISTORY_PATH = CLIP_DIR.joinpath("history.json")
+PIN_PATH = CLIP_DIR.joinpath("pinned.json")
+IMAGE_DIR = CLIP_DIR.joinpath("images")
 MAX_CLIPS = 50
-MAX_IMAGE_CLIPS = 20  # Lower limit for images due to storage
+MAX_IMAGE_CLIPS = 20
 POLL_INTERVAL = 0.5
 PREVIEW_MAX = 60
 DMENU_LINES = 20
-# No image preview prefix needed - just show format and label
 
-os.makedirs(CLIP_DIR, exist_ok=True)
-os.makedirs(IMAGE_DIR, exist_ok=True)
+# Ensure directories exist
+CLIP_DIR.mkdir(parents=True, exist_ok=True)
+IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+
 _lock = threading.Lock()
 
 
-def atomic_write(path: str, data: str) -> None:
-    """Atomically write a string to a file."""
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+@dataclass
+class Clip:
+    """
+    Represents a clipboard clip (text or image).
+    Fields not set are saved as None in JSON.
+    """
+
+    type: str  # "text" or "image"
+    content: Optional[str] = None  # used for text
+    path: Optional[str] = None  # used for image file path
+    fmt: Optional[str] = None  # MIME or extension-like string for images
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+
+    def to_dict(self) -> Dict:
+        """Return JSON-serializable dict."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "Clip":
+        """Create Clip from dict, tolerant of older formats."""
+        if not isinstance(data, dict):
+            # Older format: plain string -> text clip
+            return cls(type="text", content=str(data))
+        return cls(
+            type=data.get("type", "text"),
+            content=data.get("content"),
+            path=data.get("path"),
+            fmt=data.get("format") or data.get("fmt"),
+            timestamp=data.get("timestamp") or datetime.now().isoformat(),
+        )
+
+
+def atomic_write_text(path: Path, data: str) -> None:
+    """
+    Atomically write text to a file using UTF-8 encoding.
+    Uses os.replace to guarantee atomic replace on same filesystem.
+    """
+    temp = None
     try:
-        with os.fdopen(fd, "w") as f:
-            f.write(data)
-        os.replace(tmp, path)
+        dirpath = path.parent
+        fd, temp = tempfile.mkstemp(dir=str(dirpath))
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(data)
+        os.replace(temp, path)
+    except OSError:
+        # If atomic replace fails, try best-effort fallback
+        try:
+            with path.open("w", encoding="utf-8") as fh:
+                fh.write(data)
+        except OSError:
+            # Give up silently; caller may log if desired
+            pass
     finally:
-        if os.path.exists(tmp):
+        if temp and os.path.exists(temp):
             try:
-                os.remove(tmp)
-            except Exception:
+                os.remove(temp)
+            except OSError:
                 pass
 
 
-def load_json_list(path: str) -> List[Dict]:
-    """Load clipboard entries (supports both old text-only and new dict format)"""
-    if not os.path.exists(path):
+def load_clips_from_file(path: Path) -> List[Clip]:
+    """Load a list of Clip objects from JSON file. Returns empty list on error."""
+    if not path.exists():
         return []
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if isinstance(data, list):
-                # Convert old format (list of strings) to new format (list of dicts)
-                result = []
-                for item in data:
-                    if isinstance(item, dict):
-                        result.append(item)
-                    else:
-                        # Old text-only format
-                        result.append(
-                            {"type": "text", "content": str(item), "timestamp": None}
-                        )
-                return result
-    except Exception:
+        with path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
         return []
-    return []
+    if not isinstance(data, list):
+        return []
+    clips: List[Clip] = []
+    for item in data:
+        try:
+            clips.append(Clip.from_dict(item))
+        except Exception:
+            # Skip malformed entries
+            continue
+    return clips
 
 
-def save_json_list(path: str, items: List[Dict]) -> None:
-    """Save clipboard entries to JSON file"""
-    try:
-        atomic_write(path, json.dumps(items, ensure_ascii=False, indent=2))
-    except Exception:
-        with open(path, "w") as f:
-            json.dump(items, f, ensure_ascii=False)
+def save_clips_to_file(path: Path, clips: List[Clip]) -> None:
+    """Serialize clips to JSON file atomically."""
+    data = [c.to_dict() for c in clips]
+    text = json.dumps(data, ensure_ascii=False, indent=2)
+    atomic_write_text(path, text)
 
 
 def get_content_hash(content: bytes) -> str:
-    """Generate hash for content (used for image filenames)"""
-    return hashlib.sha256(content).hexdigest()[:16]
+    """Return short SHA-256 hex digest for given content bytes."""
+    h = hashlib.sha256(content).hexdigest()
+    return h[:16]
 
 
-def save_image_to_file(
-    image_data: bytes, img_format: str = "png"
-) -> Optional[str]:  # pylint: disable=unused-argument
-    """Save image data to file and return path"""
+def save_image_bytes(image_data: bytes) -> Optional[Path]:
+    """
+    Save image bytes to PNG file (converting via Pillow if available).
+    Returns Path on success, None on failure or if Pillow is not available.
+    """
     if not HAS_PIL or Image is None:
         return None
 
     try:
-        # Generate filename based on content hash
         content_hash = get_content_hash(image_data)
         filename = f"{content_hash}.png"
-        filepath = os.path.join(IMAGE_DIR, filename)
-
-        # Don't save if already exists
-        if os.path.exists(filepath):
+        filepath = IMAGE_DIR.joinpath(filename)
+        if filepath.exists():
             return filepath
 
-        # Save as PNG
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".tmp") as tmp:
+        # Write raw bytes to temp then open with Pillow to normalize and save PNG
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".img") as tmp:
             tmp.write(image_data)
             tmp_path = tmp.name
-
-        # Convert to PNG with proper format for X11
-        img = Image.open(tmp_path)
-
-        # Convert to RGB or RGBA (remove palette mode, etc.)
-        if img.mode not in ("RGB", "RGBA"):
-            if img.mode == "P" and "transparency" in img.info:
-                img = img.convert("RGBA")
-            else:
-                img = img.convert("RGB")
-
-        # Save as PNG with standard settings
-        img.save(filepath, "PNG", optimize=False)
-        os.remove(tmp_path)
-
-        return filepath
-    except Exception as e:
-        print(f"Error saving image: {e}", file=sys.stderr)
+        try:
+            with Image.open(tmp_path) as img:
+                # Normalize mode
+                if img.mode not in ("RGB", "RGBA"):
+                    if img.mode == "P" and "transparency" in img.info:
+                        img = img.convert("RGBA")
+                    else:
+                        img = img.convert("RGB")
+                img.save(str(filepath), "PNG")
+            return filepath
+        finally:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+    except (OSError, ValueError):
         return None
 
 
 def cleanup_old_images(keep_paths: List[str]) -> None:
-    """Remove image files that are no longer referenced"""
+    """
+    Remove image files from IMAGE_DIR that are not referenced in keep_paths.
+    keep_paths are full paths or filenames.
+    """
+    keep_filenames = {Path(p).name for p in keep_paths if p}
     try:
-        keep_files = {os.path.basename(p) for p in keep_paths if p}
-        for filename in os.listdir(IMAGE_DIR):
-            if filename.endswith(".png") and filename not in keep_files:
+        for file in IMAGE_DIR.iterdir():
+            if file.suffix.lower() == ".png" and file.name not in keep_filenames:
                 try:
-                    os.remove(os.path.join(IMAGE_DIR, filename))
-                except Exception:  # pylint: disable=broad-exception-caught
+                    file.unlink()
+                except OSError:
                     pass
-    except Exception:  # pylint: disable=broad-exception-caught
+    except OSError:
         pass
 
 
 class ClipboardManager:
-    """Manages clipboard history and pinned items"""
+    """Manages history and pinned clips with persistence."""
 
-    def __init__(self):
-        self.history: List[Dict] = load_json_list(HISTORY_PATH)
-        self.pinned: List[Dict] = load_json_list(PIN_PATH)
+    def __init__(self) -> None:
+        self.history: List[Clip] = load_clips_from_file(HISTORY_PATH)
+        self.pinned: List[Clip] = load_clips_from_file(PIN_PATH)
 
-    def save(self):
-        """Save history and pinned items to disk"""
-        # Trim history
-        trimmed_history = []
-        text_kept = 0
-        image_kept = 0
-        for item in self.history:
-            if item.get("type") == "text" and text_kept < MAX_CLIPS:
-                trimmed_history.append(item)
-                text_kept += 1
-            elif item.get("type") == "image" and image_kept < MAX_IMAGE_CLIPS:
-                trimmed_history.append(item)
-                image_kept += 1
-
-        self.history = trimmed_history
-
-        # Persist both lists
-        save_json_list(HISTORY_PATH, self.history)
-        save_json_list(PIN_PATH, self.pinned)
-
-        # Cleanup unreferenced images
-        all_image_paths = []
-        for item in self.history + self.pinned:
-            if item.get("type") == "image" and item.get("path"):
-                all_image_paths.append(item["path"])
-        cleanup_old_images(all_image_paths)
-
-    def save_history_only(self):
-        """Save only history (used by daemon to avoid overwriting pinned changes)"""
-        # Trim and save only history
+    def save(self) -> None:
+        """Save trimmed history and pinned items, cleanup images."""
+        # Trim history counts
         text_count = 0
         image_count = 0
-        trimmed_history = []
-        for item in self.history:
-            if item.get("type") == "text" and text_count < MAX_CLIPS:
-                trimmed_history.append(item)
+        trimmed: List[Clip] = []
+        for c in self.history:
+            if c.type == "text" and text_count < MAX_CLIPS:
+                trimmed.append(c)
                 text_count += 1
-            elif item.get("type") == "image" and image_count < MAX_IMAGE_CLIPS:
-                trimmed_history.append(item)
+            elif c.type == "image" and image_count < MAX_IMAGE_CLIPS:
+                trimmed.append(c)
                 image_count += 1
+        self.history = trimmed
 
-        self.history = trimmed_history
-        save_json_list(HISTORY_PATH, self.history)
+        save_clips_to_file(HISTORY_PATH, self.history)
+        save_clips_to_file(PIN_PATH, self.pinned)
 
-    def reload(self):
-        """Reload from disk to get latest state"""
-        self.history = load_json_list(HISTORY_PATH)
-        self.pinned = load_json_list(PIN_PATH)
+        # Cleanup images not referenced
+        keep: List[str] = []
+        for c in self.history + self.pinned:
+            if c.type == "image" and c.path:
+                keep.append(c.path)
+        cleanup_old_images(keep)
 
-    def add_clip(self, clip_data: Dict) -> None:
-        """Add a clip entry (text or image)"""
-        if not clip_data or not clip_data.get("type"):
+    def save_history_only(self) -> None:
+        """Save only the history list (daemon optimization)."""
+        text_count = 0
+        image_count = 0
+        trimmed: List[Clip] = []
+        for c in self.history:
+            if c.type == "text" and text_count < MAX_CLIPS:
+                trimmed.append(c)
+                text_count += 1
+            elif c.type == "image" and image_count < MAX_IMAGE_CLIPS:
+                trimmed.append(c)
+                image_count += 1
+        self.history = trimmed
+        save_clips_to_file(HISTORY_PATH, self.history)
+
+    def reload(self) -> None:
+        """Reload pinned/history from disk to pick up external changes."""
+        self.history = load_clips_from_file(HISTORY_PATH)
+        self.pinned = load_clips_from_file(PIN_PATH)
+
+    def _is_duplicate_in_list(self, clip: Clip, clip_list: List[Clip]) -> bool:
+        """Return True if clip is duplicate in clip_list."""
+        for other in clip_list:
+            if clip.type != other.type:
+                continue
+            if clip.type == "text" and clip.content == other.content:
+                return True
+            if (
+                clip.type == "image"
+                and clip.path
+                and other.path
+                and clip.path == other.path
+            ):
+                return True
+        return False
+
+    def add_clip(self, clip: Clip) -> None:
+        """Add a clip to history (skip if duplicate of pinned or existing)."""
+        if not clip or not clip.type:
             return
+        # Update timestamp
+        clip.timestamp = datetime.now().isoformat()
 
-        # Add timestamp
-        clip_data["timestamp"] = datetime.now().isoformat()
-
-        # Check if already pinned
-        if self._is_duplicate(clip_data, self.pinned):
+        if self._is_duplicate_in_list(clip, self.pinned):
             return
 
         # Remove duplicates from history
         self.history = [
-            c for c in self.history if not self._is_duplicate(clip_data, [c])
+            c for c in self.history if not self._is_duplicate_in_list(clip, [c])
         ]
 
         # Prepend
-        self.history.insert(0, clip_data)
+        self.history.insert(0, clip)
 
-    def _is_duplicate(self, clip: Dict, clip_list: List[Dict]) -> bool:
-        """Check if clip is duplicate in list"""
-        for item in clip_list:
-            if clip.get("type") != item.get("type"):
-                continue
-            if clip.get("type") == "text":
-                if clip.get("content") == item.get("content"):
-                    return True
-            elif clip.get("type") == "image":
-                if clip.get("path") == item.get("path"):
-                    return True
-        return False
-
-    def get_preview(self, item: Dict, max_len: int = PREVIEW_MAX) -> str:
-        """Get preview string for an item"""
-        if item.get("type") == "text":
-            text = item.get("content", "")
-            single = text.replace("\n", " ")
-            if len(single) > max_len:
-                return single[:max_len] + "…"
-            return single
-        elif item.get("type") == "image":
-            path = item.get("path", "")
-            filename = os.path.basename(path) if path else "image"
-            timestamp = item.get("timestamp", "")
-            if timestamp:
-                try:
-                    dt = datetime.fromisoformat(timestamp)
-                    time_str = dt.strftime("%m/%d %H:%M")
-                    return f"{filename} ({time_str})"
-                except ValueError:
-                    pass
-            return filename
+    def get_preview(self, clip: Clip, max_len: int = PREVIEW_MAX) -> str:
+        """Return a one-line preview string for dmenu display."""
+        if clip.type == "text":
+            text = (clip.content or "").replace("\n", " ")
+            if len(text) > max_len:
+                return text[:max_len] + "…"
+            return text
+        if clip.type == "image":
+            filename = Path(clip.path or "").name if clip.path else "image"
+            try:
+                dt = datetime.fromisoformat(clip.timestamp)
+                timestr = dt.strftime("%m/%d %H:%M")
+                return f"{filename} ({timestr})"
+            except ValueError:
+                return filename
         return ""
 
-    def get_image_type(self, path: str) -> str:
-        """Get image type from file extension"""
-        ext = os.path.splitext(path)[1].lower().lstrip(".")
+    def get_image_type_str(self, path: str) -> str:
+        """Return image type string from extension (e.g., PNG, JPG)."""
+        ext = Path(path).suffix.lower().lstrip(".")
         return ext.upper() if ext else "IMAGE"
 
-    def build_menu_entries(self):
-        """Build menu entries for dmenu display"""
-        entries = []  # tuples (label, item_dict)
-        # pinned first
+    def build_menu_entries(self) -> List[tuple]:
+        """
+        Build list of (label, Clip) tuples for dmenu.
+        Pinned entries come first, then history.
+        Labels are like: "[P1] PNG:/path" or "[H3] Preview..."
+        """
+        entries: List[tuple] = []
         for i, p in enumerate(self.pinned, start=1):
-            if p.get("type") == "image" and p.get("path"):
-                img_type = self.get_image_type(p["path"])
-                label = f"{img_type}:{p['path']} [P{i}]"
+            if p.type == "image" and p.path:
+                label = f"[P{i}] {self.get_image_type_str(p.path)}:{p.path}"
             else:
                 label = f"[P{i}] {self.get_preview(p)}"
             entries.append((label, p))
-
-        # then history
         for i, h in enumerate(self.history, start=1):
-            if h.get("type") == "image" and h.get("path"):
-                img_type = self.get_image_type(h["path"])
-                label = f"{img_type}:{h['path']} [H{i}]"
+            if h.type == "image" and h.path:
+                label = f"[H{i}] {self.get_image_type_str(h.path)}:{h.path}"
             else:
                 label = f"[H{i}] {self.get_preview(h)}"
             entries.append((label, h))
-
         return entries
 
-    def select_clip(self):
-        """Show dmenu to select and restore a clip"""
+    def select_clip(self) -> None:
+        """Show dmenu to select and restore a clip to clipboard."""
         self.reload()
         entries = self.build_menu_entries()
         if not entries:
             return
-
         menu_text = "\n".join(label for label, _ in entries)
-        try:
-            sel = run_dmenu(menu_text, prompt="Clipboard History:")
-        except subprocess.CalledProcessError:
-            return
-
+        sel = run_dmenu(menu_text, prompt="Clipboard History:")
         if not sel:
             return
-
-        # Find selected entry by matching the label
-        for label, item in entries:
-
-            if clean_label == sel:
-                self._restore_clipboard(item)
+        for label, clip in entries:
+            if label == sel:
+                self._restore_clipboard(clip)
                 return
 
-    def pin_menu(self):  # pylint: disable=too-many-branches
-        """Show dmenu to pin/unpin items"""
+    def pin_menu(self) -> None:
+        """Show dmenu to pin/unpin items."""
         self.reload()
-
-        lines = []
-        entries = []
+        lines: List[str] = []
+        entries: List[tuple] = []
 
         if self.pinned:
             lines.append("=== PINNED (select to unpin) ===")
             for i, p in enumerate(self.pinned, start=1):
-                if p.get("type") == "image" and p.get("path"):
-                    img_type = self.get_image_type(p["path"])
-                    label = f"{img_type}:{p['path']} [P{i}]"
+                if p.type == "image" and p.path:
+                    label = f"[P{i}] {self.get_image_type_str(p.path)}:{p.path}"
                 else:
                     label = f"[P{i}] {self.get_preview(p)}"
                 lines.append(label)
@@ -347,9 +373,8 @@ class ClipboardManager:
         if self.history:
             lines.append("=== HISTORY (select to pin) ===")
             for i, h in enumerate(self.history, start=1):
-                if h.get("type") == "image" and h.get("path"):
-                    img_type = self.get_image_type(h["path"])
-                    label = f"{img_type}:{h['path']} [H{i}]"
+                if h.type == "image" and h.path:
+                    label = f"[H{i}] {self.get_image_type_str(h.path)}:{h.path}"
                 else:
                     label = f"[H{i}] {self.get_preview(h)}"
                 lines.append(label)
@@ -360,123 +385,129 @@ class ClipboardManager:
 
         menu_text = "\n".join(lines)
         sel = run_dmenu(menu_text, prompt="Pin/Unpin:")
-
         if not sel or sel.startswith("==="):
             return
 
-        # Find entry by matching label
-        for label, item in entries:
+        for label, clip in entries:
             if label == sel:
-                if "[P" in label:
-                    # Unpin
+                if label.startswith("[P"):
+                    # Unpin: remove from pinned and add back to front of history
                     self.pinned = [
-                        p for p in self.pinned if not self._is_duplicate(item, [p])
+                        p
+                        for p in self.pinned
+                        if not self._is_duplicate_in_list(clip, [p])
                     ]
-                    # Add back to history
-                    if not self._is_duplicate(item, self.history):
-                        self.history.insert(0, item)
+                    if not self._is_duplicate_in_list(clip, self.history):
+                        self.history.insert(0, clip)
                 else:
-                    # Pin
+                    # Pin: remove from history and append to pinned
                     self.history = [
-                        h for h in self.history if not self._is_duplicate(item, [h])
+                        h
+                        for h in self.history
+                        if not self._is_duplicate_in_list(clip, [h])
                     ]
-                    if not self._is_duplicate(item, self.pinned):
-                        self.pinned.append(item)
+                    if not self._is_duplicate_in_list(clip, self.pinned):
+                        self.pinned.append(clip)
                 self.save()
                 break
 
-    def clear_history(self):
-        """Clear clipboard history (keep pinned items)"""
+    def clear_history(self) -> None:
+        """Clear in-memory history (preserve pinned) and persist."""
         self.reload()
         self.history = []
         self.save()
 
-    def _restore_clipboard(self, item: Dict):
-        """Restore item to clipboard"""
-        item_type = item.get("type")
-        if item_type == "text":
-            copy_to_clipboard(item.get("content", ""))
-        if item_type == "image":
-            copy_image_to_clipboard(item.get("path", ""))
+    def _restore_clipboard(self, clip: Clip) -> None:
+        """Restore clip to the system clipboard (text or image)."""
+        if clip.type == "text" and clip.content:
+            copy_text_to_clipboard(clip.content)
+        elif clip.type == "image" and clip.path:
+            copy_image_to_clipboard(clip.path)
 
 
-# Helper utilities
 def run_dmenu(menu_input: str, prompt: str = "") -> str:
-    """Run dmenu and return selected item"""
+    """
+    Invoke dmenu with the provided input and return the selected line (no newline).
+    Falls back to returning empty string on failure.
+    """
     cmd = ["dmenu", "-l", str(DMENU_LINES), "-p", prompt]
-    proc = subprocess.run(
-        cmd, input=menu_input.encode("utf-8"), stdout=subprocess.PIPE, check=False
-    )
-    return proc.stdout.decode("utf-8").rstrip("\n")
-
-
-def copy_to_clipboard(text: str) -> None:
-    """Copy text to clipboard using xclip"""
     try:
-        with subprocess.Popen(
+        proc = subprocess.run(
+            cmd,
+            input=menu_input.encode("utf-8"),
+            stdout=subprocess.PIPE,
+            check=False,
+            timeout=10,
+        )
+        return proc.stdout.decode("utf-8").rstrip("\n")
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def copy_text_to_clipboard(text: str) -> None:
+    """Copy a UTF-8 text string to the clipboard using xclip."""
+    try:
+        proc = subprocess.Popen(
             ["xclip", "-selection", "clipboard"], stdin=subprocess.PIPE
-        ) as proc:
-            proc.communicate(text.encode("utf-8"))
-    except Exception as e:  # pylint: disable=broad-exception-caught
-        print(f"Error copying to clipboard: {e}", file=sys.stderr)
+        )
+        proc.communicate(text.encode("utf-8"))
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def copy_image_to_clipboard(image_path: str) -> None:
-    """Copy image file to clipboard"""
-    if not os.path.exists(image_path):
+    """Copy local image file to the clipboard as image/png using xclip."""
+    path = Path(image_path)
+    if not path.exists():
         return
     try:
-        with open(image_path, "rb") as f:
-            with subprocess.Popen(
-                ["xclip", "-selection", "clipboard", "-t", "image/png"],
-                stdin=subprocess.PIPE,
-            ) as proc:
-                proc.communicate(f.read())
-    except Exception as e:  # pylint: disable=broad-exception-caught
-        print(f"Error copying image to clipboard: {e}", file=sys.stderr)
+        with path.open("rb") as fh:
+            data = fh.read()
+        proc = subprocess.Popen(
+            ["xclip", "-selection", "clipboard", "-t", "image/png"],
+            stdin=subprocess.PIPE,
+        )
+        proc.communicate(data)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
-def get_clipboard_content() -> Optional[Dict]:  # pylint: disable=too-many-nested-blocks
-    """Get clipboard content (text or image)"""
-    # Try to get image first (if PIL available)
+def get_clipboard_content() -> Optional[Clip]:
+    """
+    Read the current clipboard content and return a Clip if available.
+    Tries image targets first (if Pillow is available), then text.
+    """
+    # Image targets
     if HAS_PIL:
         try:
-            # Check available targets
-            targets = subprocess.run(
+            targets_proc = subprocess.run(
                 ["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 timeout=1,
                 check=False,
             )
-            available_targets = targets.stdout.decode("utf-8").strip().split("\n")
-
-            # Check for image formats
+            available = targets_proc.stdout.decode("utf-8").splitlines()
             image_targets = ["image/png", "image/jpeg", "image/jpg", "image/gif"]
             for target in image_targets:
-                if target in available_targets:
-                    # Get image data
-                    result = subprocess.run(
-                        ["xclip", "-selection", "clipboard", "-t", target, "-o"],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.DEVNULL,
-                        timeout=2,
-                        check=False,
-                    )
-                    if result.returncode == 0 and result.stdout:
-                        image_path = save_image_to_file(
-                            result.stdout, target.split("/")[1]
-                        )
-                        if image_path:
-                            return {
-                                "type": "image",
-                                "path": image_path,
-                                "format": target,
-                            }
-        except Exception:  # pylint: disable=broad-exception-caught
+                if target not in available:
+                    continue
+                result = subprocess.run(
+                    ["xclip", "-selection", "clipboard", "-t", target, "-o"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    timeout=2,
+                    check=False,
+                )
+                if result.returncode == 0 and result.stdout:
+                    saved = save_image_bytes(result.stdout)
+                    if saved:
+                        return Clip(type="image", path=str(saved), fmt=target)
+        except (OSError, subprocess.SubprocessError):
+            # If reading image targets fails, fall through to text
             pass
 
-    # Try to get text
+    # Text fallback
     try:
         out = subprocess.run(
             ["xclip", "-o", "-selection", "clipboard"],
@@ -487,49 +518,50 @@ def get_clipboard_content() -> Optional[Dict]:  # pylint: disable=too-many-neste
         )
         text = out.stdout.decode("utf-8").rstrip("\n")
         if text and text.strip():
-            return {"type": "text", "content": text}
-    except Exception:  # pylint: disable=broad-exception-caught
+            return Clip(type="text", content=text)
+    except (OSError, subprocess.SubprocessError):
         pass
 
     return None
 
 
-def daemon_loop(manager: ClipboardManager, interval: float = POLL_INTERVAL):
-    last_hash = None
+def daemon_loop(manager: ClipboardManager, interval: float = POLL_INTERVAL) -> None:
+    """
+    Loop to poll clipboard and persist new clips.
+    Stops on KeyboardInterrupt (Ctrl-C).
+    """
+    last_hash: Optional[str] = None
     dirty = False
-
     try:
         while True:
             current = get_clipboard_content()
             if current:
-                # Create hash to detect changes
-                if current.get("type") == "text":
+                if current.type == "text":
                     current_hash = hashlib.sha256(
-                        current.get("content", "").encode()
+                        (current.content or "").encode("utf-8")
                     ).hexdigest()
                 else:
-                    current_hash = current.get("path", "")
-
+                    # For images use path (content hash used as filename)
+                    current_hash = current.path or ""
                 if current_hash != last_hash:
                     with _lock:
-                        manager.pinned = load_json_list(PIN_PATH)
+                        # Reload pinned to avoid overwriting user changes
+                        manager.pinned = load_clips_from_file(PIN_PATH)
                         manager.add_clip(current)
                         dirty = True
                     last_hash = current_hash
-
             if dirty:
                 with _lock:
                     manager.save_history_only()
                     dirty = False
-
             time.sleep(interval)
     except KeyboardInterrupt:
         with _lock:
             manager.save_history_only()
 
 
-def main():
-    """Main entry point"""
+def main() -> None:
+    """Command-line entry point."""
     parser = argparse.ArgumentParser(description="Clipboard manager with image support")
     parser.add_argument(
         "command",
@@ -543,9 +575,6 @@ def main():
     if args.command is None:
         parser.print_help()
         sys.exit(0)
-
-    if not HAS_PIL and args.command == "daemon":
-        print("Warning: Running without Pillow - image support disabled")
 
     manager = ClipboardManager()
 
@@ -566,5 +595,4 @@ def main():
 
 
 if __name__ == "__main__":
-    """Entry point when run as script"""
     main()
