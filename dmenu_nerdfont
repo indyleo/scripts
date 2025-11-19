@@ -1,6 +1,0 @@
-#!/bin/env bash
-emoticon=$(dmenu -l 10 -p "What Emoticon? " < "$HOME/.local/scripts/nerdfont.txt" | awk '{print $1}')
-if [[ -n "$emoticon" ]]; then
-    echo -n "$emoticon" | xclip -selection clipboard
-    notify-send "Copied to clipboard!" "Icon: $emoticon"
-fi

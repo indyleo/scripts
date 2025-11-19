@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
+"""
+Emoji Picker
+Picks an emoji and copies it to the clipboard
+"""
 import subprocess
 import sys
 
-emojiList = [
+EMOJILIST = [
     ["😀", "grinning face"],
     ["😃", "grinning face with big eyes"],
     ["😄", "grinning face with smiling eyes"],
@@ -1880,13 +1884,13 @@ emojiList = [
 ]
 
 # Build the menu text
-menu_input = "\n".join(f"{e} {d}" for e, d in emojiList)
+MENUINPUT = "\n".join(f"{e} {d}" for e, d in EMOJILIST)
 
 # Call dmenu
 try:
     result = subprocess.run(
         ["dmenu", "-l", "10", "-p", "What Emoji?"],
-        input=menu_input,
+        input=MENUINPUT,
         text=True,
         capture_output=True,
         check=True
@@ -1901,7 +1905,7 @@ if not result:
 emoji = result.split()[0]
 
 # Copy to clipboard
-subprocess.run(["xclip", "-selection", "clipboard"], input=emoji, text=True)
+subprocess.run(["xclip", "-selection", "clipboard"], input=emoji, text=True, check=True)
 
 # Notify
-subprocess.run(["notify-send", "Copied to clipboard!", f"Emoji: {emoji}"])
+subprocess.run(["notify-send", "Copied to clipboard!", f"Emoji: {emoji}"], check=False)
