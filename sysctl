@@ -11,9 +11,9 @@ done
 
 # Constants
 script_name=$(basename "$0")
-brightness_status="restatus rt 24"
-volume_status="restatus rt 23"
-mic_status="restatus rt 25"
+brightness_status="restatus rt 25"
+volume_status="restatus rt 24"
+mic_status="restatus rt 23"
 
 # Arguments
 subsys="${1:-}"
