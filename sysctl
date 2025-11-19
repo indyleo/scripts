@@ -1,0 +1,209 @@
+#!/bin/env bash
+set -euo pipefail
+
+# Check required commands
+for cmd in brightnessctl pamixer nmcli bluetoothctl; do
+    if ! command -v "$cmd" &>/dev/null; then
+        echo "Error: $cmd is not installed."
+        exit 1
+    fi
+done
+
+# Constants
+script_name=$(basename "$0")
+brightness_status="restatus rt 24"
+volume_status="restatus rt 23"
+mic_status="restatus rt 25"
+
+# Arguments
+subsys="${1:-}"
+action="${2:-}"
+num="${3:-5}"
+
+# Validate numeric argument
+if [[ "$action" =~ ^(--inc|-i|--dec|-d)$ ]]; then
+    if ! [[ "$num" =~ ^[0-9]+$ ]]; then
+        echo "Error: NUM must be a positive integer. Got '$num'."
+        exit 1
+    fi
+fi
+
+# Helper: run command and report success/failure
+function run_and_check() {
+    if "$@"; then
+        echo "✅ Success: $*"
+    else
+        echo "❌ Failed: $*"
+        exit 1
+    fi
+}
+
+# Brightness
+function brightness_inc() { run_and_check brightnessctl set "${num}%+"; $brightness_status; }
+function brightness_dec() { run_and_check brightnessctl set "${num}%-"; $brightness_status; }
+
+# Volume
+function volume_inc() { run_and_check pamixer -i "$num"; $volume_status; }
+function volume_dec() { run_and_check pamixer -d "$num"; $volume_status; }
+function volume_togglemute() { run_and_check pamixer --toggle-mute; $volume_status; }
+
+# Microphone
+function mic_inc() { run_and_check pamixer --default-source -i "$num"; $mic_status; }
+function mic_dec() { run_and_check pamixer --default-source -d "$num"; $mic_status; }
+function mic_toggle() { run_and_check pamixer --default-source --toggle-mute; $mic_status; }
+
+# Wi-Fi
+function wifi_toggle() {
+    state=$(nmcli radio wifi)
+    if [[ "$state" == "enabled" ]]; then
+        run_and_check nmcli radio wifi off
+    else
+        run_and_check nmcli radio wifi on
+    fi
+}
+
+# Bluetooth
+function bt_toggle() {
+    state=$(bluetoothctl show | grep "Powered:" | awk '{print $2}')
+    if [[ "$state" == "yes" ]]; then
+        run_and_check bluetoothctl power off
+    else
+        run_and_check bluetoothctl power on
+    fi
+}
+
+# Airplane mode
+function airplane_toggle() {
+    state=$(nmcli radio all)
+    if [[ "$state" == "enabled" ]]; then
+        run_and_check nmcli radio all off
+    else
+        run_and_check nmcli radio all on
+    fi
+}
+
+# Global help menu
+function global_help() {
+    cat <<EOF
+	Usage: $script_name SUBSYSTEM ACTION [NUM]
+
+	Available subsystems:
+	bri|brightness      Screen brightness
+	vol|volume          System volume
+	mic                 Microphone
+	wifi                Wi-Fi
+	bt                  Bluetooth
+	airplane            Airplane mode
+
+	For subsystem-specific help:
+	$script_name SUBSYSTEM --help
+EOF
+}
+
+# Subsystem-specific help menus
+function brightness_help() {
+    cat <<EOF
+	Brightness (bri) controls:
+	--inc | -i NUM      Increase brightness by NUM (default 5)
+	--dec | -d NUM      Decrease brightness by NUM (default 5)
+	--help              Show this menu
+EOF
+}
+
+function volume_help() {
+    cat <<EOF
+	Volume (vol) controls:
+	--inc | -i NUM      Increase volume by NUM (default 5)
+	--dec | -d NUM      Decrease volume by NUM (default 5)
+	--toggle            Toggle mute/unmute
+	--help              Show this menu
+EOF
+}
+
+function mic_help() {
+    cat <<EOF
+	Microphone (mic) controls:
+	--inc | -i NUM      Increase mic volume by NUM (default 5)
+	--dec | -d NUM      Decrease mic volume by NUM (default 5)
+	--toggle            Toggle mic mute/unmute
+	--help              Show this menu
+EOF
+}
+
+function wifi_help() {
+    cat <<EOF
+	Wi-Fi controls:
+	--toggle            Toggle Wi-Fi on/off
+	--help              Show this menu
+EOF
+}
+
+function bt_help() {
+    cat <<EOF
+	Bluetooth (bt) controls:
+	--toggle            Toggle Bluetooth on/off
+	--help              Show this menu
+EOF
+}
+
+function airplane_help() {
+    cat <<EOF
+	Airplane mode controls:
+	--toggle            Toggle airplane mode on/off (disables/enables Wi-Fi & Bluetooth)
+	--help              Show this menu
+EOF
+}
+
+# Dispatch
+case "$subsys" in
+    bri|brightness)
+        case "$action" in
+            --inc|-i) brightness_inc ;;
+            --dec|-d) brightness_dec ;;
+            --help|-h) brightness_help ;;
+            *) echo "Invalid action for brightness"; brightness_help; exit 1 ;;
+        esac
+        ;;
+    vol|volume)
+        case "$action" in
+            --inc|-i) volume_inc ;;
+            --dec|-d) volume_dec ;;
+            --toggle) volume_togglemute ;;
+            --help|-h) volume_help ;;
+            *) echo "Invalid action for volume"; volume_help; exit 1 ;;
+        esac
+        ;;
+    mic)
+        case "$action" in
+            --inc|-i) mic_inc ;;
+            --dec|-d) mic_dec ;;
+            --toggle) mic_toggle ;;
+            --help|-h) mic_help ;;
+            *) echo "Invalid action for mic"; mic_help; exit 1 ;;
+        esac
+        ;;
+    wifi)
+        case "$action" in
+            --toggle) wifi_toggle ;;
+            --help|-h) wifi_help ;;
+            *) echo "Invalid action for wifi"; wifi_help; exit 1 ;;
+        esac
+        ;;
+    bt)
+        case "$action" in
+            --toggle) bt_toggle ;;
+            --help|-h) bt_help ;;
+            *) echo "Invalid action for bluetooth"; bt_help; exit 1 ;;
+        esac
+        ;;
+    airplane)
+        case "$action" in
+            --toggle) airplane_toggle ;;
+            --help|-h) airplane_help ;;
+            *) echo "Invalid action for airplane mode"; airplane_help; exit 1 ;;
+        esac
+        ;;
+    help|-h|"") global_help ;;
+    *) echo "Invalid subsystem '$subsys'"; global_help; exit 1 ;;
+esac
+

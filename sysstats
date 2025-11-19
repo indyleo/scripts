@@ -251,6 +251,37 @@ function vvolume() {
     echo "^c${COLORS[WHITE]}^${icon} ^c${color}^${msg}^d^"
 }
 
+function mmicrophone() {
+    local vol muted icon color msg
+
+    vol="$(pamixer --default-source --get-volume 2>/dev/null || echo 0)"
+    muted="$(pamixer --default-source --get-mute 2>/dev/null || echo false)"
+
+    if [[ "$muted" == "false" || "$vol" -gt 0 ]]; then
+        icon=""
+    fi
+
+    if [[ "$muted" == "true" || "$vol" -eq 0 ]]; then
+        icon=""
+        color="${COLORS[RED]}"
+        msg="Muted"
+    elif [[ "$vol" -ge 75 ]]; then
+        color="${COLORS[GREEN]}"
+        msg="${vol}%"
+    elif [[ "$vol" -ge 50 ]]; then
+        color="${COLORS[YELLOW]}"
+        msg="${vol}%"
+    elif [[ "$vol" -ge 25 ]]; then
+        color="${COLORS[ORANGE]}"
+        msg="${vol}%"
+    else
+        color="${COLORS[RED]}"
+        msg="${vol}%"
+    fi
+
+    echo "^c${COLORS[WHITE]}^${icon} ^c${color}^${msg}^d^"
+}
+
 function bbrightness() {
     local brightness_raw max_brightness brightness icon color
 
@@ -258,7 +289,8 @@ function bbrightness() {
     max_brightness=$(cat /sys/class/backlight/*/max_brightness 2>/dev/null || echo "100")
 
     [[ -z "$brightness_raw" || -z "$max_brightness" || "$max_brightness" -eq 0 ]] && brightness=0 || \
-        brightness=$(( brightness_raw * 100 / max_brightness ))
+        brightness=$(( (brightness_raw * 100 + max_brightness / 2) / max_brightness ))
+
 
     color=$(get_gradient_color "$brightness")
 
@@ -279,34 +311,34 @@ function bbrightness() {
 }
 
 function all_stats() {
-    echo "$(is_media) | $(disk_usage) | $(memory_usage) | $(cpu_load) | $(bbrightness) | $(vvolume) | $(bbattery) | $(wifi_status) | $(tail_status) | $(date_time)"
+    echo "$(is_media) | $(disk_usage) | $(memory_usage) | $(cpu_load) | $(bbrightness) | $(mmicrophone) |  $(vvolume) | $(bbattery) | $(wifi_status) | $(tail_status) | $(date_time)"
 }
 
 function help_menu() {
     cat <<EOF
-Usage: $(basename "$0") [OPTION]
+	Usage: $(basename "$0") [OPTION]
 
-Display system statistics for dwmblocks-async.
+	Display system statistics for dwmblocks-async.
 
-Options:
-  -h, --help  Show this help message
-  cpu         Display CPU load
-  mem         Display memory usage
-  disk        Display disk usage
-  wifi        Display WiFi connection status
-  tail        Display Tailscale connection status
-  date        Display date
-  time        Display time
-  date_time   Display date and time
-  ismedia     Display recording/streaming status
-  battery     Display battery status
-  volume      Display volume
-  brightness  Display brightness
-  all         Display all stats (combined)
+	Options:
+	-h, --help  Show this help message
+	cpu         Display CPU load
+	mem         Display memory usage
+	disk        Display disk usage
+	wifi        Display WiFi connection status
+	tail        Display Tailscale connection status
+	date        Display date
+	time        Display time
+	date_time   Display date and time
+	ismedia     Display recording/streaming status
+	battery     Display battery status
+	volume      Display volume
+	brightness  Display brightness
+	all         Display all stats (combined)
 
-Environment:
-  Theme is read from: ${THEME_FILE}
-  Current theme: ${THEME}
+	Environment:
+	Theme is read from: ${THEME_FILE}
+	Current theme: ${THEME}
 EOF
 }
 
@@ -322,6 +354,7 @@ case "$opt" in
     ismedia)    is_media ;;
     battery)    bbattery ;;
     volume)     vvolume ;;
+    microphone) mmicrophone ;;
     brightness) bbrightness ;;
     all)        all_stats ;;
     --help|-h)  help_menu ;;
