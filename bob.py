@@ -56,12 +56,16 @@ def fetch_json(url: str, timeout: int = 10) -> Dict[str, Any]:
             if isinstance(data, dict):
                 return data
             die("Invalid JSON response")
+            return {}  # Unreachable but satisfies type checker
     except HTTPError as e:
         die(f"HTTP error {e.code}: {e.reason}")
+        return {}  # Unreachable but satisfies type checker
     except URLError as e:
         die(f"Network error: {e.reason}")
+        return {}  # Unreachable but satisfies type checker
     except json.JSONDecodeError:
         die("Invalid JSON response")
+        return {}  # Unreachable but satisfies type checker
 
 def download_file(url: str, dest: Path, progress: bool = True) -> None:
     """Download file with progress indication"""
@@ -107,6 +111,8 @@ def get_os_arch() -> Tuple[str, str]:
     arch = arch_map.get(machine)
     if not arch:
         die(f"Unsupported architecture: {machine}")
+        # Add unreachable return to satisfy type checker
+        return ("", "")  # Unreachable
 
     return os_name, arch
 
@@ -116,10 +122,11 @@ def fetch_tag(channel: str = "stable") -> str:
     api_url = f"https://api.github.com/repos/{REPO}/releases"
     response = fetch_json(api_url)
 
-    # Handle the response properly - it should be a list
-    releases: ListType[Dict[str, Any]] = (
-        response if isinstance(response, list) else response.get("releases", [])
-    )
+    # Handle the response properly - it should be a list or dict with "releases" key
+    if isinstance(response, list):
+        releases: ListType[Dict[str, Any]] = response
+    else:
+        releases = response.get("releases", [])
 
     if channel == "nightly":
         for release in releases:
@@ -135,6 +142,7 @@ def fetch_tag(channel: str = "stable") -> str:
                     return str(tag)
 
     die(f"Could not find {channel} release")
+    return ""  # Unreachable but satisfies type checker
 
 # === CONSTRUCT DOWNLOAD URL ===
 def construct_download_url(tag: str, os_name: str, arch: str) -> str:
@@ -144,6 +152,7 @@ def construct_download_url(tag: str, os_name: str, arch: str) -> str:
     if os_name == "darwin":
         return f"https://github.com/{REPO}/releases/download/{tag}/nvim-macos.tar.gz"
     die(f"Unsupported OS: {os_name}")
+    return ""  # Unreachable but satisfies type checker
 
 # === INSTALL FUNCTION ===
 def install_nvim(channel: str = "stable", specific: str = "") -> None:
@@ -398,7 +407,7 @@ Commands:
 """)
 
 # === MAIN ===
-def main() -> None:  # pylint: disable=too-many-branches
+def main() -> None:
     """Main entry point"""
     args = sys.argv[1:]
 
