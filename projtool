@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# projtool - unified project management helper (full update)
+# projtool - unified project management helper with Arduino CLI support
 set -euo pipefail
 
 PROJECTS_DIR="${PROJECTS_DIR:-$HOME/Projects}"
@@ -30,6 +30,7 @@ int main() { std::cout << \"Hello from C++\" << std::endl; return 0; }"
 import \"fmt\"
 func main() { fmt.Println(\"Hello from Go\") }"
     [zig]=""   # zig init will supply defaults
+    [ino]="" # arduino-cli handled separately
 )
 
 # aliases
@@ -40,6 +41,7 @@ TEMPLATES[rust]="${TEMPLATES[rs]}"
 AUTO_YES=false
 PROJECT_NAME=""
 LANGUAGE=""
+ARDUINO_BOARD=""
 
 function print_color() { printf "${1}%s${RESET}\n" "${2}"; }
 
@@ -51,6 +53,7 @@ function mkproj() {
         case "$1" in
             -n|--name) PROJECT_NAME="${2-}"; shift 2 ;;
             -l|--lang) LANGUAGE="${2-}"; shift 2 ;;
+            -b|--board) ARDUINO_BOARD="${2-}"; shift 2 ;;
             -y|--yes) AUTO_YES=true; shift ;;
             *) shift ;;
         esac
@@ -79,6 +82,7 @@ function mkproj() {
         rs) mkdir -pv "$proj_path" ;;
         c|cpp|go) mkdir -pv "$proj_path/src" "$proj_path/include" "$proj_path/bin" ;;
         zig) mkdir -pv "$proj_path/src" "$proj_path/include" ;;
+        ino) mkdir -pv "$proj_path/sketch" ;;
         *) mkdir -pv "$proj_path/src" ;;
     esac
 
@@ -130,9 +134,15 @@ EOF
                         break
                     fi
                 done
-                [[ $built == false ]] && zig build 2> >(sed 's/^/zig: /' >&2) && used_mode="(none)"
+                if [[ $built == false ]]; then
+                    zig build 2> >(sed 's/^/zig: /' >&2) && used_mode="(none)"
+                fi
                 exe_path=$(find zig-out -type f -executable -print 2>/dev/null | head -n1 || true)
-                [[ -n "$exe_path" ]] && print_color "$GREEN" "✅ Zig build succeeded (mode: $used_mode). Executable: $exe_path" || print_color "$YELLOW" "zig build ran but no executable detected."
+                if [[ -n "$exe_path" ]]; then
+                    print_color "$GREEN" "✅ Zig build succeeded (mode: $used_mode). Executable: $exe_path"
+                else
+                    print_color "$YELLOW" "zig build ran but no executable detected."
+                fi
             else
                 print_color "$RED" "zig not found"
             fi
@@ -148,6 +158,61 @@ EOF
         go)
             echo "${TEMPLATES[go]}" > "src/main.go"
             command -v go >/dev/null 2>&1 && go build -o "bin/$PROJECT_NAME" "src/main.go" && print_color "$GREEN" "✅ Go compiled to bin/$PROJECT_NAME"
+            ;;
+        ino)
+            if ! command -v arduino-cli >/dev/null 2>&1; then
+                print_color "$RED" "❌ arduino-cli not found in PATH"
+                return 1
+            fi
+
+            print_color "$GREEN" "Initializing Arduino CLI configuration..."
+            arduino-cli config init --overwrite 2>&1 | sed 's/^/arduino-cli: /' >&2 || true
+            arduino-cli core update-index 2>&1 | sed 's/^/arduino-cli: /' >&2 || true
+
+            if [[ -z "$ARDUINO_BOARD" ]]; then
+                if $AUTO_YES; then
+                    ARDUINO_BOARD="arduino:avr:uno"
+                else
+                    read -rp "Board FQBN (default: arduino:avr:uno): " ARDUINO_BOARD
+                    [[ -z "$ARDUINO_BOARD" ]] && ARDUINO_BOARD="arduino:avr:uno"
+                fi
+            fi
+
+            print_color "$GREEN" "Installing core for board: $ARDUINO_BOARD"
+            arduino-cli core install "${ARDUINO_BOARD%%:*}:${ARDUINO_BOARD#*:}" 2>&1 | sed 's/^/arduino-cli: /' >&2 || true
+
+            cat > "sketch/${PROJECT_NAME}.ino" <<EOF
+void setup() {
+  Serial.begin(9600);
+  pinMode(LED_BUILTIN, OUTPUT);
+}
+
+void loop() {
+  digitalWrite(LED_BUILTIN, HIGH);
+  delay(1000);
+  digitalWrite(LED_BUILTIN, LOW);
+  delay(1000);
+}
+EOF
+
+            cat > Makefile <<EOF
+BOARD=${ARDUINO_BOARD}
+PORT?=/dev/ttyACM0
+
+compile:
+	arduino-cli compile --fqbn \$(BOARD) sketch
+
+upload:
+	arduino-cli upload -p \$(PORT) --fqbn \$(BOARD) sketch
+
+monitor:
+	arduino-cli monitor -p \$(PORT)
+
+clean:
+	rm -rf sketch/build
+EOF
+            print_color "$GREEN" "✅ Arduino project created with board: $ARDUINO_BOARD"
+            print_color "$YELLOW" "💡 Use 'make compile', 'make upload', or 'make monitor'"
             ;;
         *)
             print_color "$YELLOW" "⚠️  Unknown language: created basic src/"
@@ -227,6 +292,13 @@ zig-out/
 *.swp
 EOF
             ;;
+        ino)
+            cat > .gitignore <<EOF
+# Arduino
+sketch/build/
+*.swp
+EOF
+            ;;
         *)
             cat > .gitignore <<EOF
 # General
@@ -263,11 +335,11 @@ MIT License
 
 Copyright (c) $year $author
 
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
-THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 EOF
     print_color "$GREEN" "✅ README.md and LICENSE created"
 }
@@ -296,10 +368,15 @@ Commands:
   mkproj       Create a new project
                Options:
                  -n <name>       Project name
-                 -l <lang>       Language (sh, py, lua, c, cpp, rs, go, zig)
+                 -l <lang>       Language (sh, py, lua, c, cpp, rs, go, zig, ino)
+                 -b <fqbn>       Arduino board FQBN (e.g., arduino:avr:uno, esp32:esp32:esp32)
                  -y              Skip prompts and set up docs/git automatically
   mkgit        Initialize Git in current directory
   setupdocs    Create README.md and LICENSE
+
+Arduino Examples:
+  projtool mkproj -n blink -l ino
+  projtool mkproj -n rover -l ino -b esp32:esp32:esp32
 EOF
 }
 
@@ -315,4 +392,3 @@ case "${1:-}" in
     setupdocs) setupdocs ;;
     *) usage ;;
 esac
-
