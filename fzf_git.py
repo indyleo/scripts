@@ -260,6 +260,19 @@ def commit_changes() -> None:
     if result == 0:
         print(f"✓ Commit created: {full_message}")
 
+        # Check if there's a remote configured
+        remotes = run(["git", "remote"], check=False)
+        if remotes:
+            try:
+                response = input("\nPush to remote? (Y/n): ").strip().lower()
+                should_push = response in ('', 'y', 'yes')
+            except (KeyboardInterrupt, EOFError):
+                print("\nSkipping push")
+                should_push = False
+
+            if should_push:
+                push_changes()
+
 def amend_commit() -> None:
     """Amend the last commit."""
     if not confirm("Amend the last commit?"):
