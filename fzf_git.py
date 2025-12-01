@@ -1,256 +1,585 @@
 #!/usr/bin/env python3
-"""
-fzf_git.py
-
-Fully-featured CLI git helper using fzf with live previews.
-Features:
-- Commit files with interactive staged/unstaged diff toggle
-- Multi-file diff preview
-- View commits with full diffs (including deleted files)
-- Switch branches with preview of last commit
-- Blame files (modern Git compatible)
-- Reflog checkout
-- Safe handling of spaces, status codes, and special Git revisions
-"""
-
-import os
+"""Interactive Git TUI using fzf for browsing and managing git repositories."""
+import re
+import signal
 import subprocess
 import sys
-from typing import List
-
-COMMIT_TYPES = ["feat", "fix", "docs", "style", "refactor", "perf", "test", "chore"]
+from typing import List, Optional
 
 
-def run_fzf(
-    options: List[str],
-    prompt: str = "> ",
-    multi: bool = False,
-    ansi: bool = False,
-    preview_cmd: str = "",
-    bind: str = "",
-) -> List[str]:
-    """Run fzf and return selected items as a list."""
-    cmd = ["fzf", "--prompt", prompt]
-    if multi:
-        cmd.append("--multi")
-    if ansi:
-        cmd.append("--ansi")
-    if preview_cmd:
-        cmd += ["--preview", preview_cmd, "--preview-window", "up:30%:wrap"]
-    if bind:
-        cmd += ["--bind", bind]
+# ------------------------------------------------------------
+# Signal handling for clean exit
+# ------------------------------------------------------------
+def signal_handler(_sig, _frame):
+    """Handle Ctrl+C gracefully."""
+    print("\n\nExiting...")
+    sys.exit(0)
 
-    with subprocess.Popen(
-        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True
-    ) as fzf:
-        stdout, _ = fzf.communicate("\n".join(options))
+signal.signal(signal.SIGINT, signal_handler)
 
-    if not stdout.strip():
-        return []
-    return stdout.strip().splitlines() if multi else [stdout.strip()]
+# ------------------------------------------------------------
+# Utilities
+# ------------------------------------------------------------
+def run(cmd: List[str], check: bool = True) -> str:
+    """Run a git command and return its output."""
+    try:
+        return subprocess.check_output(cmd, text=True, stderr=subprocess.PIPE).strip()
+    except subprocess.CalledProcessError as e:
+        if check:
+            print(f"Error: {e.stderr}")
+            sys.exit(1)
+        return ""
 
+def run_interactive(cmd: List[str]) -> int:
+    """Run a command interactively and return exit code."""
+    return subprocess.run(cmd, check=False).returncode
 
-def clean_file_path(f: str) -> str:
-    """Remove leading status codes from git status output."""
-    parts = f.split(maxsplit=1)
-    return parts[1] if len(parts) > 1 else parts[0]
+def fzf_with_preview(source: List[str], preview_cmd: str, multi: bool = False) -> Optional[str]:
+    """Launch fzf with a preview command and return the selected line(s)."""
+    try:
+        args = ["fzf", "--ansi", "--preview", preview_cmd,
+                "--preview-window=right:60%", "--bind=q:abort"]
+        if multi:
+            args.append("--multi")
 
+        with subprocess.Popen(
+            args,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        ) as proc:
+            out, _ = proc.communicate("\n".join(source))
+            return out.strip() or None
+    except FileNotFoundError:
+        print("fzf not found")
+        return None
 
-def git_status_files(include_unstaged: bool = True) -> List[str]:
-    """Return a list of staged and optionally unstaged git files."""
-    result = subprocess.run(
-        ["git", "status", "--short"], capture_output=True, text=True, check=True
-    )
-    files = []
-    for line in result.stdout.splitlines():
-        status, file = line[:2].strip(), line[3:]
-        if include_unstaged or status != "":
-            files.append(f"{status} {file}")
-    return files
+def prompt_input(message: str) -> str:
+    """Prompt user for input."""
+    try:
+        print(f"\n{message}")
+        return input("> ").strip()
+    except (KeyboardInterrupt, EOFError):
+        print("\nCancelled")
+        return ""
 
+def confirm(message: str) -> bool:
+    """Ask for y/n confirmation."""
+    try:
+        response = input(f"{message} (y/N): ").strip().lower()
+        return response in ('y', 'yes')
+    except (KeyboardInterrupt, EOFError):
+        print("\nCancelled")
+        return False
 
-def git_recent_commits(limit: int = 50) -> List[str]:
-    """Return the last N git commits."""
-    result = subprocess.run(
-        ["git", "log", f"--pretty=format:%h %s (%an, %ar)", f"-{limit}"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return result.stdout.splitlines()
+# ------------------------------------------------------------
+# Parsers
+# ------------------------------------------------------------
+HASH_RE = re.compile(r"^[0-9a-f]{7,40}")
 
+def extract_hash(line: str) -> Optional[str]:
+    """Extract commit hash from a git log --graph line"""
+    # Remove ANSI color codes
+    clean = re.sub(r'\x1b\[[0-9;]*m', '', line)
+    # Remove graph characters and whitespace
+    clean = re.sub(r'^[\s|*/\\_.]+', '', clean)
+    # Now try to match hash at the start
+    m = HASH_RE.match(clean.strip())
+    return m.group(0) if m else None
 
-def git_all_branches() -> List[str]:
-    """Return a sorted list of all local and remote branches."""
-    result = subprocess.run(
-        ["git", "branch", "--all"], capture_output=True, text=True, check=True
-    )
-    branches = [
-        b.strip().replace("remotes/", "")
-        for b in result.stdout.splitlines()
-        if "HEAD" not in b
-    ]
-    return sorted(set(branches))
+def extract_reflog_hash(line: str) -> Optional[str]:
+    """Extract commit hash from reflog output."""
+    parts = line.split()
+    if parts and HASH_RE.fullmatch(parts[0]):
+        return parts[0]
+    return None
 
+def extract_filepath(line: str) -> Optional[str]:
+    """Extract filepath from git status --porcelain output."""
+    line = line.rstrip()
+    if len(line) < 4:
+        return None
+    status = line[:2]
+    rest = line[3:].strip()
+    if status.startswith("R"):  # rename entry
+        parts = rest.split()
+        return parts[-1] if parts else None
+    return rest
 
-def commit_files() -> None:
-    """Commit selected files with interactive staged/unstaged diff toggle and multi-file preview."""
-    files = git_status_files()
-    if not files:
-        print("No files to commit.")
-        return
+def get_file_status(line: str) -> str:
+    """Get the status code from porcelain output."""
+    return line[:2] if len(line) >= 2 else ""
 
-    preview_staged = "git diff --staged --color=always -- {1}"
-    preview_unstaged = "git diff --color=always -- {1}"
-    bind = f"ctrl-t:reload({preview_unstaged})"
-
-    # Multi-file diff preview
-    selected = run_fzf(
-        files,
-        prompt="Select files> ",
-        multi=True,
-        ansi=True,
-        preview_cmd=preview_staged,
-        bind=bind,
-    )
-    if not selected:
-        print("No files selected.")
-        return
-
-    selected_files = [clean_file_path(f) for f in selected]
-
-    commit_type_list = run_fzf(COMMIT_TYPES, prompt="Commit type> ")
-    if not commit_type_list:
-        print("No commit type selected.")
-        return
-    commit_type = commit_type_list[0]
-
-    commit_msg = input("Enter commit message: ").strip()
-    if not commit_msg:
-        print("Empty commit message. Abort.")
-        return
-
-    subprocess.run(["git", "add", "--"] + selected_files, check=True)
-    full_commit = f"{commit_type}: {commit_msg}"
-    subprocess.run(["git", "commit", "-m", full_commit], check=True)
-    print(f"Committed: {full_commit}")
-
-    if input("Push? (y/N): ").lower() == "y":
-        subprocess.run(["git", "push"], check=True)
-        print("Pushed.")
-
-
+# ------------------------------------------------------------
+# Read-only Views
+# ------------------------------------------------------------
 def view_commits() -> None:
-    """View recent commits with full diffs including deleted files."""
-    commits = git_recent_commits()
-    preview_cmd = "git show --color=always {1}"  # full commit diff
-    selected_list = run_fzf(
-        commits, prompt="Select commit> ", ansi=True, preview_cmd=preview_cmd
+    """Browse git commits with interactive preview."""
+    raw = run(["git", "log", "--oneline", "--graph", "--color=always", "--all"])
+    lines = raw.splitlines()
+
+    preview = (
+        "echo {} | "
+        "sed 's/\\x1b\\[[0-9;]*m//g' | "
+        "sed 's/^[[:space:]|*/\\\\_.]*//g' | "
+        "awk '{print $1}' | "
+        "xargs -r git show --color"
     )
-    if not selected_list:
+
+    selection = fzf_with_preview(lines, preview)
+    if not selection:
+        return
+    commit = extract_hash(selection)
+    if commit:
+        run_interactive(["git", "show", "--color", commit])
+
+def view_reflog() -> None:
+    """Browse git reflog with interactive preview."""
+    lines = run(["git", "reflog"], check=False).splitlines()
+    if not lines:
+        print("Reflog is empty")
         return
 
-    selected = selected_list[0]
-    commit_hash = selected.split()[0]
-
-    action_list = run_fzf(
-        ["Checkout commit", "Reset hard", "Show diff", "Show stats"], prompt="Action> "
+    selection = fzf_with_preview(
+        lines, "echo {} | awk '{print $1}' | xargs -r git show --color"
     )
-    if not action_list:
+    if not selection:
         return
-    action = action_list[0]
+    commit = extract_reflog_hash(selection)
+    if commit:
+        run_interactive(["git", "show", "--color", commit])
 
-    if action == "Checkout commit":
-        subprocess.run(["git", "checkout", commit_hash], check=True)
-    elif action == "Reset hard":
-        subprocess.run(["git", "reset", "--hard", commit_hash], check=True)
-    elif action == "Show diff":
-        subprocess.run(["git", "show", "--color=always", commit_hash], check=True)
-    elif action == "Show stats":
-        subprocess.run(
-            ["git", "show", "--stat", "--color=always", commit_hash], check=True
-        )
-
-
-def switch_branch() -> None:
-    """Switch branch with preview of latest commit."""
-    branches = git_all_branches()
-    preview_cmd = "git log -1 --oneline --color=always {}"
-    selected_list = run_fzf(
-        branches, prompt="Branch> ", ansi=True, preview_cmd=preview_cmd
-    )
-    if not selected_list:
+def view_file_blame() -> None:
+    """Browse files and show git blame."""
+    files = run(["git", "ls-files"], check=False).splitlines()
+    if not files:
+        print("No tracked files")
         return
-    selected = selected_list[0]
-    subprocess.run(["git", "checkout", selected], check=True)
-    print(f"Switched to branch {selected}")
+    selection = fzf_with_preview(files, "git blame --color-by-age -- {}")
+    if selection:
+        run_interactive(["git", "blame", "--color-by-age", "--", selection])
 
+# ------------------------------------------------------------
+# File Staging & Status
+# ------------------------------------------------------------
+def manage_status() -> None:
+    """Interactive staging/unstaging of files."""
+    while True:
+        lines = run(["git", "status", "--porcelain"], check=False).splitlines()
+        if not lines:
+            print("Working tree clean")
+            return
 
-def blame_file() -> None:
-    """Select a file and show git blame safely (modern Git)."""
-    result = subprocess.run(
-        ["git", "ls-files"], capture_output=True, text=True, check=True
-    )
-    files = result.stdout.splitlines()
-    preview_cmd = "git blame --color-lines -- {1}"
-    selected_list = run_fzf(files, prompt="File> ", ansi=True, preview_cmd=preview_cmd)
-    if not selected_list:
+        preview = "echo {} | awk '{print substr($0, 4)}' | xargs -r git diff --color HEAD --"
+
+        print("\nControls: s=stage, u=unstage, c=commit, q=quit")
+        selection = fzf_with_preview(lines, preview, multi=True)
+
+        if not selection:
+            return
+
+        selected_files = []
+        for sel_line in selection.split('\n'):
+            filepath = extract_filepath(sel_line)
+            if filepath:
+                selected_files.append((sel_line, filepath))
+
+        if not selected_files:
+            continue
+
+        # Determine action based on file status
+        action = prompt_input("Action: [s]tage, [u]nstage, [c]ommit, or [q]uit")
+
+        if action == 'q':
+            return
+        if action == 'c':
+            commit_changes()
+            return
+        if action == 's':
+            for _, filepath in selected_files:
+                run(["git", "add", filepath])
+                print(f"Staged: {filepath}")
+        if action == 'u':
+            for _, filepath in selected_files:
+                run(["git", "reset", "HEAD", filepath], check=False)
+                print(f"Unstaged: {filepath}")
+
+# ------------------------------------------------------------
+# Commit Operations
+# ------------------------------------------------------------
+def commit_changes() -> None:
+    """Create a commit with staged changes."""
+    # Check if there are staged changes
+    staged = run(["git", "diff", "--cached", "--name-only"], check=False)
+    if not staged:
+        print("No staged changes to commit")
         return
-    selected = clean_file_path(selected_list[0])
-    subprocess.run(["git", "blame", "--", selected], check=True)
 
+    print("\nStaged files:")
+    print(staged)
 
-def reflog_checkout() -> None:
-    """Checkout a commit from reflog safely."""
-    result = subprocess.run(
-        ["git", "reflog"], capture_output=True, text=True, check=True
-    )
-    entries = result.stdout.splitlines()
-    preview_cmd = "git show --stat --color=always {1}"
-    selected_list = run_fzf(
-        entries, prompt="Reflog> ", ansi=True, preview_cmd=preview_cmd
-    )
-    if not selected_list:
+    # Conventional commit types
+    commit_types = [
+        "feat: ✨ A new feature",
+        "fix: 🐛 A bug fix",
+        "docs: 📚 Documentation only changes",
+        "style: 💎 Code style changes (formatting, etc)",
+        "refactor: ♻️  Code refactoring",
+        "perf: ⚡ Performance improvements",
+        "test: 🧪 Adding or updating tests",
+        "build: 🏗️  Build system or dependencies",
+        "ci: 🤖 CI configuration changes",
+        "chore: 🔧 Other changes (maintenance)",
+        "revert: ⏮️  Revert a previous commit",
+        "---",
+        "custom: ✏️  Custom message (no prefix)",
+    ]
+
+    type_choice = fzf_with_preview(commit_types, "echo {}")
+    if not type_choice:
+        print("Commit cancelled")
         return
-    selected = selected_list[0]
-    commit_hash = selected.split()[0]
-    subprocess.run(["git", "checkout", commit_hash], check=True)
 
+    if type_choice == "---":
+        print("Commit cancelled")
+        return
+
+    # Extract the prefix
+    prefix = ""
+    if "custom:" not in type_choice:
+        prefix = type_choice.split(":")[0] + ": "
+
+    message = prompt_input(f"\nCommit message ({prefix}...):")
+    if not message:
+        print("Commit cancelled")
+        return
+
+    full_message = prefix + message
+
+    result = run_interactive(["git", "commit", "-m", full_message])
+    if result == 0:
+        print(f"✓ Commit created: {full_message}")
+
+def amend_commit() -> None:
+    """Amend the last commit."""
+    if not confirm("Amend the last commit?"):
+        return
+
+    choice = prompt_input("Keep message? [y]es, [n]ew message, [e]dit")
+
+    if choice == 'y':
+        run_interactive(["git", "commit", "--amend", "--no-edit"])
+    elif choice == 'e':
+        run_interactive(["git", "commit", "--amend"])
+    elif choice == 'n':
+        message = prompt_input("New commit message:")
+        if message:
+            run_interactive(["git", "commit", "--amend", "-m", message])
+
+    print("✓ Commit amended")
+
+# ------------------------------------------------------------
+# Remote Operations
+# ------------------------------------------------------------
+def push_changes() -> None:
+    """Push commits to remote."""
+    branch = run(["git", "branch", "--show-current"], check=False)
+    if not branch:
+        print("Not on a branch")
+        return
+
+    print(f"Current branch: {branch}")
+
+    # Check if upstream is set
+    upstream = run(["git", "rev-parse", "--abbrev-ref", f"{branch}@{{upstream}}"], check=False)
+
+    if not upstream:
+        if confirm(f"No upstream set. Push and set upstream for '{branch}'?"):
+            run_interactive(["git", "push", "-u", "origin", branch])
+    else:
+        if confirm(f"Push to {upstream}?"):
+            force = confirm("Force push? (WARNING: destructive)")
+            if force:
+                run_interactive(["git", "push", "--force-with-lease"])
+            else:
+                run_interactive(["git", "push"])
+
+def pull_changes() -> None:
+    """Pull changes from remote."""
+    branch = run(["git", "branch", "--show-current"], check=False)
+    if not branch:
+        print("Not on a branch")
+        return
+
+    rebase = confirm("Use rebase instead of merge?")
+
+    if rebase:
+        run_interactive(["git", "pull", "--rebase"])
+    else:
+        run_interactive(["git", "pull"])
+
+def fetch_changes() -> None:
+    """Fetch from all remotes."""
+    if confirm("Fetch from all remotes?"):
+        run_interactive(["git", "fetch", "--all", "--prune"])
+        print("✓ Fetch complete")
+
+# ------------------------------------------------------------
+# Stash Operations
+# ------------------------------------------------------------
+def manage_stashes() -> None:
+    """Browse and manage stashes."""
+    stashes = run(["git", "stash", "list"], check=False).splitlines()
+    if not stashes:
+        print("No stashes")
+        return
+
+    # Add action menu
+    stashes_with_menu = stashes + ["", "[n] New stash"]
+
+    preview = "echo {} | awk '{print $1}' | sed 's/:$//' | xargs -r git stash show -p --color"
+    selection = fzf_with_preview(stashes_with_menu, preview)
+
+    if not selection:
+        return
+
+    if selection.startswith("[n] New stash"):
+        create_stash()
+        return
+
+    # Extract stash index
+    match = re.match(r'stash@\{(\d+)\}', selection)
+    if not match:
+        return
+
+    stash_ref = f"stash@{{{match.group(1)}}}"
+
+    action = prompt_input(f"Action for {stash_ref}: [a]pply, [p]op, [d]rop, [s]how")
+
+    if action == 'a':
+        run_interactive(["git", "stash", "apply", stash_ref])
+    elif action == 'p':
+        run_interactive(["git", "stash", "pop", stash_ref])
+    elif action == 'd':
+        if confirm(f"Drop {stash_ref}?"):
+            run(["git", "stash", "drop", stash_ref])
+            print("✓ Stash dropped")
+    elif action == 's':
+        run_interactive(["git", "stash", "show", "-p", stash_ref])
+
+def create_stash() -> None:
+    """Create a new stash."""
+    message = prompt_input("Stash message (optional):")
+
+    include_untracked = confirm("Include untracked files?")
+
+    cmd = ["git", "stash", "push"]
+    if include_untracked:
+        cmd.append("-u")
+    if message:
+        cmd.extend(["-m", message])
+
+    result = run_interactive(cmd)
+    if result == 0:
+        print("✓ Stash created")
+
+# ------------------------------------------------------------
+# Branch Operations
+# ------------------------------------------------------------
+def manage_branches() -> None:
+    """Browse and manage branches."""
+    lines = run(["git", "branch", "--all", "--color=always"], check=False).splitlines()
+
+    # Add action menu
+    lines_with_menu = lines + ["", "[n] New branch", "[d] Delete branch"]
+
+    preview = (
+        "echo {} | "
+        "sed 's/\\x1b\\[[0-9;]*m//g' | "
+        "sed 's/^[* ]*//' | "
+        "sed 's|^remotes/origin/||' | "
+        "xargs -r git log --oneline --graph --color -20"
+    )
+
+    sel = fzf_with_preview(lines_with_menu, preview)
+    if not sel:
+        return
+
+    if sel.startswith("[n] New branch"):
+        create_branch()
+        return
+
+    if sel.startswith("[d] Delete branch"):
+        delete_branch()
+        return
+
+    # Clean up branch name
+    branch = re.sub(r'\x1b\[[0-9;]*m', '', sel).strip().lstrip("* ")
+    if branch.startswith("remotes/origin/"):
+        branch = branch.replace("remotes/origin/", "")
+
+    if confirm(f"Checkout '{branch}'?"):
+        run_interactive(["git", "checkout", branch])
+
+def create_branch() -> None:
+    """Create a new branch."""
+    name = prompt_input("New branch name:")
+    if not name:
+        return
+
+    checkout = confirm("Checkout after creation?")
+
+    if checkout:
+        run_interactive(["git", "checkout", "-b", name])
+    else:
+        run(["git", "branch", name])
+        print(f"✓ Branch '{name}' created")
+
+def delete_branch() -> None:
+    """Delete a branch."""
+    branches = run(["git", "branch", "--format=%(refname:short)"], check=False).splitlines()
+    if not branches:
+        print("No branches to delete")
+        return
+
+    selection = fzf_with_preview(branches, "git log --oneline --graph --color -20 {}")
+    if not selection:
+        return
+
+    if not confirm(f"Delete branch '{selection}'?"):
+        return
+
+    force = confirm("Force delete? (for unmerged branches)")
+
+    flag = "-D" if force else "-d"
+    result = run_interactive(["git", "branch", flag, selection])
+    if result == 0:
+        print(f"✓ Branch '{selection}' deleted")
+
+# ------------------------------------------------------------
+# Reset & Revert Operations
+# ------------------------------------------------------------
+def reset_operations() -> None:
+    """Perform reset operations."""
+    lines = run(["git", "log", "--oneline", "--color=always", "-20"], check=False).splitlines()
+
+    preview = "echo {} | awk '{print $1}' | xargs -r git show --color"
+    selection = fzf_with_preview(lines, preview)
+
+    if not selection:
+        return
+
+    commit = extract_hash(selection)
+    if not commit:
+        return
+
+    print(f"\nReset to {commit}:")
+    print("  [soft]  Keep changes staged")
+    print("  [mixed] Keep changes unstaged (default)")
+    print("  [hard]  DISCARD all changes (WARNING: destructive)")
+
+    mode = prompt_input("Reset mode:")
+
+    if mode not in ('soft', 'mixed', 'hard'):
+        print("Invalid mode")
+        return
+
+    if mode == 'hard' and not confirm("⚠️  HARD RESET will destroy uncommitted work. Continue?"):
+        return
+
+    run_interactive(["git", "reset", f"--{mode}", commit])
+    print(f"✓ Reset to {commit} ({mode})")
+
+def revert_commit() -> None:
+    """Revert a commit."""
+    lines = run(["git", "log", "--oneline", "--color=always", "-20"], check=False).splitlines()
+
+    preview = "echo {} | awk '{print $1}' | xargs -r git show --color"
+    selection = fzf_with_preview(lines, preview)
+
+    if not selection:
+        return
+
+    commit = extract_hash(selection)
+    if not commit:
+        return
+
+    if confirm(f"Create revert commit for {commit}?"):
+        run_interactive(["git", "revert", commit])
+
+# ------------------------------------------------------------
+# Dispatcher
+# ------------------------------------------------------------
+def dispatch_action(choice: str) -> None:
+    """Dispatch menu choice to appropriate function."""
+    if choice == "commit":
+        commit_changes()
+    elif choice == "amend commit":
+        amend_commit()
+    elif choice == "status  stage":
+        manage_status()
+    elif choice == "view commits":
+        view_commits()
+    elif choice == "reflog":
+        view_reflog()
+    elif choice == "blame":
+        view_file_blame()
+    elif choice == "manage branches":
+        manage_branches()
+    elif choice == "stash":
+        manage_stashes()
+    elif choice == "push":
+        push_changes()
+    elif choice == "pull":
+        pull_changes()
+    elif choice == "fetch":
+        fetch_changes()
+    elif choice == "reset":
+        reset_operations()
+    elif choice == "revert":
+        revert_commit()
 
 def main() -> None:
-    """Main CLI loop."""
-    if not os.path.isdir(".git"):
-        print("Not a git repository.")
-        sys.exit(1)
+    """Main entry point - display menu and dispatch to selected view."""
+    # Auto-stage all changes on launch
+    try:
+        run(["git", "add", "."], check=False)
+    except subprocess.CalledProcessError:
+        pass  # Ignore errors if not in a git repo
 
-    actions = [
-        "Commit files",
-        "View recent commits",
-        "Switch branch",
-        "Blame file",
-        "Reflog checkout",
-        "Exit",
+    menu = [
+        "📝 commit",
+        "📌 amend commit",
+        "---",
+        "📋 status & stage",
+        "🔍 view commits",
+        "🔄 reflog",
+        "👤 blame",
+        "---",
+        "🌿 manage branches",
+        "💾 stash",
+        "---",
+        "⬆️  push",
+        "⬇️  pull",
+        "🔄 fetch",
+        "---",
+        "↩️  reset",
+        "⏪ revert",
     ]
 
-    while True:
-        action_list = run_fzf(actions, prompt="Action> ")
-        if not action_list:
-            break
-        action = action_list[0]
+    try:
+        choice = fzf_with_preview(menu, "echo {}")
 
-        if action == "Commit files":
-            commit_files()
-        elif action == "View recent commits":
-            view_commits()
-        elif action == "Switch branch":
-            switch_branch()
-        elif action == "Blame file":
-            blame_file()
-        elif action == "Reflog checkout":
-            reflog_checkout()
-        elif action == "Exit":
-            break
+        if not choice or choice == "---":
+            return
 
+        # Strip emoji and whitespace
+        choice = re.sub(r'[^\w\s]', '', choice).strip()
+
+        dispatch_action(choice)
+    except KeyboardInterrupt:
+        print("\n\nExiting...")
+        sys.exit(0)
 
 if __name__ == "__main__":
     main()
