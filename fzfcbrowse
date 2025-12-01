@@ -1,5 +1,0 @@
-#!/bin/env bash
-git log --pretty=oneline --abbrev-commit \
-    | fzf \
-    | cut -d ' ' -f 1 \
-    | xargs git show --stat

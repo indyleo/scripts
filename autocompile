@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+
+# File to watch, default empty
+FILE="${1:-}"
+
+# Try in order: user-provided, config.def.h, blocks.def.h
+for f in "$FILE" "config.def.h" "blocks.def.h"; do
+    if [[ -n "$f" && -f "$f" ]]; then
+        FILE="$f"
+        break
+    fi
+done
+
+# Exit if no valid file found
+if [[ ! -f "$FILE" ]]; then
+    echo "Error: No valid file found (tried: ${1:-config.def.h}, config.def.h, blocks.def.h)."
+    exit 1
+fi
+
+# Determine the command based on file
+case "$FILE" in
+    config.def.h)
+        COMMAND="sudo cp config.def.h config.h && sudo make clean install"
+        ;;
+    blocks.def.h)
+        COMMAND="sudo cp blocks.def.h blocks.h && sudo make clean install"
+        ;;
+    *)
+        COMMAND="sudo make clean install"
+        ;;
+esac
+
+# Get initial modification time
+LAST_MODIFIED=$(stat -c %Y "$FILE")
+
+echo "Watching $FILE for changes..."
+
+# Main watch loop
+while true; do
+    sleep 1
+    CURRENT_MODIFIED=$(stat -c %Y "$FILE")
+    if [[ "$CURRENT_MODIFIED" != "$LAST_MODIFIED" ]]; then
+        echo "$(date '+%F %T') - $FILE modified. Running: $COMMAND"
+        LAST_MODIFIED="$CURRENT_MODIFIED"
+
+        if eval "$COMMAND"; then
+            echo "$(date '+%F %T') - Compilation successful."
+            clear
+            echo "Watching $FILE for changes..."
+        else
+            echo "$(date '+%F %T') - Compilation failed."
+        fi
+    fi
+done
+
