@@ -194,7 +194,6 @@ set_theme() {
         log "INFO" "Startpage theme set"
     fi
 
-    pgrep -x dwm && pkill dwm
     echo "$THEME" > "$THEME_FILE"
     echo -e "${GREEN}Theme switched to $THEME${RESET}"
     log "INFO" "Theme switched to $THEME"
