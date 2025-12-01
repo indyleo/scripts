@@ -195,6 +195,13 @@ set_theme() {
     fi
 
     echo "$THEME" > "$THEME_FILE"
+    if pgrep -x dwmblocks > /dev/null; then
+        pkill -x dwmblocks
+        dwmblocks & disown
+    fi
+    if ! pgrep -x dwmblocks > /dev/null; then
+        dwmblocks & disown
+    fi
     echo -e "${GREEN}Theme switched to $THEME${RESET}"
     log "INFO" "Theme switched to $THEME"
 }
