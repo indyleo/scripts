@@ -9,7 +9,8 @@ case "$choice" in
         slock
         ;;
     Logout)
-        pkill -KILL -u "$USER"
+        # Try graceful termination first
+        loginctl terminate-user "$USER" || pkill -15 xinit
         ;;
     Reboot)
         systemctl reboot

@@ -218,7 +218,7 @@ COMMAND="$1"
 shift || true
 
 case "$COMMAND" in
-    theme) set_theme "$1" ;;
+    theme) set_theme "${1:- }" ;;
     wallpaper)
         if [[ $# -eq 0 ]]; then show_help; exit 1; fi
         WP_CMD="$1"
