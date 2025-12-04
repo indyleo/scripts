@@ -176,7 +176,13 @@ function main() {
 
     # Use fzf to select a project
     local selected_project
-    selected_project=$(echo "$projects" | fzf --prompt="Select project: " --height=40% --reverse --preview='ls -la {}' --preview-window=right:50%)
+    if command -v eza &> /dev/null; then
+        selected_project=$(echo "$projects" | fzf --prompt="Select project: " --height=40% --reverse --preview='eza -alF --group-directories-first --color=always --icons {}' --preview-window=right:50%)
+    elif command -v lsd &> /dev/null; then
+        selected_project=$(echo "$projects" | fzf --prompt="Select project: " --height=40% --reverse --preview='lsd -alF --group-directories-first {}' --preview-window=right:50%)
+    else
+        selected_project=$(echo "$projects" | fzf --prompt="Select project: " --height=40% --reverse --preview='ls -alFh --group-directories-first --color=always {}' --preview-window=right:50%)
+    fi
 
     # Check if user cancelled selection
     if [[ -z "$selected_project" ]]; then
