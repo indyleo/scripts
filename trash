@@ -66,13 +66,13 @@ Path=$(realpath "$f")
 DeletionDate=$(timestamp)
 EOF
 
-        echo "🗑️  Moved to trash: $f"
+        echo " Moved to trash: $f"
     done
 }
 
 # --- List trashed files ---
 function list_trash() {
-    echo "🗑️  Trash contents:"
+    echo " Trash contents:"
     echo "----------------------------------------------"
     if ! ls "$FILES_DIR"/* &>/dev/null; then
         echo "(empty)"
@@ -108,7 +108,7 @@ function restore_trash() {
         orig_path=$(grep '^Path=' "$info" | cut -d= -f2-)
         mkdir -p "$(dirname "$orig_path")"
         mv "$file" "$orig_path" && rm "$info"
-        echo "✅ Restored: $orig_path"
+        echo " Restored: $orig_path"
     done
 }
 
@@ -117,22 +117,22 @@ function empty_trash() {
     local days="${1:-0}"
 
     if [[ "$days" -gt 0 ]]; then
-        echo "🧹 Removing items older than $days days..."
+        echo "󰃢 Removing items older than $days days..."
         find "$INFO_DIR" -type f -mtime +"$days" -exec basename {} .trashinfo \; | while read -r f; do
             rm -rf "$FILES_DIR/$f" "$INFO_DIR/$f.trashinfo"
         done
     else
-        printf "⚠️  Permanently delete all trashed files? [y/N]: "
+        printf "  Permanently delete all trashed files? [y/N]: "
         read -r ans
         [[ "$ans" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
         rm -rf "$FILES_DIR"/* "$INFO_DIR"/*
-        echo "✅ Trash emptied."
+        echo " Trash emptied."
     fi
 }
 
 # --- Show total trash size ---
 function trash_size() {
-    echo "📦 Trash size:"
+    echo "  Trash size:"
     du -sh "$FILES_DIR" 2>/dev/null || echo "(empty)"
 }
 
