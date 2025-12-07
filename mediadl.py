@@ -10,7 +10,9 @@ Features:
 - Config file support with XDG compliance
 - Dry-run mode for testing
 - Smart folder organization
-- Progress tracking and detailed logging
+- Real progress tracking and detailed logging
+- Automatic retry with exponential backoff
+- Download verification
 
 Usage:
   mediadl spotify URL [URL...] [-o DIR] [--format flac]
@@ -33,16 +35,17 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from random import uniform
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 # Constants
 PROG_NAME = "mediadl"
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -57,7 +60,6 @@ DEFAULT_ARCHIVE = DATA_DIR / "archive.txt"
 REQUIRED_TOOLS = {"spotify": "spotdl", "yt": "yt-dlp"}
 
 # Setup logging
-logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, datefmt=DATE_FORMAT)
 logger = logging.getLogger(PROG_NAME)
 
 
@@ -69,6 +71,10 @@ class ConfigError(RuntimeError):
     """Raised when configuration is invalid."""
 
 
+class DownloadError(RuntimeError):
+    """Raised when a download fails."""
+
+
 @dataclass
 class Config:
     """Application configuration."""
@@ -78,9 +84,15 @@ class Config:
     default_workers: int = 4
     spotify_format: str = "mp3"
     spotify_bitrate: str = "320k"
+    spotify_template: str = "%(album)s/%(title)s.%(ext)s"
     yt_default_quality: int = 1080
+    yt_template: str = "%(upload_date)s - %(title)s [%(id)s].%(ext)s"
     use_archive: bool = True
     archive_file: Path = field(default_factory=lambda: DEFAULT_ARCHIVE)
+    rate_limit_delay: float = 0.5
+    max_retries: int = 3
+    verify_downloads: bool = True
+    # pylint: disable=too-many-instance-attributes
 
     @classmethod
     def load(cls) -> Config:
@@ -129,33 +141,32 @@ class DownloadTask:
     options: Dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class DownloadResult:
+    """Result of a download operation."""
+
+    success: bool
+    url: str
+    task_type: str
+    output_dir: Path
+    skipped: bool = False
+    error: Optional[str] = None
+    files_created: int = 0
+    retries: int = 0
+
+
 class MediaDownloader:
     """Unified media downloader with parallel processing."""
+    # pylint: disable=too-many-instance-attributes
 
-    def __init__(self, config: Config, dry_run: bool = False):
+    def __init__(self, config: Config, dry_run: bool = False, verbose: bool = False):
         self.config = config
         self.dry_run = dry_run
+        self.verbose = verbose
         self.archive: Set[str] = set()
         self._load_archive()
-        self._progress_lock = threading.Lock()
-
-    def _print_progress(self, message: str, end: str = "\n", update: bool = False):
-        """Print progress message with timestamp and proper formatting."""
-        timestamp = datetime.now().strftime(DATE_FORMAT)
-        formatted = f"{timestamp} [INFO] {PROG_NAME}: {message}"
-
-        with self._progress_lock:
-            if update:
-                # Move cursor to beginning of line and clear it
-                sys.stdout.write("\r\033[K")
-                sys.stdout.write(formatted)
-                sys.stdout.flush()
-            else:
-                if end == "\n":
-                    print(formatted)
-                else:
-                    sys.stdout.write(formatted)
-                    sys.stdout.flush()
+        self._archive_lock = threading.Lock()
+        self._print_lock = threading.Lock()
 
     def _load_archive(self) -> None:
         """Load download archive to track completed downloads."""
@@ -171,17 +182,19 @@ class MediaDownloader:
                 logger.warning("Failed to load archive: %s", exc)
 
     def _save_to_archive(self, identifier: str) -> None:
-        """Save an identifier to the archive."""
+        """Save an identifier to the archive (only called on successful downloads)."""
         if not self.config.use_archive:
             return
-        self.archive.add(identifier)
-        archive_path = self.config.archive_file
-        archive_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with open(archive_path, "a", encoding="utf-8") as f:
-                f.write(f"{identifier}\n")
-        except OSError as exc:
-            logger.warning("Failed to save to archive: %s", exc)
+
+        with self._archive_lock:
+            self.archive.add(identifier)
+            archive_path = self.config.archive_file
+            archive_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with open(archive_path, "a", encoding="utf-8") as f:
+                    f.write(f"{identifier}\n")
+            except OSError as exc:
+                logger.warning("Failed to save to archive: %s", exc)
 
     @staticmethod
     def _ensure_tool(name: str) -> None:
@@ -203,12 +216,10 @@ class MediaDownloader:
         """Extract a unique identifier from URL for archiving."""
         try:
             if task_type == "spotify":
-                # Extract Spotify ID from URL
                 match = re.search(r"/(track|album|playlist)/([a-zA-Z0-9]+)", url)
                 if match:
                     return f"spotify:{match.group(2)}"
             if task_type == "yt":
-                # Extract video ID
                 parsed = urlparse(url)
                 if "youtube.com" in parsed.netloc:
                     match = re.search(r"[?&]v=([^&]+)", url)
@@ -218,16 +229,17 @@ class MediaDownloader:
                     video_id = parsed.path.strip("/").split("/")[0]
                     if video_id:
                         return f"youtube:{video_id}"
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            logger.debug("Failed to extract identifier from %s: %s", url, exc)
+        except Exception:  # pylint: disable=broad-except
+            logger.debug("Failed to extract identifier from %s", url)
         return None
 
     def _is_archived(self, url: str, task_type: str) -> bool:
         """Check if URL has already been downloaded."""
         if not self.config.use_archive:
             return False
-        identifier = self._extract_identifier(url, task_type)
-        return identifier in self.archive if identifier else False
+        with self._archive_lock:
+            identifier = self._extract_identifier(url, task_type)
+            return identifier in self.archive if identifier else False
 
     def _prepare_output_dir(self, path: Path) -> Path:
         """Prepare output directory."""
@@ -236,114 +248,110 @@ class MediaDownloader:
             path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def _get_spotify_metadata(self, url: str) -> Dict[str, str]:
-        """Extract metadata from Spotify URL."""
-        try:
-            cmd = [
-                "spotdl",
-                "meta",
-                "--format",
-                "json",
-                url,
-            ]
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=30, check=False
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                data = json.loads(result.stdout)
-                # Handle both single track and playlist/album
-                if isinstance(data, list) and data:
-                    first = data[0]
-                    return {
-                        "name": first.get("name", "Unknown"),
-                        "artist": first.get("artist", "Unknown Artist"),
-                        "type": first.get("type", "track"),
-                    }
-                if isinstance(data, dict):
-                    return {
-                        "name": data.get("name", "Unknown"),
-                        "artist": data.get("artist", "Unknown Artist"),
-                        "type": data.get("type", "track"),
-                    }
-        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as exc:
-            logger.debug("Failed to get Spotify metadata: %s", exc)
-        return {"name": "Unknown", "artist": "Unknown Artist", "type": "track"}
+    def _verify_download(self, output_dir: Path, min_files: int = 1) -> Tuple[bool, int]:
+        """Verify that files were actually created."""
+        if not self.config.verify_downloads:
+            return True, 0
 
-    def _get_yt_metadata(self, url: str) -> Dict[str, str]:
-        """Extract metadata from YouTube URL."""
         try:
-            cmd = [
-                "yt-dlp",
-                "--no-warnings",
-                "--skip-download",
-                "--print",
-                "%(title)s|||%(channel)s|||%(uploader)s",
-                url,
-            ]
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=30, check=False
+            files = [f for f in output_dir.rglob("*") if f.is_file()]
+            file_count = len(files)
+            return file_count >= min_files, file_count
+        except OSError:
+            return False, 0
+
+    def _print_status(self, message: str) -> None:
+        """Thread-safe status printing."""
+        with self._print_lock:
+            print(message)
+
+    def _rate_limit(self) -> None:
+        """Apply rate limiting between downloads."""
+        if self.config.rate_limit_delay > 0:
+            delay = uniform(
+                self.config.rate_limit_delay,
+                self.config.rate_limit_delay * 1.5
             )
-            if result.returncode == 0 and result.stdout.strip():
-                parts = result.stdout.strip().split("|||")
-                title = parts[0] if parts else "Unknown"
-                channel_name = (
-                    parts[1]
-                    if len(parts) > 1 and parts[1]
-                    else (parts[2] if len(parts) > 2 else "Unknown Channel")
+            time.sleep(delay)
+
+    def _run_with_retry(
+        self,
+        cmd: List[str],
+        task_name: str,
+        max_retries: Optional[int] = None
+    ) -> Tuple[bool, Optional[str], int]:
+        """Run a command with exponential backoff retry logic."""
+        max_retries = max_retries or self.config.max_retries
+
+        for attempt in range(max_retries):
+            try:
+                if self.verbose:
+                    logger.debug("Running: %s", " ".join(cmd))
+
+                subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    timeout=600  # 10 minute timeout
                 )
-                return {
-                    "title": title,
-                    "channel": self._sanitize_filename(channel_name),
-                }
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            logger.debug("Failed to get YouTube metadata: %s", exc)
+                return True, None, attempt
 
-        # Fallback
-        parsed = urlparse(url)
-        return {
-            "title": "Unknown",
-            "channel": self._sanitize_filename(parsed.netloc or "unknown"),
-        }
+            except subprocess.CalledProcessError as exc:
+                error_msg = f"Exit code {exc.returncode}"
+                if exc.stderr:
+                    # Get last 200 chars of stderr for context
+                    stderr_snippet = exc.stderr.strip()[-200:]
+                    error_msg += f": {stderr_snippet}"
 
-    def _get_channel_name(self, url: str) -> str:
-        """Extract channel name from YouTube URL."""
-        metadata = self._get_yt_metadata(url)
-        return metadata["channel"]
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt  # Exponential backoff
+                    logger.warning(
+                        "%s failed (attempt %d/%d), retrying in %ds: %s",
+                        task_name, attempt + 1, max_retries, wait_time, error_msg
+                    )
+                    time.sleep(wait_time)
+                else:
+                    return False, error_msg, attempt + 1
 
-    def _simulate_progress(self, name: str, duration: float = 2.0):
-        """Simulate a progress bar for downloads."""
-        steps = 20
-        sleep_time = duration / steps
+            except subprocess.TimeoutExpired:
+                error_msg = "Download timed out after 10 minutes"
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    logger.warning(
+                        "%s timed out (attempt %d/%d), retrying in %ds",
+                        task_name, attempt + 1, max_retries, wait_time
+                    )
+                    time.sleep(wait_time)
+                else:
+                    return False, error_msg, attempt + 1
 
-        for i in range(steps + 1):
-            percent = int((i / steps) * 100)
-            bar_filled = "█" * i
-            bar_empty = "░" * (steps - i)
-            progress_msg = f"  - [ ] {name} [{bar_filled}{bar_empty}] {percent}%"
-            self._print_progress(progress_msg, update=True)
-            if i < steps:
-                time.sleep(sleep_time)
+            except OSError as exc:
+                return False, str(exc), attempt + 1
 
-    def download_spotify(self, task: DownloadTask) -> bool:
+        return False, "Max retries exceeded", max_retries
+
+    def download_spotify(self, task: DownloadTask) -> DownloadResult:
         """Download from Spotify using spotdl."""
+        # pylint: disable=too-many-locals
         self._ensure_tool(REQUIRED_TOOLS["spotify"])
 
         if self._is_archived(task.url, "spotify"):
-            logger.info("Skipping archived Spotify URL: %s", task.url)
-            return True
-
-        # Get metadata for display
-        metadata = self._get_spotify_metadata(task.url)
-        name = metadata["name"]
-        artist = metadata["artist"]
+            logger.info("⏭️  Skipping archived: %s", task.url)
+            return DownloadResult(
+                success=True,
+                url=task.url,
+                task_type="spotify",
+                output_dir=task.output_dir,
+                skipped=True
+            )
 
         output_dir = self._prepare_output_dir(task.output_dir)
-
         audio_format = task.options.get("format", self.config.spotify_format)
         bitrate = task.options.get("bitrate", self.config.spotify_bitrate)
 
-        # Use album/playlist folder structure
-        template = str(output_dir / "%(album)s" / "%(title)s.%(ext)s")
+        # Use configurable template
+        template = str(output_dir / self.config.spotify_template)
 
         cmd = [
             "spotdl",
@@ -357,97 +365,89 @@ class MediaDownloader:
             task.url,
         ]
 
-        # Display progress indicator
-        metadata_line = f"{artist}"
-        initial_msg = f"  - [ ] {name}, {metadata_line}"
-        self._print_progress(initial_msg)
+        self._print_status(f"⬇️  Downloading: {task.url}")
 
         if self.dry_run:
             logger.info("[DRY RUN] %s", " ".join(cmd))
-            final_msg = f"  - [X] {name}, {metadata_line} (dry run)"
-            self._print_progress(final_msg, update=True)
-            print()  # New line after update
-            return True
+            self._print_status(f"✅  [DRY RUN] Would download: {task.url}")
+            return DownloadResult(
+                success=True,
+                url=task.url,
+                task_type="spotify",
+                output_dir=output_dir
+            )
 
-        # Start progress bar in background
-        progress_thread = threading.Thread(
-            target=self._simulate_progress, args=(name,), daemon=True
+        # Apply rate limiting
+        self._rate_limit()
+
+        # Run with retry logic
+        success, error, retries = self._run_with_retry(cmd, "Spotify download")
+
+        if success:
+            # Verify download
+            verified, file_count = self._verify_download(output_dir)
+
+            if not verified:
+                error = "Download verification failed - no files created"
+                success = False
+            else:
+                identifier = self._extract_identifier(task.url, "spotify")
+                if identifier:
+                    self._save_to_archive(identifier)
+
+                self._print_status(f"✅  Downloaded: {task.url} ({file_count} files)")
+                return DownloadResult(
+                    success=True,
+                    url=task.url,
+                    task_type="spotify",
+                    output_dir=output_dir,
+                    files_created=file_count,
+                    retries=retries
+                )
+
+        self._print_status(f"❌  Failed: {task.url} - {error}")
+        return DownloadResult(
+            success=False,
+            url=task.url,
+            task_type="spotify",
+            output_dir=output_dir,
+            error=error,
+            retries=retries
         )
-        progress_thread.start()
 
-        try:
-            # Suppress all output for clean logs
-            subprocess.run(
-                cmd,
-                check=True,
-                text=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-
-            # Wait for progress to complete
-            progress_thread.join()
-
-            identifier = self._extract_identifier(task.url, "spotify")
-            if identifier:
-                self._save_to_archive(identifier)
-
-            final_msg = f"  - [X] {name}, {metadata_line}"
-            self._print_progress(final_msg, update=True)
-            print()  # New line after completion
-            return True
-        except subprocess.CalledProcessError as exc:
-            progress_thread.join()
-            error_msg = (
-                f"  - [✗] {name}, {metadata_line} (failed: exit code {exc.returncode})"
-            )
-            self._print_progress(error_msg, update=True)
-            print()
-            return False
-        except OSError as exc:
-            progress_thread.join()
-            error_msg = f"  - [✗] {name}, {metadata_line} (failed: {exc})"
-            self._print_progress(error_msg, update=True)
-            print()
-            return False
-
-    def download_yt(self, task: DownloadTask) -> bool:
+    def download_yt(self, task: DownloadTask) -> DownloadResult:
         """Download from YouTube/other sites using yt-dlp."""
+        # pylint: disable=too-many-locals,too-many-branches
         self._ensure_tool(REQUIRED_TOOLS["yt"])
 
         if self._is_archived(task.url, "yt"):
-            logger.info("Skipping archived YouTube URL: %s", task.url)
-            return True
-
-        # Get metadata for display
-        metadata = self._get_yt_metadata(task.url)
-        title = metadata["title"]
-        channel = metadata["channel"]
+            logger.info("⏭️  Skipping archived: %s", task.url)
+            return DownloadResult(
+                success=True,
+                url=task.url,
+                task_type="yt",
+                output_dir=task.output_dir,
+                skipped=True
+            )
 
         output_dir = self._prepare_output_dir(task.output_dir)
 
         audio_only = task.options.get("audio_only", False)
-        video_quality = task.options.get(
-            "video_quality", self.config.yt_default_quality
-        )
+        video_quality = task.options.get("video_quality", self.config.yt_default_quality)
         playlist = task.options.get("playlist", False)
         yt_format = task.options.get("format")
         organize = task.options.get("organize", True)
 
-        # Determine format type for display
-        if audio_only:
-            format_type = "audio"
-        elif yt_format:
-            format_type = "custom"
-        else:
-            format_type = f"video (≤{video_quality}p)"
-
-        # Organize by channel/uploader if enabled
+        # Organize by channel if enabled and not a playlist
         if organize and not playlist:
-            output_dir = output_dir / channel / datetime.now().strftime("%Y-%m-%d")
-            output_dir = self._prepare_output_dir(output_dir)
-
-        template = str(output_dir / "%(upload_date)s - %(title)s [%(id)s].%(ext)s")
+            # Let yt-dlp handle channel organization via template
+            template = str(
+                output_dir / "%(uploader)s" /
+                datetime.now().strftime("%Y-%m-%d") /
+                self.config.yt_template
+            )
+        else:
+            template = str(output_dir / self.config.yt_template)
 
         cmd = [
             "yt-dlp",
@@ -457,10 +457,11 @@ class MediaDownloader:
             "10",
             "--fragment-retries",
             "10",
-            "--no-warnings",
-            "--quiet",
-            "--progress",
         ]
+
+        # Add verbosity control
+        if not self.verbose:
+            cmd.extend(["--no-warnings", "--quiet", "--progress"])
 
         if audio_only:
             cmd.extend(["-x", "--audio-format", "mp3", "--audio-quality", "0"])
@@ -478,70 +479,72 @@ class MediaDownloader:
 
         cmd.extend(["-o", template, task.url])
 
-        # Display progress indicator
-        metadata_line = f"{format_type}, {channel}"
-        initial_msg = f"  - [ ] {title}, {metadata_line}"
-        self._print_progress(initial_msg)
+        self._print_status(f"⬇️  Downloading: {task.url}")
 
         if self.dry_run:
             logger.info("[DRY RUN] %s", " ".join(cmd))
-            final_msg = f"  - [X] {title}, {metadata_line} (dry run)"
-            self._print_progress(final_msg, update=True)
-            print()  # New line after update
-            return True
+            self._print_status(f"✅  [DRY RUN] Would download: {task.url}")
+            return DownloadResult(
+                success=True,
+                url=task.url,
+                task_type="yt",
+                output_dir=output_dir
+            )
 
-        # Start progress bar in background
-        progress_thread = threading.Thread(
-            target=self._simulate_progress,
-            args=(title, 3.0),  # Slightly longer for videos
-            daemon=True,
+        # Apply rate limiting
+        self._rate_limit()
+
+        # Run with retry logic
+        success, error, retries = self._run_with_retry(cmd, "YouTube download")
+
+        if success:
+            # Verify download
+            verified, file_count = self._verify_download(output_dir)
+
+            if not verified:
+                error = "Download verification failed - no files created"
+                success = False
+            else:
+                identifier = self._extract_identifier(task.url, "yt")
+                if identifier:
+                    self._save_to_archive(identifier)
+
+                self._print_status(f"✅  Downloaded: {task.url} ({file_count} files)")
+                return DownloadResult(
+                    success=True,
+                    url=task.url,
+                    task_type="yt",
+                    output_dir=output_dir,
+                    files_created=file_count,
+                    retries=retries
+                )
+
+        self._print_status(f"❌  Failed: {task.url} - {error}")
+        return DownloadResult(
+            success=False,
+            url=task.url,
+            task_type="yt",
+            output_dir=output_dir,
+            error=error,
+            retries=retries
         )
-        progress_thread.start()
-
-        try:
-            # Suppress all output including warnings
-            subprocess.run(
-                cmd,
-                check=True,
-                text=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-
-            # Wait for progress to complete
-            progress_thread.join()
-
-            identifier = self._extract_identifier(task.url, "yt")
-            if identifier:
-                self._save_to_archive(identifier)
-
-            final_msg = f"  - [X] {title}, {metadata_line}"
-            self._print_progress(final_msg, update=True)
-            print()  # New line after completion
-            return True
-        except subprocess.CalledProcessError as exc:
-            progress_thread.join()
-            error_msg = (
-                f"  - [✗] {title}, {metadata_line} (failed: exit code {exc.returncode})"
-            )
-            self._print_progress(error_msg, update=True)
-            print()
-            return False
-        except OSError as exc:
-            progress_thread.join()
-            error_msg = f"  - [✗] {title}, {metadata_line} (failed: {exc})"
-            self._print_progress(error_msg, update=True)
-            print()
-            return False
 
     def process_batch(
         self, tasks: List[DownloadTask], workers: int = 4
-    ) -> Dict[str, int]:
+    ) -> Dict[str, Any]:
         """Process multiple download tasks in parallel."""
-        results = {"success": 0, "failed": 0, "skipped": 0}
+        results = {
+            "success": 0,
+            "failed": 0,
+            "skipped": 0,
+            "total_files": 0,
+            "total_retries": 0,
+            "errors": []
+        }
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = []
+            futures = {}
+
             for task in tasks:
                 if task.task_type == "spotify":
                     future = executor.submit(self.download_spotify, task)
@@ -551,18 +554,34 @@ class MediaDownloader:
                     logger.error("Unknown task type: %s", task.task_type)
                     results["failed"] += 1
                     continue
-                futures.append(future)
+                futures[future] = task
 
-            for future in futures:
+            for future in as_completed(futures):
                 try:
-                    success = future.result()
-                    if success:
+                    result = future.result()
+
+                    if result.skipped:
+                        results["skipped"] += 1
+                    elif result.success:
                         results["success"] += 1
+                        results["total_files"] += result.files_created
+                        results["total_retries"] += result.retries
                     else:
                         results["failed"] += 1
-                except Exception as exc:  # pylint: disable=broad-exception-caught
+                        if result.error:
+                            results["errors"].append({
+                                "url": result.url,
+                                "error": result.error
+                            })
+
+                except Exception as exc:  # pylint: disable=broad-except
+                    task = futures[future]
                     logger.error("Task failed with exception: %s", exc)
                     results["failed"] += 1
+                    results["errors"].append({
+                        "url": task.url,
+                        "error": str(exc)
+                    })
 
         return results
 
@@ -578,6 +597,8 @@ def parse_batch_file(filepath: Path) -> List[str]:
                     urls.append(line)
     except OSError as exc:
         raise ConfigError(f"Failed to read batch file {filepath}: {exc}") from exc
+
+    logger.info("Loaded %d URLs from batch file", len(urls))
     return urls
 
 
@@ -589,6 +610,10 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"{PROG_NAME} {VERSION}")
+    parser.add_argument(
+        "-v", "--verbose", action="store_true",
+        help="Enable verbose output for debugging"
+    )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -667,24 +692,32 @@ def handle_config_command(args: argparse.Namespace) -> int:
         key, value = args.set
         if not hasattr(config, key):
             logger.error("Unknown config key: %s", key)
+            logger.info("Available keys: %s", ", ".join(config.__dict__.keys()))
             return 1
+
         # Type conversion
         current_value = getattr(config, key)
-        if isinstance(current_value, Path):
-            setattr(config, key, Path(value))
-        elif isinstance(current_value, int):
-            setattr(config, key, int(value))
-        elif isinstance(current_value, bool):
-            setattr(config, key, value.lower() in ("true", "yes", "1"))
-        else:
-            setattr(config, key, value)
-        config.save()
-        print(f"Set {key} = {value}")
-        return 0
+        try:
+            if isinstance(current_value, Path):
+                setattr(config, key, Path(value))
+            elif isinstance(current_value, int):
+                setattr(config, key, int(value))
+            elif isinstance(current_value, float):
+                setattr(config, key, float(value))
+            elif isinstance(current_value, bool):
+                setattr(config, key, value.lower() in ("true", "yes", "1"))
+            else:
+                setattr(config, key, value)
+            config.save()
+            print(f"✅  Set {key} = {value}")
+            return 0
+        except ValueError as exc:
+            logger.error("Invalid value for %s: %s", key, exc)
+            return 1
 
     if args.reset:
         CONFIG_FILE.unlink(missing_ok=True)
-        print("Configuration reset to defaults")
+        print("✅  Configuration reset to defaults")
         return 0
 
     logger.error("No config action specified. Use --show, --set, or --reset")
@@ -695,6 +728,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     """Main entry point."""
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # Configure logging based on verbosity
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(level=log_level, format=LOG_FORMAT, datefmt=DATE_FORMAT)
 
     if args.command == "config":
         return handle_config_command(args)
@@ -734,7 +771,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         # Create downloader
         dry_run = getattr(args, "dry_run", False)
-        downloader = MediaDownloader(config, dry_run=dry_run)
+        downloader = MediaDownloader(config, dry_run=dry_run, verbose=args.verbose)
 
         # Build tasks
         tasks = []
@@ -765,15 +802,34 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         # Execute downloads
         logger.info("Starting %d download(s) with %d worker(s)", len(tasks), workers)
+        print(f"\n{'='*60}")
+        print(f"Starting {len(tasks)} download(s) with {workers} worker(s)")
+        print(f"Output: {output_dir}")
+        print(f"{'='*60}\n")
+
         results = downloader.process_batch(tasks, workers=workers)
 
         # Summary
-        logger.info(
-            "Complete: %d succeeded, %d failed, %d skipped",
-            results["success"],
-            results["failed"],
-            results["skipped"],
-        )
+        print(f"\n{'='*60}")
+        print("DOWNLOAD SUMMARY")
+        print(f"{'='*60}")
+        print(f"✅  Successful:  {results['success']}")
+        print(f"❌  Failed:      {results['failed']}")
+        print(f"⏭️  Skipped:     {results['skipped']}")
+        print(f"📁  Files:       {results['total_files']}")
+        print(f"🔄  Retries:     {results['total_retries']}")
+
+        if results["errors"]:
+            print(f"\n{'='*60}")
+            print("ERRORS")
+            print(f"{'='*60}")
+            for err in results["errors"][:10]:  # Show first 10 errors
+                print(f"❌  {err['url']}")
+                print(f"    {err['error']}")
+            if len(results["errors"]) > 10:
+                print(f"\n... and {len(results['errors']) - 10} more errors")
+
+        print(f"{'='*60}\n")
 
         return 0 if results["failed"] == 0 else 1
 
@@ -784,9 +840,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.error("Configuration error: %s", exc)
         return 3
     except KeyboardInterrupt:
-        logger.warning("Interrupted by user")
+        logger.warning("\n⚠️  Interrupted by user")
         return 130
-    except Exception as exc:  # pylint: disable=broad-exception-caught
+    except Exception as exc:
         logger.exception("Unhandled error: %s", exc)
         return 1
 
