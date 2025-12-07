@@ -10,7 +10,7 @@ set -euo pipefail
 # ============================================================================
 
 readonly SCRIPT_NAME="mediactl"
-readonly VERSION="1.2.0"  # updated version
+readonly VERSION="1.2.1"  # updated version with fixes
 
 readonly BROWSER_PLAYERS=(
     "firefox"
@@ -31,6 +31,7 @@ readonly SONG_PLAYERS=(
 
 readonly CACHE_DIR="${XDG_RUNTIME_DIR:-/tmp}/mediactl"
 readonly PLAYER_LIST_CACHE="$CACHE_DIR/players"
+readonly CACHE_LOCKFILE="$CACHE_DIR/players.lock"
 readonly CACHE_LIFETIME=1  # seconds
 
 readonly ICON_BROWSER="🌐"
@@ -39,6 +40,9 @@ readonly ICON_PLAYING=" "
 readonly ICON_PAUSED=" "
 readonly ICON_STOPPED=" "
 readonly ICON_IDLE=" "
+
+# Command timeout (prevent hanging on unresponsive players)
+readonly PLAYERCTL_TIMEOUT=2
 
 SOURCE=""  # global source filter
 
@@ -54,6 +58,9 @@ function die() {
 function check_dependencies() {
     if ! command -v playerctl &>/dev/null; then
         die "playerctl not found. Install it to use $SCRIPT_NAME"
+    fi
+    if ! command -v flock &>/dev/null; then
+        die "flock not found. Install util-linux to use $SCRIPT_NAME"
     fi
 }
 
@@ -78,14 +85,37 @@ function is_cache_fresh() {
 # ============================================================================
 
 function get_all_players() {
+    # Check if cache is fresh
     if is_cache_fresh "$PLAYER_LIST_CACHE"; then
-        cat "$PLAYER_LIST_CACHE"
+        cat "$PLAYER_LIST_CACHE" 2>/dev/null || echo ""
         return 0
     fi
 
-    local players
-    players=$(playerctl -l 2>/dev/null || echo "")
-    echo "$players" | tee "$PLAYER_LIST_CACHE"
+    # Use file locking to prevent concurrent writes
+    (
+        # Try to acquire lock with 2 second timeout
+        if ! flock -w 2 200; then
+            # Lock acquisition failed, try reading existing cache
+            cat "$PLAYER_LIST_CACHE" 2>/dev/null || echo ""
+            return 1
+        fi
+
+        # Double-check cache freshness after acquiring lock
+        if is_cache_fresh "$PLAYER_LIST_CACHE"; then
+            cat "$PLAYER_LIST_CACHE"
+            return 0
+        fi
+
+        # Fetch players with timeout
+        local players
+        if players=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -l 2>/dev/null); then
+            echo "$players" | tee "$PLAYER_LIST_CACHE"
+        else
+            # If playerctl fails, return empty but don't cache
+            echo ""
+            return 1
+        fi
+    ) 200>"$CACHE_LOCKFILE"
 }
 
 function is_browser_player() {
@@ -104,6 +134,11 @@ function is_song_player() {
     return 1
 }
 
+function get_player_status_safe() {
+    local player="$1"
+    timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" status 2>/dev/null || echo "Stopped"
+}
+
 function get_browser_players() {
     local all_players
     all_players=$(get_all_players)
@@ -112,7 +147,7 @@ function get_browser_players() {
         [[ -z "$player" ]] && continue
         if is_browser_player "$player"; then
             local status
-            status=$(playerctl -p "$player" status 2>/dev/null || echo "Stopped")
+            status=$(get_player_status_safe "$player")
             echo "$player|$status"
         fi
     done <<< "$all_players"
@@ -126,7 +161,7 @@ function get_song_players() {
         [[ -z "$player" ]] && continue
         if is_song_player "$player"; then
             local status
-            status=$(playerctl -p "$player" status 2>/dev/null || echo "Stopped")
+            status=$(get_player_status_safe "$player")
             echo "$player|$status"
         fi
     done <<< "$all_players"
@@ -175,11 +210,13 @@ function get_player_metadata() {
     }
 
     local status title artist album art_url
-    status=$(playerctl -p "$player" status 2>/dev/null || echo "Stopped")
-    title=$(playerctl -p "$player" metadata title 2>/dev/null || echo "Unknown")
-    artist=$(playerctl -p "$player" metadata artist 2>/dev/null || echo "Unknown")
-    album=$(playerctl -p "$player" metadata album 2>/dev/null || echo "")
-    art_url=$(playerctl -p "$player" metadata mpris:artUrl 2>/dev/null || echo "")
+
+    # Use timeout for all playerctl commands to prevent hanging
+    status=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" status 2>/dev/null || echo "Stopped")
+    title=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" metadata title 2>/dev/null || echo "Unknown")
+    artist=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" metadata artist 2>/dev/null || echo "Unknown")
+    album=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" metadata album 2>/dev/null || echo "")
+    art_url=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" metadata mpris:artUrl 2>/dev/null || echo "")
 
     echo "$status|$title|$artist|$album|$art_url"
 }
@@ -249,15 +286,15 @@ function send_control() {
     active_info=$(get_active_player "$SOURCE")
     IFS='|' read -r type player status <<< "$active_info"
 
-    [[ "$player" == "idle" ]] && {
-        echo "No active player for source '$SOURCE'" >&2
+    [[ "$type" == "idle" ]] && {
+        echo "No active player for source '${SOURCE:-auto}'" >&2
         return 1
     }
 
-    playerctl -p "$player" "$command" 2>/dev/null || {
-        echo "Failed to send $command to $player" >&2
+    if ! timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" "$command" 2>/dev/null; then
+        echo "Failed to send $command to $player (timeout or error)" >&2
         return 1
-    }
+    fi
 }
 
 # ============================================================================
@@ -265,6 +302,7 @@ function send_control() {
 # ============================================================================
 
 function cmd_status() { get_state "$SOURCE"; }
+
 function cmd_title() {
     local cutpoint="${1:-50}"
     local state title
@@ -272,6 +310,7 @@ function cmd_title() {
     IFS='|' read -r _ _ _ title _ _ _ <<< "$state"
     format_title "$title" "$cutpoint"
 }
+
 function cmd_state() {
     local state type status
     state=$(get_state "$SOURCE")
@@ -279,6 +318,7 @@ function cmd_state() {
     [[ "$type" == "idle" ]] || [[ "$status" != "Playing" ]] && { echo "$ICON_IDLE"; return; }
     get_status_icon "$status"
 }
+
 function cmd_state_title() {
     local cutpoint="${1:-50}"
     local state type status title icon
@@ -289,12 +329,14 @@ function cmd_state_title() {
     title=$(format_title "$title" "$cutpoint")
     echo "$icon $title"
 }
+
 function cmd_get_active_player() {
     local active_info type
     active_info=$(get_active_player "$SOURCE")
     IFS='|' read -r type _ _ <<< "$active_info"
     echo "$type"
 }
+
 function cmd_play_pause() { send_control play-pause; }
 function cmd_next()       { send_control next; }
 function cmd_previous()   { send_control previous; }
@@ -329,6 +371,12 @@ EXAMPLES:
     $SCRIPT_NAME --source browser play-pause
     $SCRIPT_NAME -s song next
     $SCRIPT_NAME state-title 30
+
+IMPROVEMENTS IN v1.2.1:
+    - Fixed race condition in cache writes (file locking)
+    - Added timeouts to prevent hanging on unresponsive players
+    - Better error handling for concurrent access
+    - Improved cache invalidation logic
 
 EOF
 }
@@ -369,4 +417,3 @@ function main() {
 }
 
 main "$@"
-

@@ -1,13 +1,71 @@
 #!/usr/bin/env bash
+# restatus - Signal dispatcher for status bar updates
+# Sends signals to dwmblocks for granular module refreshing
 
 set -euo pipefail
 
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+readonly SCRIPT_NAME="restatus"
+readonly VERSION="1.1.0"
 readonly STATUS_PROCESS="dwmblocks"
 readonly MAX_RT_OFFSET=32  # SIGRTMIN to SIGRTMIN+32 are typically available
 
+# Signal validation cache (avoid repeated process checks)
+readonly CACHE_DIR="${XDG_RUNTIME_DIR:-/tmp}/restatus"
+readonly PID_CACHE="$CACHE_DIR/dwmblocks.pid"
+readonly CACHE_LIFETIME=5  # seconds
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+
+function init_cache_dir() {
+    mkdir -p "$CACHE_DIR" 2>/dev/null || true
+}
+
+function is_cache_fresh() {
+    [[ -f "$PID_CACHE" ]] || return 1
+
+    local now mod_time age
+    now=$(date +%s)
+    mod_time=$(stat -c %Y "$PID_CACHE" 2>/dev/null || echo 0)
+    age=$((now - mod_time))
+
+    [[ $age -lt $CACHE_LIFETIME ]]
+}
+
+function get_process_pid() {
+    # Try cache first
+    if is_cache_fresh; then
+        local cached_pid
+        cached_pid=$(cat "$PID_CACHE" 2>/dev/null || echo "")
+
+        # Verify PID is still valid
+        if [[ -n "$cached_pid" ]] && kill -0 "$cached_pid" 2>/dev/null; then
+            echo "$cached_pid"
+            return 0
+        fi
+    fi
+
+    # Find process and cache PID
+    local pid
+    pid=$(pgrep -x "$STATUS_PROCESS" 2>/dev/null | head -1)
+
+    if [[ -n "$pid" ]]; then
+        echo "$pid" > "$PID_CACHE"
+        echo "$pid"
+        return 0
+    fi
+
+    return 1
+}
+
 function show_usage() {
     cat <<EOF
-Usage: $(basename "$0") <type> <value>
+Usage: $SCRIPT_NAME <type> <value>
 
 Send signals to $STATUS_PROCESS for status bar updates.
 
@@ -21,84 +79,35 @@ Arguments:
           For rt: offset from SIGRTMIN (0-$MAX_RT_OFFSET)
 
 Examples:
-  $(basename "$0") usr 1      Send SIGUSR1
-  $(basename "$0") usr 2      Send SIGUSR2
-  $(basename "$0") rt 21      Send SIGRTMIN+21
-  $(basename "$0") rt 0       Send SIGRTMIN
+  $SCRIPT_NAME usr 1      Send SIGUSR1
+  $SCRIPT_NAME usr 2      Send SIGUSR2
+  $SCRIPT_NAME rt 21      Send SIGRTMIN+21 (browser media)
+  $SCRIPT_NAME rt 22      Send SIGRTMIN+22 (music player)
+  $SCRIPT_NAME rt 0       Send SIGRTMIN
+
+Options:
+  -h, --help              Show this help message
+  -v, --version           Show version information
+  -m, --map               Show common signal mappings
+  -c, --check             Check if $STATUS_PROCESS is running
+  --clear-cache           Clear the PID cache
 
 Notes:
   - Real-time signals allow more granular control (up to 33 different signals)
   - User signals are simpler but limited to 2 signals
   - Make sure $STATUS_PROCESS is running before sending signals
+  - Uses PID caching for better performance (${CACHE_LIFETIME}s lifetime)
+
+Exit Codes:
+  0    Success
+  1    Invalid arguments or general error
+  2    Process not found
+  3    Signal send failed
 EOF
 }
 
-function check_process() {
-    if ! pgrep -f "$STATUS_PROCESS" > /dev/null 2>&1; then
-        echo "Warning: '$STATUS_PROCESS' is not running" >&2
-        return 1
-    fi
-    return 0
-}
-
-function validate_usr_signal() {
-    local value=$1
-
-    if [[ ! "$value" =~ ^[12]$ ]]; then
-        echo "Error: USR signal must be 1 (SIGUSR1) or 2 (SIGUSR2), got: $value" >&2
-        return 1
-    fi
-    return 0
-}
-
-function validate_rt_signal() {
-    local value=$1
-
-    if [[ ! "$value" =~ ^[0-9]+$ ]]; then
-        echo "Error: RT signal offset must be a positive integer, got: $value" >&2
-        return 1
-    fi
-
-    if [[ "$value" -gt "$MAX_RT_OFFSET" ]]; then
-        echo "Error: RT signal offset must be between 0 and $MAX_RT_OFFSET, got: $value" >&2
-        return 1
-    fi
-
-    return 0
-}
-
-function send_usr_signal() {
-    local value=$1
-    local sig
-
-    validate_usr_signal "$value" || exit 1
-    check_process || exit 1
-
-    case "$value" in
-        1) sig="-USR1" ;;
-        2) sig="-USR2" ;;
-    esac
-
-    if pkill "$sig" -f "$STATUS_PROCESS"; then
-        echo "Sent SIGUSR$value to $STATUS_PROCESS"
-    else
-        echo "Error: Failed to send signal to $STATUS_PROCESS" >&2
-        exit 1
-    fi
-}
-
-function send_rt_signal() {
-    local value=$1
-
-    validate_rt_signal "$value" || exit 1
-    check_process || exit 1
-
-    if pkill -RTMIN+"$value" -f "$STATUS_PROCESS"; then
-        echo "Sent SIGRTMIN+$value to $STATUS_PROCESS"
-    else
-        echo "Error: Failed to send signal to $STATUS_PROCESS" >&2
-        exit 1
-    fi
+function show_version() {
+    echo "$SCRIPT_NAME v$VERSION"
 }
 
 function show_signal_map() {
@@ -113,43 +122,201 @@ Real-time signals (SIGRTMIN+):
   23-32  : Custom modules
 
 User signals:
-  SIGUSR1: Global refresh
+  SIGUSR1: Global refresh (all modules)
   SIGUSR2: Secondary global action
 
 Note: Actual mappings depend on your dwmblocks configuration.
 Check your config.h for your specific setup.
+
+Example dwmblocks config.h entry:
+  static const Block blocks[] = {
+      /* command             interval  signal */
+      { "sb-music",          0,        22     },  // SIGRTMIN+22
+      { "sb-browser-media",  0,        21     },  // SIGRTMIN+21
+      ...
+  };
 EOF
 }
 
-# Main logic
-if [[ $# -lt 2 ]]; then
-    echo "Error: Insufficient arguments" >&2
-    echo ""
-    show_usage
-    exit 1
-fi
+# ============================================================================
+# VALIDATION FUNCTIONS
+# ============================================================================
 
-type="$1"
-value="$2"
+function check_process() {
+    local pid
 
-case "$type" in
-    usr)
-        send_usr_signal "$value"
-        ;;
-    rt)
-        send_rt_signal "$value"
-        ;;
-    --help|-h)
-        show_usage
-        ;;
-    --map|-m)
-        show_signal_map
-        ;;
-    *)
-        echo "Error: Invalid signal type '$type'" >&2
-        echo "       Must be 'usr' or 'rt'" >&2
+    if ! pid=$(get_process_pid); then
+        echo "Error: '$STATUS_PROCESS' is not running" >&2
+        return 2
+    fi
+
+    return 0
+}
+
+function validate_usr_signal() {
+    local value=$1
+    if [[ ! "$value" =~ ^[12]$ ]]; then
+        echo "Error: USR signal must be 1 (SIGUSR1) or 2 (SIGUSR2), got: $value" >&2
+        return 1
+    fi
+    return 0
+}
+
+function validate_rt_signal() {
+    local value=$1
+
+    if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+        echo "Error: RT signal offset must be a non-negative integer, got: $value" >&2
+        return 1
+    fi
+
+    if [[ "$value" -gt "$MAX_RT_OFFSET" ]]; then
+        echo "Error: RT signal offset must be between 0 and $MAX_RT_OFFSET, got: $value" >&2
+        return 1
+    fi
+
+    return 0
+}
+
+# ============================================================================
+# SIGNAL SENDING
+# ============================================================================
+
+function send_usr_signal() {
+    local value=$1
+    local sig pid
+
+    validate_usr_signal "$value" || exit 1
+
+    if ! pid=$(get_process_pid); then
+        echo "Error: '$STATUS_PROCESS' is not running" >&2
+        exit 2
+    fi
+
+    case "$value" in
+        1) sig="USR1" ;;
+        2) sig="USR2" ;;
+    esac
+
+    if kill -"$sig" "$pid" 2>/dev/null; then
+        echo "Sent SIGUSR$value to $STATUS_PROCESS (PID: $pid)"
+        return 0
+    else
+        echo "Error: Failed to send signal to $STATUS_PROCESS (PID: $pid)" >&2
+        # Invalidate cache since signal failed
+        rm -f "$PID_CACHE" 2>/dev/null || true
+        exit 3
+    fi
+}
+
+function send_rt_signal() {
+    local value=$1
+    local pid
+
+    validate_rt_signal "$value" || exit 1
+
+    if ! pid=$(get_process_pid); then
+        echo "Error: '$STATUS_PROCESS' is not running" >&2
+        exit 2
+    fi
+
+    # Calculate actual signal number
+    # SIGRTMIN is typically 34 on Linux, but we use the offset syntax
+    local signal_num=$((34 + value))
+
+    if kill -"RTMIN+$value" "$pid" 2>/dev/null; then
+        echo "Sent SIGRTMIN+$value to $STATUS_PROCESS (PID: $pid)"
+        return 0
+    else
+        echo "Error: Failed to send signal to $STATUS_PROCESS (PID: $pid)" >&2
+        # Invalidate cache since signal failed
+        rm -f "$PID_CACHE" 2>/dev/null || true
+        exit 3
+    fi
+}
+
+# ============================================================================
+# ADDITIONAL COMMANDS
+# ============================================================================
+
+function cmd_check() {
+    local pid
+
+    if pid=$(get_process_pid); then
+        echo "$STATUS_PROCESS is running (PID: $pid)"
+        return 0
+    else
+        echo "$STATUS_PROCESS is not running" >&2
+        return 2
+    fi
+}
+
+function cmd_clear_cache() {
+    if [[ -f "$PID_CACHE" ]]; then
+        rm -f "$PID_CACHE"
+        echo "Cache cleared"
+    else
+        echo "No cache to clear"
+    fi
+}
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
+function main() {
+    init_cache_dir
+
+    # Handle special flags and commands
+    case "${1:-}" in
+        -h|--help)
+            show_usage
+            exit 0
+            ;;
+        -v|--version)
+            show_version
+            exit 0
+            ;;
+        -m|--map)
+            show_signal_map
+            exit 0
+            ;;
+        -c|--check)
+            cmd_check
+            exit $?
+            ;;
+        --clear-cache)
+            cmd_clear_cache
+            exit 0
+            ;;
+    esac
+
+    # Require at least 2 arguments for signal sending
+    if [[ $# -lt 2 ]]; then
+        echo "Error: Insufficient arguments" >&2
         echo ""
         show_usage
         exit 1
-        ;;
-esac
+    fi
+
+    local type="$1"
+    local value="$2"
+
+    case "$type" in
+        usr)
+            send_usr_signal "$value"
+            ;;
+        rt)
+            send_rt_signal "$value"
+            ;;
+        *)
+            echo "Error: Invalid signal type '$type'" >&2
+            echo "       Must be 'usr' or 'rt'" >&2
+            echo ""
+            show_usage
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

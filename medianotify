@@ -18,6 +18,12 @@ readonly NOTIFICATION_APP="Media Player"
 readonly DEBOUNCE_TIME=0.3  # seconds
 declare -g LAST_EVENT_TIME=0
 
+# Track notification history to prevent duplicates
+declare -gA NOTIFIED_TRACKS=()
+
+# Job tracking for proper cleanup
+declare -ga MONITOR_PIDS=()
+
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
@@ -36,6 +42,7 @@ function check_dependencies() {
     command -v playerctl &>/dev/null || die "playerctl not found in PATH"
     command -v notify-send &>/dev/null || die "notify-send not found"
     command -v restatus &>/dev/null || die "restatus not found in PATH"
+    command -v bc &>/dev/null || die "bc not found (required for debouncing)"
 }
 
 function init_state_dir() {
@@ -47,14 +54,13 @@ function get_current_time() {
 }
 
 function should_debounce() {
-    local current_time now_time
+    local current_time
     current_time=$(get_current_time)
-    now_time=$(echo "$current_time" | cut -d. -f1)
 
     local elapsed
-    elapsed=$(echo "$current_time - $LAST_EVENT_TIME" | bc 2>/dev/null || echo "999")
+    elapsed=$(echo "$current_time - $LAST_EVENT_TIME" | bc)
 
-    if (( $(echo "$elapsed < $DEBOUNCE_TIME" | bc -l 2>/dev/null || echo 0) )); then
+    if (( $(echo "$elapsed < $DEBOUNCE_TIME" | bc -l) )); then
         return 0  # Should debounce
     fi
 
@@ -70,13 +76,19 @@ function load_state() {
     if [[ -f "$STATE_FILE" ]]; then
         cat "$STATE_FILE"
     else
-        echo "||||"
+        echo "|||||"
     fi
 }
 
 function save_state() {
     local state="$1"
     echo "$state" > "$STATE_FILE"
+}
+
+function get_track_key() {
+    local title="$1"
+    local artist="$2"
+    echo "${title}::${artist}"
 }
 
 function should_notify() {
@@ -92,10 +104,25 @@ function should_notify() {
     # ONLY notify when something is Playing
     [[ "$new_status" != "Playing" ]] && return 1
 
-    # Don't notify if already notified about this exact playing track
-    if [[ "$old_status" == "Playing" && "$old_title" == "$new_title" && "$old_artist" == "$new_artist" ]]; then
-        return 1
+    local track_key
+    track_key=$(get_track_key "$new_title" "$new_artist")
+
+    # Check if we've already notified about this track being played
+    local current_time
+    current_time=$(date +%s)
+
+    # If we notified about this track in the last 10 seconds, skip
+    if [[ -n "${NOTIFIED_TRACKS[$track_key]:-}" ]]; then
+        local last_notif_time="${NOTIFIED_TRACKS[$track_key]}"
+        local time_diff=$((current_time - last_notif_time))
+
+        if [[ $time_diff -lt 10 ]]; then
+            return 1
+        fi
     fi
+
+    # Update notification timestamp for this track
+    NOTIFIED_TRACKS[$track_key]=$current_time
 
     return 0
 }
@@ -186,7 +213,13 @@ function handle_event() {
     local type player status title artist album art_url
     IFS='|' read -r type player status title artist album art_url <<< "$current_state"
 
-    # Create state key for comparison (without art_url)
+    # Validate we got the expected number of fields
+    if [[ -z "$type" ]]; then
+        log "Warning: Invalid state format from mediactl"
+        return
+    fi
+
+    # Create state key for comparison (without art_url to match saved format)
     local state_key="$type|$player|$status|$title|$artist|$album"
 
     local last_state
@@ -199,7 +232,9 @@ function handle_event() {
 
     # Trigger restatus update if state changed
     if [[ "$state_key" != "$last_state" ]]; then
-        restatus rt 22 2>/dev/null || true
+        if ! restatus rt 22 2>/dev/null; then
+            log "Warning: Failed to update status bar"
+        fi
     fi
 
     # Update state
@@ -209,6 +244,26 @@ function handle_event() {
 # ============================================================================
 # EVENT MONITORING
 # ============================================================================
+
+function kill_monitors() {
+    log "Stopping existing monitors..."
+
+    # Kill tracked background jobs
+    for pid in "${MONITOR_PIDS[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+        fi
+    done
+
+    # Also kill any playerctl processes we started
+    pkill -P $$ playerctl 2>/dev/null || true
+
+    # Clear the array
+    MONITOR_PIDS=()
+
+    # Give processes time to die
+    sleep 0.2
+}
 
 function monitor_events() {
     log "Starting event-driven media monitoring"
@@ -231,22 +286,25 @@ function monitor_events() {
             log "Player list changed, updating monitor..."
             known_players="$current_players"
 
-            # Kill any existing playerctl monitors
-            pkill -P $ playerctl 2>/dev/null || true
-            sleep 0.1
+            # Kill existing monitors
+            kill_monitors
 
             # If we have players, start monitoring them
             if [[ -n "$current_players" ]]; then
                 log "Monitoring players: $(echo "$current_players" | tr '\n' ' ')"
 
-                # Start monitoring in background
+                # Start monitoring in background and track PIDs
                 playerctl -a -F metadata 2>/dev/null | while read -r line; do
                     handle_event
                 done &
+                MONITOR_PIDS+=($!)
 
                 playerctl -a -F status 2>/dev/null | while read -r line; do
                     handle_event
                 done &
+                MONITOR_PIDS+=($!)
+
+                log "Started ${#MONITOR_PIDS[@]} monitor processes"
             else
                 log "No players available, waiting..."
             fi
@@ -257,30 +315,6 @@ function monitor_events() {
     done
 }
 
-# Alternative: Monitor specific event types
-function monitor_events_v2() {
-    log "Starting event-driven media monitoring (v2)"
-
-    LAST_EVENT_TIME=0
-    handle_event
-
-    # Create a FIFO for event aggregation
-    local event_pipe="$STATE_DIR/events"
-    mkfifo "$event_pipe" 2>/dev/null || true
-
-    # Monitor different event types in parallel
-    (
-        playerctl --all-players -F status 2>/dev/null | while read -r; do echo "event" >> "$event_pipe"; done &
-        playerctl --all-players -F metadata 2>/dev/null | while read -r; do echo "event" >> "$event_pipe"; done &
-        wait
-    ) &
-
-    # Process events from the pipe
-    while read -r event; do
-        handle_event
-    done < "$event_pipe"
-}
-
 # ============================================================================
 # SIGNAL HANDLING
 # ============================================================================
@@ -289,7 +323,7 @@ function cleanup() {
     log "Shutting down gracefully"
 
     # Kill background playerctl processes
-    pkill -P $$ playerctl 2>/dev/null || true
+    kill_monitors
 
     # Clean up FIFO if it exists
     rm -f "$STATE_DIR/events" 2>/dev/null || true
@@ -297,7 +331,7 @@ function cleanup() {
     exit 0
 }
 
-trap cleanup SIGINT SIGTERM
+trap cleanup SIGINT SIGTERM EXIT
 
 # ============================================================================
 # HELP & VERSION
@@ -328,20 +362,23 @@ FEATURES:
     - Album art support
     - Smart debouncing for rapid events
     - Persistent state across restarts
+    - Track-based notification history (10s window)
 
 NOTIFICATION TRIGGERS:
     ✓ Track starts playing (new track)
-    ✓ Resume from paused/stopped to playing
+    ✓ Resume from paused/stopped to playing (new track only)
     ✓ Source changes while playing (browser ↔ song)
     ✗ No notification when pausing
     ✗ No notification when stopping
     ✗ No notification when idle
+    ✗ No duplicate notifications for same track within 10s
 
 HOW IT WORKS:
     1. Listens to playerctl events from ALL players (--all-players)
     2. On any event, queries mediactl for current prioritized state
     3. Debounces rapid successive events (${DEBOUNCE_TIME}s window)
-    4. Sends notification only when appropriate
+    4. Tracks notification history to prevent duplicates
+    5. Sends notification only when appropriate
 
 RUNNING AS A SERVICE:
     systemd user service:
@@ -366,12 +403,13 @@ REQUIREMENTS:
     - playerctl (for event monitoring)
     - notify-send (for notifications)
     - restatus (for status bar updates)
+    - bc (for floating-point debounce calculations)
 
 EOF
 }
 
 function show_version() {
-    echo "$SCRIPT_NAME v2.0.0 (event-driven)"
+    echo "$SCRIPT_NAME v2.0.1 (event-driven, fixed)"
 }
 
 # ============================================================================
