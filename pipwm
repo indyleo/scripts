@@ -9,6 +9,7 @@ fi
 
 mpv "$1" \
     --geometry=25%x25%-8-8 \
+    --volume=45 \
     --ontop \
     --osc=no \
     --no-border \
