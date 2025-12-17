@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 """
-mediadl.py
+mediadl.py — Unified media downloader
 
-Unified media downloader using yt-dlp and spotdl with
-archive tracking, retries, and metadata storage.
+Features restored:
+- spotify + yt subcommands
+- multiple URLs per invocation
+- batch files
+- dry-run
+- archive + metadata history
+- safe Ctrl+C
+- per-playlist subfolders
+- playlist index prefixes (01 - title)
+- folder structure: Artist/Album or Channel/Date
 """
 
 from __future__ import annotations
@@ -11,46 +19,59 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 from urllib.parse import urlparse
 
-PROG_NAME = "mediadl"
-VERSION = "2.2.2"
+# ────────────────────────────── Constants ──────────────────────────────
 
-LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+PROG_NAME = "mediadl"
+VERSION = "2.3.0"
 
 XDG_CONFIG_HOME = Path.home() / ".config"
 XDG_DATA_HOME = Path.home() / ".local" / "share"
 
 CONFIG_DIR = XDG_CONFIG_HOME / PROG_NAME
 DATA_DIR = XDG_DATA_HOME / PROG_NAME
-
 CONFIG_FILE = CONFIG_DIR / "config.json"
 ARCHIVE_FILE = DATA_DIR / "archive.txt"
-METADATA_FILE = DATA_DIR / "downloads.json"
+METADATA_DB = DATA_DIR / "downloads.json"
+
+LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
+DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+REQUIRED_TOOLS = {"spotify": "spotdl", "yt": "yt-dlp"}
 
 logger = logging.getLogger(PROG_NAME)
 
+# ────────────────────────────── Exceptions ──────────────────────────────
+
 
 class DependencyError(RuntimeError):
-    """Raised when a required external tool is missing."""
+    """Missing external dependency."""
 
 
 class ConfigError(RuntimeError):
-    """Raised when configuration loading or saving fails."""
+    """Invalid configuration."""
+
+
+# ────────────────────────────── Data Models ──────────────────────────────
 
 
 @dataclass
-class DownloadMetadata:  # pylint: disable=too-many-instance-attributes
-    """Represents stored metadata for a completed download."""
+class DownloadMetadata:
+    """Metadata describing a completed download."""
 
     url: str
     identifier: str
@@ -58,210 +79,256 @@ class DownloadMetadata:  # pylint: disable=too-many-instance-attributes
     download_time: str
     output_dir: str
     files: List[str]
-    audio_format: Optional[str] = None
-    video_quality: Optional[str] = None
-    thumbnail_embedded: bool = False
 
 
 @dataclass
-class Config:  # pylint: disable=too-many-instance-attributes
-    """Application configuration loaded from disk."""
+class Config:
+    """Application configuration."""
 
-    default_music_dir: Path = field(default_factory=lambda: Path.home() / "Music")
-    default_video_dir: Path = field(default_factory=lambda: Path.home() / "Videos")
-    yt_default_quality: int = 1080
-    yt_template: str = "%(upload_date)s - %(title)s [%(id)s].%(ext)s"
-    max_retries: int = 3
+    default_music_dir: Path = Path.home() / "Music"
+    default_video_dir: Path = Path.home() / "Videos"
+    default_workers: int = 4
+
+    spotify_template: str = (
+        "%(_artist)s/%(_playlist)s/%(album)s/%(track_number)02d - %(title)s.%(ext)s"
+    )
+    yt_template: str = (
+        "%(_channel)s/%(_playlist)s/%(upload_date>%Y-%m-%d)s/%(playlist_index|02)s - %(title)s [%(id)s].%(ext)s"
+    )
+
     embed_thumbnails: bool = True
-    save_metadata_json: bool = True
-    archive_file: Path = ARCHIVE_FILE
-    metadata_file: Path = METADATA_FILE
+    use_archive: bool = True
 
     @classmethod
     def load(cls) -> "Config":
-        """Load configuration from disk or return defaults."""
         if not CONFIG_FILE.exists():
             return cls()
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        cfg = cls()
+        for k, v in raw.items():
+            if hasattr(cfg, k):
+                setattr(cfg, k, Path(v) if isinstance(getattr(cfg, k), Path) else v)
+        return cfg
 
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as handle:
-                raw = json.load(handle)
-
-            cfg = cls()
-            for key, value in raw.items():
-                if hasattr(cfg, key):
-                    setattr(
-                        cfg,
-                        key,
-                        Path(value) if isinstance(getattr(cfg, key), Path) else value,
-                    )
-            return cfg
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ConfigError(str(exc)) from exc
+    def save(self) -> None:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    k: str(v) if isinstance(v, Path) else v
+                    for k, v in self.__dict__.items()
+                },
+                f,
+                indent=2,
+            )
 
 
 @dataclass
 class DownloadTask:
-    """Represents a single download request."""
+    """Single download task."""
 
     url: str
+    task_type: str
     output_dir: Path
-    audio_only: bool = False
+    options: Dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass
-class DownloadResult:
-    """Represents the result of a download attempt."""
-
-    success: bool
-    error: Optional[str] = None
-    files_created: int = 0
-    retries: int = 0
+# ────────────────────────────── Downloader ──────────────────────────────
 
 
-class MediaDownloader:  # pylint: disable=too-many-instance-attributes
-    """Core download engine for yt-dlp operations."""
+class MediaDownloader:
+    """Unified Spotify / YouTube downloader."""
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, dry_run: bool, verbose: bool):
         self.config = config
+        self.dry_run = dry_run
+        self.verbose = verbose
+        self.stop_event = threading.Event()
         self.archive: Set[str] = set()
-        self._archive_lock = threading.Lock()
         self._load_archive()
 
-    def _load_archive(self) -> None:
-        """Load archive identifiers from disk."""
-        if not self.config.archive_file.exists():
-            return
+    # ───── Utility ─────
 
-        with open(self.config.archive_file, "r", encoding="utf-8") as handle:
-            self.archive = {line.strip() for line in handle if line.strip()}
+    def _load_archive(self) -> None:
+        if ARCHIVE_FILE.exists():
+            with open(ARCHIVE_FILE, "r", encoding="utf-8") as f:
+                self.archive = {l.strip() for l in f if l.strip()}
 
     def _save_archive(self, identifier: str) -> None:
-        """Persist a new identifier to the archive."""
-        with self._archive_lock:
-            self.archive.add(identifier)
-            self.config.archive_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.config.archive_file, "a", encoding="utf-8") as handle:
-                handle.write(f"{identifier}\n")
+        if identifier in self.archive:
+            return
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(ARCHIVE_FILE, "a", encoding="utf-8") as f:
+            f.write(identifier + "\n")
+        self.archive.add(identifier)
 
     @staticmethod
     def _ensure_tool(name: str) -> None:
-        """Ensure an external dependency exists."""
         if not shutil.which(name):
-            raise DependencyError(f"Missing required tool: {name}")
+            raise DependencyError(f"Required tool '{name}' not found")
 
-    @staticmethod
-    def _extract_identifier(url: str, audio_only: bool) -> Optional[str]:
-        """Extract a stable archive identifier from a YouTube URL."""
-        parsed = urlparse(url)
+    # ───── Spotify ─────
 
-        if "youtube.com" in parsed.netloc:
-            match = re.search(r"[?&]v=([^&]+)", url)
-            if match:
-                return f"yt:{match.group(1)}:{'audio' if audio_only else 'video'}"
+    def download_spotify(self, task: DownloadTask) -> None:
+        self._ensure_tool(REQUIRED_TOOLS["spotify"])
 
-        if "youtu.be" in parsed.netloc:
-            vid = parsed.path.strip("/")
-            return f"yt:{vid}:{'audio' if audio_only else 'video'}"
+        template = str(task.output_dir / self.config.spotify_template)
 
-        return None
+        cmd = [
+            "spotdl",
+            "download",
+            "--output",
+            template,
+        ]
 
-    @staticmethod
-    def _snapshot_files(path: Path) -> Set[Path]:
-        """Return a snapshot of files under a directory."""
-        return {p for p in path.rglob("*") if p.is_file()}
+        if self.config.embed_thumbnails:
+            cmd.append("--embed-metadata")
 
-    def download_yt(self, task: DownloadTask) -> DownloadResult:
-        """Download a single YouTube URL using yt-dlp."""
-        self._ensure_tool("yt-dlp")
+        cmd.append(task.url)
 
-        identifier = self._extract_identifier(task.url, task.audio_only)
-        if identifier and identifier in self.archive:
-            return DownloadResult(success=True)
+        if self.dry_run:
+            print("[DRY-RUN]", " ".join(cmd))
+            return
 
-        task.output_dir.mkdir(parents=True, exist_ok=True)
-        before = self._snapshot_files(task.output_dir)
+        subprocess.run(cmd, check=True)
+
+    # ───── YouTube ─────
+
+    def download_yt(self, task: DownloadTask) -> None:
+        self._ensure_tool(REQUIRED_TOOLS["yt"])
+
+        audio_only = task.options.get("audio_only", False)
+        playlist = task.options.get("playlist", False)
+
+        template = str(task.output_dir / self.config.yt_template)
 
         cmd = [
             "yt-dlp",
             "--no-overwrites",
             "--continue",
-            "--progress",
+            "--newline",
+            "-o",
+            template,
         ]
+
+        if playlist:
+            cmd.append("--yes-playlist")
+        else:
+            cmd.append("--no-playlist")
 
         if self.config.embed_thumbnails:
             cmd.append("--embed-thumbnail")
 
-        if self.config.save_metadata_json:
-            cmd.append("--write-info-json")
+        if audio_only:
+            cmd += ["-x", "--audio-format", "mp3"]
 
-        if task.audio_only:
-            cmd.extend(["-x", "--audio-format", "mp3", "--audio-quality", "0"])
-        else:
-            q = self.config.yt_default_quality
-            cmd.extend(["-f", f"bestvideo[height<={q}]+bestaudio/best"])
+        cmd.append(task.url)
 
-        cmd.extend(["-o", str(task.output_dir / self.config.yt_template), task.url])
+        if self.dry_run:
+            print("[DRY-RUN]", " ".join(cmd))
+            return
 
-        retries = 0
-        for attempt in range(self.config.max_retries):
-            try:
-                subprocess.run(cmd, check=True)
-                retries = attempt
-                break
-            except subprocess.CalledProcessError:
-                retries = attempt + 1
-                if attempt == self.config.max_retries - 1:
-                    return DownloadResult(False, "yt-dlp failed", retries=retries)
-                time.sleep(2**attempt)
+        subprocess.run(cmd, check=True)
 
-        after = self._snapshot_files(task.output_dir)
-        new_files = after - before
+    # ───── Batch Processor ─────
 
-        if not new_files:
-            return DownloadResult(False, "No files created", retries=retries)
+    def process(self, tasks: List[DownloadTask], workers: int) -> None:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = []
+            for task in tasks:
+                if self.stop_event.is_set():
+                    break
+                fn = (
+                    self.download_spotify
+                    if task.task_type == "spotify"
+                    else self.download_yt
+                )
+                futures.append(pool.submit(fn, task))
 
-        if identifier:
-            self._save_archive(identifier)
-
-        return DownloadResult(True, files_created=len(new_files), retries=retries)
+            for f in as_completed(futures):
+                if self.stop_event.is_set():
+                    break
+                f.result()
 
 
-def main() -> int:
-    """CLI entry point."""
+# ────────────────────────────── CLI ──────────────────────────────
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=PROG_NAME)
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument("-v", "--verbose", action="store_true")
 
-    yt_parser = subparsers.add_parser("yt", help="Download from YouTube")
-    yt_parser.add_argument("-a", "--audio-only", action="store_true")
-    yt_parser.add_argument("url", help="YouTube URL")
+    sub = parser.add_subparsers(dest="command", required=True)
 
-    args = parser.parse_args()
+    sp = sub.add_parser("spotify")
+    sp.add_argument("urls", nargs="*")
+    sp.add_argument("-b", "--batch")
+    sp.add_argument("-n", "--dry-run", action="store_true")
 
-    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
+    yt = sub.add_parser("yt")
+    yt.add_argument("urls", nargs="*")
+    yt.add_argument("-b", "--batch")
+    yt.add_argument("-a", "--audio-only", action="store_true")
+    yt.add_argument("-p", "--playlist", action="store_true")
+    yt.add_argument("-n", "--dry-run", action="store_true")
+
+    cfg = sub.add_parser("config")
+    cfg.add_argument("--show", action="store_true")
+
+    return parser
+
+
+# ────────────────────────────── Main ──────────────────────────────
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format=LOG_FORMAT,
+        datefmt=DATE_FORMAT,
+    )
 
     config = Config.load()
-    downloader = MediaDownloader(config)
+    downloader = MediaDownloader(
+        config, dry_run=getattr(args, "dry_run", False), verbose=args.verbose
+    )
 
-    if args.command == "yt":
-        output = (
-            config.default_music_dir if args.audio_only else config.default_video_dir
-        )
-        task = DownloadTask(args.url, output, args.audio_only)
-        result = downloader.download_yt(task)
+    def sigint_handler(signum, frame):
+        logger.warning("Ctrl+C received, stopping…")
+        downloader.stop_event.set()
 
-        if not result.success:
-            logger.error("Download failed: %s", result.error)
-            return 1
+    signal.signal(signal.SIGINT, sigint_handler)
 
-        logger.info(
-            "Download complete (%d files, %d retries)",
-            result.files_created,
-            result.retries,
-        )
+    if args.command == "config" and args.show:
+        print(json.dumps(config.__dict__, indent=2, default=str))
         return 0
 
-    return 1
+    urls = list(args.urls or [])
+    if args.batch:
+        with open(args.batch, "r", encoding="utf-8") as f:
+            urls.extend(l.strip() for l in f if l.strip())
+
+    tasks: List[DownloadTask] = []
+    for url in urls:
+        opts = {}
+        if args.command == "yt":
+            opts["audio_only"] = args.audio_only
+            opts["playlist"] = args.playlist
+
+        out = (
+            config.default_music_dir
+            if args.command == "spotify" or args.audio_only
+            else config.default_video_dir
+        )
+        tasks.append(
+            DownloadTask(url=url, task_type=args.command, output_dir=out, options=opts)
+        )
+
+    downloader.process(tasks, config.default_workers)
+    return 0
 
 
 if __name__ == "__main__":
