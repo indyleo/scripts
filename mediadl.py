@@ -19,8 +19,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
-import re
 import shutil
 import signal
 import subprocess
@@ -29,15 +27,13 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
-from urllib.parse import urlparse
 
 # ────────────────────────────── Constants ──────────────────────────────
 
-PROG_NAME = "mediadl"
-VERSION = "2.3.0"
+PROG_NAME = "mediadl.py"
+VERSION = "2.4.0"
 
 XDG_CONFIG_HOME = Path.home() / ".config"
 XDG_DATA_HOME = Path.home() / ".local" / "share"
@@ -90,17 +86,21 @@ class Config:
     default_workers: int = 4
 
     spotify_template: str = (
-        "%(_artist)s/%(_playlist)s/%(album)s/%(track_number)02d - %(title)s.%(ext)s"
+        "%(artist)s/%(album)s/%(track_number)02d - %(title)s.%(ext)s"
     )
+    # Fixed template: use proper yt-dlp syntax
     yt_template: str = (
-        "%(_channel)s/%(_playlist)s/%(upload_date>%Y-%m-%d)s/%(playlist_index|02)s - %(title)s [%(id)s].%(ext)s"
+        "%(uploader,channel)s/%(upload_date>%Y-%m-%d)s/" "%(title)s [%(id)s].%(ext)s"
     )
 
     embed_thumbnails: bool = True
     use_archive: bool = True
+    max_retries: int = 3
+    retry_delay: int = 5
 
     @classmethod
     def load(cls) -> "Config":
+        """Load configuration from disk."""
         if not CONFIG_FILE.exists():
             return cls()
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -108,10 +108,12 @@ class Config:
         cfg = cls()
         for k, v in raw.items():
             if hasattr(cfg, k):
-                setattr(cfg, k, Path(v) if isinstance(getattr(cfg, k), Path) else v)
+                val = Path(v) if isinstance(getattr(cfg, k), Path) else v
+                setattr(cfg, k, val)
         return cfg
 
     def save(self) -> None:
+        """Save configuration to disk."""
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(
@@ -151,11 +153,13 @@ class MediaDownloader:
     # ───── Utility ─────
 
     def _load_archive(self) -> None:
+        """Load archive of previously downloaded items."""
         if ARCHIVE_FILE.exists():
             with open(ARCHIVE_FILE, "r", encoding="utf-8") as f:
-                self.archive = {l.strip() for l in f if l.strip()}
+                self.archive = {line.strip() for line in f if line.strip()}
 
     def _save_archive(self, identifier: str) -> None:
+        """Save identifier to archive."""
         if identifier in self.archive:
             return
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -165,12 +169,39 @@ class MediaDownloader:
 
     @staticmethod
     def _ensure_tool(name: str) -> None:
+        """Verify required tool is installed."""
         if not shutil.which(name):
             raise DependencyError(f"Required tool '{name}' not found")
+
+    def _run_with_retry(self, cmd: List[str], max_retries: int = 0) -> None:
+        """Run command with retry logic."""
+        if max_retries == 0:
+            max_retries = self.config.max_retries
+
+        for attempt in range(max_retries):
+            try:
+                if self.verbose:
+                    logger.info("Running: %s", " ".join(cmd))
+
+                subprocess.run(cmd, check=True)
+                return
+            except subprocess.CalledProcessError:
+                if attempt < max_retries - 1:
+                    logger.warning(
+                        "Download failed (attempt %d/%d), retrying in %ds...",
+                        attempt + 1,
+                        max_retries,
+                        self.config.retry_delay,
+                    )
+                    time.sleep(self.config.retry_delay)
+                else:
+                    logger.error("Download failed after %d attempts", max_retries)
+                    raise
 
     # ───── Spotify ─────
 
     def download_spotify(self, task: DownloadTask) -> None:
+        """Download from Spotify using spotdl."""
         self._ensure_tool(REQUIRED_TOOLS["spotify"])
 
         template = str(task.output_dir / self.config.spotify_template)
@@ -185,21 +216,30 @@ class MediaDownloader:
         if self.config.embed_thumbnails:
             cmd.append("--embed-metadata")
 
+        if self.config.use_archive:
+            cmd.extend(["--save-file", str(ARCHIVE_FILE)])
+
         cmd.append(task.url)
 
         if self.dry_run:
             print("[DRY-RUN]", " ".join(cmd))
             return
 
-        subprocess.run(cmd, check=True)
+        self._run_with_retry(cmd)
 
     # ───── YouTube ─────
 
     def download_yt(self, task: DownloadTask) -> None:
+        """Download from YouTube using yt-dlp."""
         self._ensure_tool(REQUIRED_TOOLS["yt"])
 
         audio_only = task.options.get("audio_only", False)
         playlist = task.options.get("playlist", False)
+
+        # Ensure archive directory exists if using archive
+        if self.config.use_archive:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            ARCHIVE_FILE.touch(exist_ok=True)
 
         template = str(task.output_dir / self.config.yt_template)
 
@@ -208,20 +248,72 @@ class MediaDownloader:
             "--no-overwrites",
             "--continue",
             "--newline",
+            "--no-warnings",
             "-o",
             template,
         ]
 
+        # Better playlist handling
         if playlist:
-            cmd.append("--yes-playlist")
+            cmd.extend(
+                [
+                    "--yes-playlist",
+                    "--playlist-start",
+                    "1",
+                ]
+            )
         else:
             cmd.append("--no-playlist")
 
         if self.config.embed_thumbnails:
-            cmd.append("--embed-thumbnail")
+            cmd.extend(
+                [
+                    "--embed-thumbnail",
+                    "--convert-thumbnails",
+                    "jpg",
+                ]
+            )
+
+        # Better metadata embedding
+        cmd.extend(
+            [
+                "--embed-metadata",
+                "--parse-metadata",
+                "%(title)s:%(meta_title)s",
+                "--parse-metadata",
+                "%(uploader)s:%(meta_artist)s",
+            ]
+        )
 
         if audio_only:
-            cmd += ["-x", "--audio-format", "mp3"]
+            cmd.extend(
+                [
+                    "-x",
+                    "--audio-format",
+                    "mp3",
+                    "--audio-quality",
+                    "0",
+                    "--embed-thumbnail",
+                ]
+            )
+        else:
+            # Flexible video format selection
+            cmd.extend(
+                [
+                    "-f",
+                    "bestvideo*+bestaudio/best",
+                    "--merge-output-format",
+                    "mp4",
+                ]
+            )
+
+        if self.config.use_archive:
+            cmd.extend(["--download-archive", str(ARCHIVE_FILE)])
+
+        # Add cookies support for restricted content
+        cookies_file = CONFIG_DIR / "cookies.txt"
+        if cookies_file.exists():
+            cmd.extend(["--cookies", str(cookies_file)])
 
         cmd.append(task.url)
 
@@ -229,13 +321,20 @@ class MediaDownloader:
             print("[DRY-RUN]", " ".join(cmd))
             return
 
-        subprocess.run(cmd, check=True)
+        self._run_with_retry(cmd)
 
     # ───── Batch Processor ─────
 
     def process(self, tasks: List[DownloadTask], workers: int) -> None:
+        """Process download tasks with thread pool."""
+        if not tasks:
+            logger.warning("No tasks to process")
+            return
+
+        logger.info("Processing %d task(s) with %d worker(s)", len(tasks), workers)
+
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = []
+            futures = {}
             for task in tasks:
                 if self.stop_event.is_set():
                     break
@@ -244,37 +343,82 @@ class MediaDownloader:
                     if task.task_type == "spotify"
                     else self.download_yt
                 )
-                futures.append(pool.submit(fn, task))
+                future = pool.submit(fn, task)
+                futures[future] = task
 
-            for f in as_completed(futures):
+            completed = 0
+            failed = 0
+            for future in as_completed(futures):
                 if self.stop_event.is_set():
+                    logger.info("Stop requested, cancelling remaining tasks...")
                     break
-                f.result()
+                try:
+                    future.result()
+                    completed += 1
+                    logger.info("Completed: %s", futures[future].url)
+                except Exception as exc:  # pylint: disable=broad-exception-caught
+                    failed += 1
+                    logger.error("Failed: %s - %s", futures[future].url, exc)
+
+        logger.info("Done: %d succeeded, %d failed", completed, failed)
 
 
 # ────────────────────────────── CLI ──────────────────────────────
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog=PROG_NAME)
-    parser.add_argument("-v", "--verbose", action="store_true")
+    """Build argument parser."""
+    parser = argparse.ArgumentParser(
+        prog=PROG_NAME, description="Unified media downloader"
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    parser.add_argument("--version", action="version", version=f"{PROG_NAME} {VERSION}")
 
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sp = sub.add_parser("spotify")
-    sp.add_argument("urls", nargs="*")
-    sp.add_argument("-b", "--batch")
-    sp.add_argument("-n", "--dry-run", action="store_true")
+    # Spotify subcommand
+    spotify_parser = sub.add_parser("spotify", help="Download from Spotify")
+    spotify_parser.add_argument("urls", nargs="*", help="Spotify URLs")
+    spotify_parser.add_argument(
+        "-b", "--batch", help="File containing URLs (one per line)"
+    )
+    spotify_parser.add_argument(
+        "-n", "--dry-run", action="store_true", help="Show what would be done"
+    )
+    spotify_parser.add_argument(
+        "-w", "--workers", type=int, help="Number of parallel downloads"
+    )
 
-    yt = sub.add_parser("yt")
-    yt.add_argument("urls", nargs="*")
-    yt.add_argument("-b", "--batch")
-    yt.add_argument("-a", "--audio-only", action="store_true")
-    yt.add_argument("-p", "--playlist", action="store_true")
-    yt.add_argument("-n", "--dry-run", action="store_true")
+    # YouTube subcommand
+    yt_parser = sub.add_parser("yt", help="Download from YouTube")
+    yt_parser.add_argument("urls", nargs="*", help="YouTube URLs")
+    yt_parser.add_argument("-b", "--batch", help="File containing URLs (one per line)")
+    yt_parser.add_argument(
+        "-a", "--audio-only", action="store_true", help="Extract audio only"
+    )
+    yt_parser.add_argument(
+        "-p",
+        "--playlist",
+        action="store_true",
+        help="Download entire playlist",
+    )
+    yt_parser.add_argument(
+        "-n", "--dry-run", action="store_true", help="Show what would be done"
+    )
+    yt_parser.add_argument(
+        "-w", "--workers", type=int, help="Number of parallel downloads"
+    )
 
-    cfg = sub.add_parser("config")
-    cfg.add_argument("--show", action="store_true")
+    # Config subcommand
+    cfg_parser = sub.add_parser("config", help="Manage configuration")
+    cfg_parser.add_argument(
+        "--show", action="store_true", help="Show current configuration"
+    )
+    cfg_parser.add_argument(
+        "--init",
+        action="store_true",
+        help="Initialize default configuration",
+    )
 
     return parser
 
@@ -283,6 +427,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    """Main entry point."""
     args = build_parser().parse_args(argv)
 
     logging.basicConfig(
@@ -292,43 +437,80 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     config = Config.load()
+
+    if args.command == "config":
+        if args.show:
+            print(json.dumps(config.__dict__, indent=2, default=str))
+            return 0
+        if args.init:
+            config.save()
+            logger.info("Configuration saved to %s", CONFIG_FILE)
+            return 0
+        return 0
+
     downloader = MediaDownloader(
         config, dry_run=getattr(args, "dry_run", False), verbose=args.verbose
     )
 
-    def sigint_handler(signum, frame):
+    def sigint_handler(_signum: int, _frame: Any) -> None:
+        """Handle SIGINT (Ctrl+C)."""
         logger.warning("Ctrl+C received, stopping…")
         downloader.stop_event.set()
 
     signal.signal(signal.SIGINT, sigint_handler)
 
-    if args.command == "config" and args.show:
-        print(json.dumps(config.__dict__, indent=2, default=str))
-        return 0
-
+    # Collect URLs
     urls = list(args.urls or [])
-    if args.batch:
-        with open(args.batch, "r", encoding="utf-8") as f:
-            urls.extend(l.strip() for l in f if l.strip())
+    if hasattr(args, "batch") and args.batch:
+        try:
+            with open(args.batch, "r", encoding="utf-8") as f:
+                batch_urls = [
+                    line.strip()
+                    for line in f
+                    if line.strip() and not line.strip().startswith("#")
+                ]
+                urls.extend(batch_urls)
+        except FileNotFoundError:
+            logger.error("Batch file not found: %s", args.batch)
+            return 1
 
+    if not urls:
+        logger.error("No URLs provided")
+        return 1
+
+    # Build tasks
     tasks: List[DownloadTask] = []
     for url in urls:
-        opts = {}
+        opts: Dict[str, Any] = {}
         if args.command == "yt":
             opts["audio_only"] = args.audio_only
             opts["playlist"] = args.playlist
 
-        out = (
-            config.default_music_dir
-            if args.command == "spotify" or args.audio_only
-            else config.default_video_dir
+        is_music = args.command == "spotify" or (
+            args.command == "yt" and args.audio_only
         )
+        out = config.default_music_dir if is_music else config.default_video_dir
         tasks.append(
             DownloadTask(url=url, task_type=args.command, output_dir=out, options=opts)
         )
 
-    downloader.process(tasks, config.default_workers)
-    return 0
+    # Determine worker count
+    workers = getattr(args, "workers", None) or config.default_workers
+
+    # Process
+    try:
+        downloader.process(tasks, workers)
+        return 0
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user")
+        return 130
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.error("Fatal error: %s", exc)
+        if args.verbose:
+            import traceback  # pylint: disable=import-outside-toplevel
+
+            traceback.print_exc()
+        return 1
 
 
 if __name__ == "__main__":
