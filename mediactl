@@ -23,6 +23,8 @@ readonly BROWSER_PLAYERS=(
 readonly SONG_PLAYERS=(
     "spotify"
     "SubsonicTUI"
+    "Feishin"
+    "Supersonic"
     "mpd"
     "mopidy"
     "elisa"
