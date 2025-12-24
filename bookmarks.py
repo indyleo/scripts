@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Optimized dmenu bookmark manager with folder support
+Optimized rofi bookmark manager with folder support
 """
 import os
 import subprocess
@@ -27,11 +27,13 @@ class Bookmark:
 
 class BookmarkManager:
     def __init__(self, browser: Optional[str] = None):
-        self.bookmark_file = Path(
-            os.getenv('XDG_DATA_HOME', Path.home() / '.local/share')
-        ) / 'bookmarks' / 'bookmarks.txt'
-        self.dmenu_args = ['-l', '10']
-        self.browser = browser or os.getenv('BROWSER', 'xdg-open')
+        self.bookmark_file = (
+            Path(os.getenv("XDG_DATA_HOME", Path.home() / ".local/share"))
+            / "bookmarks"
+            / "bookmarks.txt"
+        )
+        self.rofi_args = ["-dmenu", "-i", "-l", "10"]
+        self.browser = browser or os.getenv("BROWSER", "xdg-open")
 
         # Verify browser exists
         if not self._command_exists(self.browser):
@@ -47,26 +49,26 @@ class BookmarkManager:
 
     @staticmethod
     def _command_exists(cmd: str) -> bool:
-        return subprocess.run(['which', cmd], capture_output=True).returncode == 0
+        return subprocess.run(["which", cmd], capture_output=True).returncode == 0
 
-    def _dmenu(self, prompt: str, items: List[str]) -> Optional[str]:
-        """Run dmenu with given items and return selection"""
+    def _rofi(self, prompt: str, items: List[str]) -> Optional[str]:
+        """Run rofi with given items and return selection"""
         try:
             result = subprocess.run(
-                ['dmenu', '-p', prompt] + self.dmenu_args,
-                input='\n'.join(items),
+                ["rofi"] + self.rofi_args + ["-p", prompt],
+                input="\n".join(items),
                 capture_output=True,
                 text=True,
-                check=False
+                check=False,
             )
             return result.stdout.strip() if result.returncode == 0 else None
         except FileNotFoundError:
-            print("Error: dmenu not found", file=sys.stderr)
+            print("Error: rofi not found", file=sys.stderr)
             sys.exit(1)
 
     def _notify(self, title: str, message: str):
         """Send desktop notification"""
-        subprocess.run(['notify-send', title, message], check=False)
+        subprocess.run(["notify-send", title, message], check=False)
 
     def _load_bookmarks(self, force_reload: bool = False) -> List[Bookmark]:
         """Load and parse bookmarks with caching"""
@@ -74,28 +76,28 @@ class BookmarkManager:
             return self._bookmarks_cache
 
         bookmarks = []
-        with open(self.bookmark_file, 'r', encoding='utf-8') as f:
+        with open(self.bookmark_file, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
 
-                parts = [p.strip() for p in line.split('|')]
+                parts = [p.strip() for p in line.split("|")]
                 if len(parts) == 2:
                     bookmarks.append(Bookmark(label=parts[0], url=parts[1]))
                 elif len(parts) == 3:
-                    bookmarks.append(Bookmark(
-                        folder=parts[0], label=parts[1], url=parts[2]
-                    ))
+                    bookmarks.append(
+                        Bookmark(folder=parts[0], label=parts[1], url=parts[2])
+                    )
 
         self._bookmarks_cache = bookmarks
         return bookmarks
 
     def _save_bookmarks(self, bookmarks: List[Bookmark]):
         """Save bookmarks to file"""
-        with open(self.bookmark_file, 'w', encoding='utf-8') as f:
+        with open(self.bookmark_file, "w", encoding="utf-8") as f:
             for bm in bookmarks:
-                f.write(bm.to_file_format() + '\n')
+                f.write(bm.to_file_format() + "\n")
         self._bookmarks_cache = None  # Invalidate cache
 
     def _get_folders(self) -> List[str]:
@@ -117,21 +119,23 @@ class BookmarkManager:
         # Add folders
         items.extend(self._get_folders())
 
-        return self._dmenu("Bookmarks", sorted(items))
+        return self._rofi("Bookmarks", sorted(items))
 
     def _folder_menu(self, folder: str) -> Optional[str]:
         """Show bookmarks in a specific folder"""
         bookmarks = self._load_bookmarks()
         items = [bm.display() for bm in bookmarks if bm.folder == folder]
-        return self._dmenu(folder, sorted(items))
+        return self._rofi(folder, sorted(items))
 
     def _open_url(self, entry: str):
         """Extract URL and open in browser"""
-        if '|' in entry:
-            url = entry.split('|', 1)[1].strip()
-            subprocess.Popen([self.browser, url],
-                           stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL)
+        if "|" in entry:
+            url = entry.split("|", 1)[1].strip()
+            subprocess.Popen(
+                [self.browser, url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
 
     def open_bookmark(self):
         """Navigate and open a bookmark"""
@@ -139,7 +143,7 @@ class BookmarkManager:
         if not choice:
             return
 
-        if '|' in choice:
+        if "|" in choice:
             self._open_url(choice)
         else:
             # It's a folder
@@ -150,18 +154,15 @@ class BookmarkManager:
     def add_bookmark(self):
         """Add a new bookmark"""
         folders = self._get_folders()
-        folder_choice = self._dmenu(
-            "Folder (or none)",
-            ["(none)"] + folders
-        )
+        folder_choice = self._rofi("Folder (or none)", ["(none)"] + folders)
         if not folder_choice:
             return
 
-        label = self._dmenu("Label:", [])
+        label = self._rofi("Label:", [])
         if not label:
             return
 
-        url = self._dmenu("URL:", [])
+        url = self._rofi("URL:", [])
         if not url:
             return
 
@@ -180,7 +181,7 @@ class BookmarkManager:
         if not choice:
             return
 
-        if '|' not in choice:
+        if "|" not in choice:
             # It's a folder
             choice = self._folder_menu(choice)
             if not choice:
@@ -197,7 +198,7 @@ class BookmarkManager:
 
     def main_menu(self):
         """Show main action menu"""
-        action = self._dmenu("Bookmark Manager", ["Open", "Add", "Delete", "Quit"])
+        action = self._rofi("Bookmark Manager", ["Open", "Add", "Delete", "Quit"])
 
         if action == "Open":
             self.open_bookmark()

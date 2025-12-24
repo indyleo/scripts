@@ -1889,11 +1889,11 @@ MENUINPUT = "\n".join(f"{e} {d}" for e, d in EMOJILIST)
 # Call dmenu
 try:
     result = subprocess.run(
-        ["dmenu", "-l", "10", "-p", "What Emoji?"],
+        ["rofi", "-dmenu", "-l", "10", "-p", "What Emoji?"],
         input=MENUINPUT,
         text=True,
         capture_output=True,
-        check=True
+        check=True,
     ).stdout.strip()
 except subprocess.CalledProcessError:
     sys.exit(0)

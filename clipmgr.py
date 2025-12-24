@@ -32,7 +32,7 @@ MAX_PINNED_HISTORY = 50
 
 POLL_INTERVAL = 0.5
 PREVIEW_MAX = 60
-DMENU_LINES = 20
+ROFI_LINES = 20
 
 HOME = Path.home()
 CLIP_DIR = HOME.joinpath(".cache", "clipboard")
@@ -272,7 +272,7 @@ class ClipboardManager:
     # -------------------- GROUPED MENU --------------------
 
     def build_grouped_menu_entries(self):
-        """Return grouped lists of pinned, image, and text clips for dmenu with separate numbering."""
+        """Return grouped lists of pinned, image, and text clips for rofi with separate numbering."""
         pinned = []
         images = []
         texts = []
@@ -331,7 +331,7 @@ class ClipboardManager:
             return
 
         menu = "\n".join(lines)
-        sel = run_dmenu(menu, prompt="Clipboard:")
+        sel = run_rofi(menu, prompt="Clipboard:")
         if not sel or sel.startswith("==="):
             return
 
@@ -366,7 +366,7 @@ class ClipboardManager:
             return
 
         menu = "\n".join(lines)
-        sel = run_dmenu(menu, prompt="Pin:")
+        sel = run_rofi(menu, prompt="Pin:")
         if not sel or sel.startswith("==="):
             return
 
@@ -405,8 +405,8 @@ class ClipboardManager:
             copy_image_to_clipboard(clip.path)
 
 
-def run_dmenu(menu_input: str, prompt: str = "") -> str:
-    cmd = ["dmenu", "-l", str(DMENU_LINES), "-p", prompt]
+def run_rofi(menu_input: str, prompt: str = "") -> str:
+    cmd = ["rofi", "-dmenu", "-i", "-l", str(ROFI_LINES), "-p", prompt]
     try:
         proc = subprocess.run(
             cmd,

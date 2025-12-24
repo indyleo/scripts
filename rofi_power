@@ -1,8 +1,8 @@
 #!/bin/env bash
 
-# dmenu prompt
+# rofi prompt
 options="Lock\nLogout\nReboot\nShutdown"
-choice=$(echo -e "$options" | dmenu -p "Power Menu")
+choice=$(echo -e "$options" | rofi -dmenu -p "Power Menu")
 
 case "$choice" in
     Lock)

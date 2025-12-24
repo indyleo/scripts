@@ -26,31 +26,36 @@ LINK_PATH = BIN_DIR / "nvim"
 KEEP_VERSIONS = 2
 DRY_RUN = False
 
+
 # === COLORS ===
 class Colors:  # pylint: disable=too-few-public-methods
     """ANSI color codes for terminal output"""
+
     GREEN = "\033[32m" if sys.stdout.isatty() else ""
     YELLOW = "\033[33m" if sys.stdout.isatty() else ""
     RED = "\033[31m" if sys.stdout.isatty() else ""
     BOLD = "\033[1m" if sys.stdout.isatty() else ""
     RESET = "\033[0m" if sys.stdout.isatty() else ""
 
+
 def msg(color: str, text: str) -> None:
     """Print colored message"""
     print(f"{color}{text}{Colors.RESET}")
+
 
 def die(text: str) -> None:
     """Print error and exit"""
     msg(Colors.RED, f"❌ {text}")
     sys.exit(1)
 
+
 # === NETWORK UTILITIES ===
 def fetch_json(url: str, timeout: int = 10) -> Dict[str, Any]:
     """Fetch and parse JSON from URL with error handling"""
-    req = Request(url, headers={'User-Agent': 'bob.py/1.0'})
+    req = Request(url, headers={"User-Agent": "bob.py/1.0"})
     try:
         with urlopen(req, timeout=timeout) as response:
-            data = json.loads(response.read().decode('utf-8'))
+            data = json.loads(response.read().decode("utf-8"))
             if isinstance(data, list):
                 return {"releases": data}
             if isinstance(data, dict):
@@ -67,16 +72,17 @@ def fetch_json(url: str, timeout: int = 10) -> Dict[str, Any]:
         die("Invalid JSON response")
         return {}  # Unreachable but satisfies type checker
 
+
 def download_file(url: str, dest: Path, progress: bool = True) -> None:
     """Download file with progress indication"""
     try:
-        req = Request(url, headers={'User-Agent': 'bob.py/1.0'})
+        req = Request(url, headers={"User-Agent": "bob.py/1.0"})
         with urlopen(req, timeout=30) as response:
-            total_size = int(response.headers.get('content-length', 0))
+            total_size = int(response.headers.get("content-length", 0))
             block_size = 8192
             downloaded = 0
 
-            with open(dest, 'wb') as f:
+            with open(dest, "wb") as f:
                 while True:
                     chunk = response.read(block_size)
                     if not chunk:
@@ -86,13 +92,14 @@ def download_file(url: str, dest: Path, progress: bool = True) -> None:
 
                     if progress and total_size > 0:
                         percent = (downloaded / total_size) * 100
-                        print(f"\r⬇️  Downloading: {percent:.1f}%", end='', flush=True)
+                        print(f"\r⬇️  Downloading: {percent:.1f}%", end="", flush=True)
 
             if progress:
                 print()  # New line after progress
 
     except (HTTPError, URLError) as e:
         die(f"Download failed: {e}")
+
 
 # === OS + ARCH DETECTION ===
 def get_os_arch() -> Tuple[str, str]:
@@ -101,11 +108,11 @@ def get_os_arch() -> Tuple[str, str]:
     machine = platform.machine().lower()
 
     arch_map: Dict[str, str] = {
-        'x86_64': 'x86_64',
-        'amd64': 'x86_64',
-        'arm64': 'arm64',
-        'aarch64': 'arm64',
-        'armv7l': 'armv7'
+        "x86_64": "x86_64",
+        "amd64": "x86_64",
+        "arm64": "arm64",
+        "aarch64": "arm64",
+        "armv7l": "armv7",
     }
 
     arch = arch_map.get(machine)
@@ -115,6 +122,7 @@ def get_os_arch() -> Tuple[str, str]:
         return ("", "")  # Unreachable
 
     return os_name, arch
+
 
 # === FETCH RELEASE TAG ===
 def fetch_tag(channel: str = "stable") -> str:
@@ -130,19 +138,20 @@ def fetch_tag(channel: str = "stable") -> str:
 
     if channel == "nightly":
         for release in releases:
-            if release.get('prerelease', False):
-                tag = release.get('tag_name')
+            if release.get("prerelease", False):
+                tag = release.get("tag_name")
                 if tag:
                     return str(tag)
     else:
         for release in releases:
-            if not release.get('prerelease', False):
-                tag = release.get('tag_name')
+            if not release.get("prerelease", False):
+                tag = release.get("tag_name")
                 if tag:
                     return str(tag)
 
     die(f"Could not find {channel} release")
     return ""  # Unreachable but satisfies type checker
+
 
 # === CONSTRUCT DOWNLOAD URL ===
 def construct_download_url(tag: str, os_name: str, arch: str) -> str:
@@ -153,6 +162,7 @@ def construct_download_url(tag: str, os_name: str, arch: str) -> str:
         return f"https://github.com/{REPO}/releases/download/{tag}/nvim-macos.tar.gz"
     die(f"Unsupported OS: {os_name}")
     return ""  # Unreachable but satisfies type checker
+
 
 # === INSTALL FUNCTION ===
 def install_nvim(channel: str = "stable", specific: str = "") -> None:
@@ -194,7 +204,7 @@ def install_nvim(channel: str = "stable", specific: str = "") -> None:
             install_path = INSTALL_DIR / tag
             install_path.mkdir(parents=True, exist_ok=True)
 
-            with tarfile.open(tmp_path, 'r:gz') as tar:
+            with tarfile.open(tmp_path, "r:gz") as tar:
                 tar.extractall(install_path)
 
             nvim_path = install_path / "bin" / "nvim"
@@ -216,6 +226,7 @@ def install_nvim(channel: str = "stable", specific: str = "") -> None:
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
+
 
 # === USE FUNCTION ===
 def use_nvim(req: str) -> None:
@@ -252,11 +263,12 @@ def use_nvim(req: str) -> None:
             capture_output=True,
             text=True,
             timeout=5,
-            check=False
+            check=False,
         )
-        print(result.stdout.split('\n')[0])
+        print(result.stdout.split("\n")[0])
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         pass
+
 
 # === UNINSTALL FUNCTION ===
 def uninstall_nvim(tag: str = "") -> None:
@@ -273,7 +285,7 @@ def uninstall_nvim(tag: str = "") -> None:
 
     if tag == "--all":
         confirm = input("⚠️  Remove ALL installed Neovim versions (y/N)? ")
-        if confirm.lower() != 'y':
+        if confirm.lower() != "y":
             msg(Colors.YELLOW, "Aborted.")
             return
 
@@ -305,13 +317,16 @@ def uninstall_nvim(tag: str = "") -> None:
 
     msg(Colors.GREEN, f"✅ Uninstalled {tag}.")
 
+
 # === AUTO-CLEAN FUNCTION ===
 def autoclean() -> None:
     """Remove old versions, keeping only KEEP_VERSIONS most recent"""
     if not INSTALL_DIR.exists():
         return
 
-    versions = sorted(INSTALL_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+    versions = sorted(
+        INSTALL_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True
+    )
 
     if len(versions) <= KEEP_VERSIONS:
         return
@@ -323,6 +338,7 @@ def autoclean() -> None:
         else:
             old_version.unlink()
         msg(Colors.RED, f"🗑️  Removed old version: {old_version.name}")
+
 
 # === CHECK CURRENT ===
 def check_nvim() -> None:
@@ -336,15 +352,16 @@ def check_nvim() -> None:
                 capture_output=True,
                 text=True,
                 timeout=5,
-                check=False
+                check=False,
             )
-            for line in result.stdout.split('\n')[:3]:
+            for line in result.stdout.split("\n")[:3]:
                 if line.strip():
                     print(f"  {line}")
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             pass
     else:
         msg(Colors.YELLOW, "⚠️  No active Neovim version.")
+
 
 # === LIST VERSIONS ===
 def list_versions() -> None:
@@ -364,6 +381,7 @@ def list_versions() -> None:
         print(f"  Nightly: {nightly}")
     except SystemExit:
         msg(Colors.RED, "  Could not fetch available versions")
+
 
 # === UPDATE FUNCTION ===
 def update_nvim(channel: str = "stable") -> None:
@@ -391,10 +409,12 @@ def update_nvim(channel: str = "stable") -> None:
     msg(Colors.YELLOW, f"📦 New version available: {latest_tag}")
     install_nvim(channel)
 
+
 # === HELP MENU ===
 def help_menu() -> None:
     """Display help information"""
-    print("""Usage: bob.py [command] [args]
+    print(
+        """Usage: bob.py [command] [args]
 
 Commands:
   install [stable|nightly|version]  Install and verify a version (no args shows list)
@@ -404,7 +424,9 @@ Commands:
   check                             Show the active Neovim version
   list                              List installed and available versions
   help                              Show this help message
-""")
+"""
+    )
+
 
 # === MAIN ===
 def main() -> None:
@@ -436,6 +458,7 @@ def main() -> None:
         list_versions()
     else:
         die(f"Unknown command: {cmd}")
+
 
 if __name__ == "__main__":
     main()

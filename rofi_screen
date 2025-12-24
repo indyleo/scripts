@@ -2,7 +2,7 @@
 # Screen Recording & Streaming Manager
 
 # --- Ensure dependencies ---
-for cmd in ffmpeg dmenu notify-send xrandr; do
+for cmd in ffmpeg rofi notify-send xrandr; do
     if ! command -v $cmd &> /dev/null; then
         echo "Error: $cmd not found. Please install it first."
         exit 1
@@ -109,7 +109,7 @@ function toggle_stream() {
 }
 
 # --- Main Menu ---
-choice=$(printf "Record Toggle\nStream Toggle" | dmenu -p "Select action:")
+choice=$(printf "Record Toggle\nStream Toggle" | rofi -dmenu -p "Select action:")
 case "$choice" in
     "Record Toggle") toggle_record ;;
     "Stream Toggle") toggle_stream ;;

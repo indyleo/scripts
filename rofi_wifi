@@ -1,8 +1,8 @@
 #!/bin/env bash
 
-# Simple dmenu Wi-Fi connector using NetworkManager (nmcli)
+# Simple rofi Wi-Fi connector using NetworkManager (nmcli)
 
-# Dependencies: dmenu, nmcli, notify-send (optional)
+# Dependencies: rofi, nmcli, notify-send (optional)
 
 # Get available networks
 networks=$(nmcli -t -f SSID,SIGNAL,SECURITY dev wifi list | awk -F: '!seen[$1]++ && $1 != "" { printf "%-30s  %3s%%  %s\n", $1, $2, $3 }')
@@ -13,7 +13,7 @@ networks=$(nmcli -t -f SSID,SIGNAL,SECURITY dev wifi list | awk -F: '!seen[$1]++
 }
 
 # Pick network
-chosen=$(echo "$networks" | dmenu -l 10 -p "Select Wi-Fi:" | awk '{print $1}')
+chosen=$(echo "$networks" | rofi -dmenu -l 10 -p "Select Wi-Fi:" | awk '{print $1}')
 [ -z "$chosen" ] && exit 1
 
 # Check if already connected
@@ -28,7 +28,7 @@ security=$(nmcli -t -f SSID,SECURITY dev wifi list | grep -F "$chosen" | awk -F:
 if [[ "$security" == "--" || "$security" == "" ]]; then
     nmcli dev wifi connect "$chosen" && notify-send "Wi-Fi" "Connected to $chosen" && exit 0
 else
-    password=$(echo "" | dmenu -p "Password for $chosen:")
+    password=$(echo "" | rofi -dmenu -p "Password for $chosen:")
     [ -z "$password" ] && exit 1
     nmcli dev wifi connect "$chosen" password "$password" && notify-send "Wi-Fi" "Connected to $chosen" || notify-send "Wi-Fi" "Connection failed"
 fi

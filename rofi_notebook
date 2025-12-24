@@ -26,14 +26,14 @@ function fbopen() {
 }
 
 function new_note() {
-    name="$(echo "" | dmenu -p "Enter a name (default: $today, fmt: Notes_\$name/\$today.md): " <&-)" || exit 0
+    name="$(echo "" | rofi -dmenu -p "Enter a name (default: $today, fmt: Notes_\$name/\$today.md): " <&-)" || exit 0
     : "${name:=$today}"
     filedir="$(gennotes "$name")"
     "${GEDIT:-fbopen}" "$filedir"
 }
 
 function notebook() {
-    choice=$(echo -e "📘 New Note\n$(getfiles)" | dmenu -l 5 -p "Choose note or create new: ")
+    choice=$(echo -e "📘 New Note\n$(getfiles)" | rofi -dmenu -l 5 -p "Choose note or create new: ")
     case "$choice" in
         "📘 New Note")
             new_note

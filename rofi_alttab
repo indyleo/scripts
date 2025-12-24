@@ -4,7 +4,7 @@
 window_list=$(wmctrl -l | awk '{$1=""; print substr($0,2)}')
 
 # Use dmenu to select the window
-selected_window=$(echo "$window_list" | dmenu -p "Switch to:")
+selected_window=$(echo "$window_list" | sed 's/0//g' | rofi -dmenu -p "Switch to:")
 
 # Focus the selected window
 if [ -n "$selected_window" ]; then

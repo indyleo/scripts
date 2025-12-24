@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Nerd Font Icon Picker
-Downloads Nerd Font icons and provides a dmenu interface for selection
+Downloads Nerd Font icons and provides a rofi interface for selection
 """
 
 import argparse
@@ -72,14 +72,14 @@ def download_nerdfont_data():
 
 def check_dependencies():
     """Check if required tools are available"""
-    # Check for dmenu
-    has_dmenu = (
-        subprocess.run(["which", "dmenu"], capture_output=True, check=False).returncode
+    # Check for rofi
+    has_rofi = (
+        subprocess.run(["which", "rofi"], capture_output=True, check=False).returncode
         == 0
     )
 
-    if not has_dmenu:
-        print("Error: dmenu not found. Please install dmenu.", file=sys.stderr)
+    if not has_rofi:
+        print("Error: rofi not found. Please install rofi.", file=sys.stderr)
         sys.exit(1)
 
     # Check for xclip or xsel
@@ -102,7 +102,7 @@ def check_dependencies():
 
 
 def show_selection_menu():
-    """Display selection menu using dmenu"""
+    """Display selection menu using rofi"""
     if not NERDFONT_FILE.exists():
         print("Cache file not found. Downloading...", file=sys.stderr)
         if not download_nerdfont_data():
@@ -111,7 +111,7 @@ def show_selection_menu():
     with open(NERDFONT_FILE, "r", encoding="utf-8") as f:
         icons_data = f.read()
 
-    cmd = ["dmenu", "-l", "10", "-p", "Select Icon:"]
+    cmd = ["rofi", "-dmenu", "-l", "10", "-p", "Select Icon:"]
 
     try:
         result = subprocess.run(

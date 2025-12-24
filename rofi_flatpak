@@ -4,7 +4,7 @@
 flatpak_apps=$(flatpak list --app --columns=name,application | awk -F'\t' '{print $1 " (" $2 ")"}')
 
 # Use dmenu to show the app names and capture the selection
-selected_entry=$(echo "$flatpak_apps" | dmenu -p "Select a Flatpak app:")
+selected_entry=$(echo "$flatpak_apps" | rofi -dmenu -p "Select a Flatpak app:")
 
 # Extract the Application ID from the selected entry (text inside parentheses)
 if [[ -n "$selected_entry" ]]; then

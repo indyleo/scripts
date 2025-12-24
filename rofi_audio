@@ -2,6 +2,6 @@
 
 set -euo pipefail
 
-choice=$(pactl list short sources | awk '{print $2}' | dmenu -l 5 -p "Input:")
+choice=$(pactl list short sources | awk '{print $2}' | rofi -dmenu -l 5 -p "Input:")
 
 pactl set-default-sink "$choice" && notify-send "Audio switched!" || exit 0
