@@ -4,10 +4,11 @@ import re
 import subprocess
 import tempfile
 
-# Path to your DWM config
-CONFIG_PATH = os.path.expanduser("~/Github/suckless/dwm/config.def.h")
+# Paths
+DWM_CONFIG_PATH = os.path.expanduser("~/Github/suckless/dwm/config.def.h")
+SXHKD_CONFIG_PATH = os.path.expanduser("~/.config/sxhkd/sxhkdrc")
 
-# Regular expressions
+# DWM Regular expressions
 key_array_re = re.compile(r"^static\s+const\s+Key\s+keys\[\]\s*=\s*{")
 keybinding_re = re.compile(
     r"\{\s*([^,]+)\s*,\s*([A-Za-z0-9_]+)\s*,\s*([a-zA-Z0-9_]+)\s*,\s*(.*)\},?"
@@ -17,7 +18,7 @@ define_re = re.compile(r"#define\s+([A-Z0-9_]+)\s+([A-Za-z0-9_|]+)")
 tagkeys_re = re.compile(r"TAGKEYS\s*\(\s*([A-Za-z0-9_]+)\s*,\s*([0-9]+)\s*\)")
 
 
-# Functions
+# DWM Functions
 def parse_defines(lines):
     """Extract #define mappings to resolve modifier key names."""
     defines = {}
@@ -85,7 +86,7 @@ def expand_tagkeys(match, defines):
     ]
 
 
-def parse_config(path):
+def parse_dwm_config(path):
     """Parse DWM config and return grouped keybindings."""
     with open(path, "r", encoding="utf-8") as f:
         lines = f.readlines()
@@ -137,18 +138,124 @@ def parse_config(path):
     return groups
 
 
-def generate_markdown(groups):
-    md = ["# DWM Keybindings Cheat Sheet\n"]
-    for group, bindings in groups.items():
-        if not bindings:
+# SXHKD Functions
+def parse_sxhkd_config(path):
+    """Parse SXHKD config and return grouped keybindings."""
+    with open(path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    groups = {}
+    current_group = "General"
+    i = 0
+
+    while i < len(lines):
+        line = lines[i].rstrip()
+
+        # Skip empty lines
+        if not line.strip():
+            i += 1
             continue
-        md.append(f"## {group}\n")
-        md.append("| Key Combination | Function | Argument |")
-        md.append("|-----------------|-----------|-----------|")
-        for mods, key, func, arg in bindings:
-            combo = f"{mods}+{prettify_key(key)}" if mods else prettify_key(key)
-            md.append(f"| `{combo}` | `{func}` | `{arg}` |")
-        md.append("")  # blank line
+
+        # Section headers (lines starting with #)
+        if line.startswith("#"):
+            # Check if it's a section divider
+            if "=" in line or "-" in line:
+                i += 1
+                continue
+            # Extract section name
+            section = line.lstrip("#").strip()
+            if section and not section.startswith("==="):
+                # Skip very short comments that are likely inline
+                if len(section) > 3:
+                    current_group = section
+                    if current_group not in groups:
+                        groups[current_group] = []
+            i += 1
+            continue
+
+        # Parse keybinding (non-comment, non-empty line followed by command)
+        if not line.startswith("#") and line.strip():
+            keybind = line.strip()
+            command = ""
+
+            # Look for the command on the next line(s)
+            j = i + 1
+            while j < len(lines):
+                next_line = lines[j].rstrip()
+                # Command lines typically start with whitespace or tab
+                if next_line and (
+                    next_line.startswith("\t") or next_line.startswith("    ")
+                ):
+                    command = next_line.strip()
+                    i = j  # Move index forward
+                    break
+                elif not next_line.strip():
+                    j += 1
+                    continue
+                else:
+                    break
+
+            if command:
+                # Process keybind to normalize format
+                keybind = normalize_sxhkd_keybind(keybind)
+                groups.setdefault(current_group, []).append((keybind, command))
+
+        i += 1
+
+    return groups
+
+
+def normalize_sxhkd_keybind(keybind):
+    """Normalize SXHKD keybind format for better display."""
+    # Handle brace expansions like {c,v} or {Up,Down,m}
+    # For display purposes, we'll show them as-is since they represent multiple bindings
+
+    # Capitalize modifier keys
+    keybind = keybind.replace("super", "Super")
+    keybind = keybind.replace("alt", "Alt")
+    keybind = keybind.replace("ctrl", "Ctrl")
+    keybind = keybind.replace("shift", "Shift")
+
+    # Prettify special keys
+    keybind = keybind.replace("Return", "↵")
+    keybind = keybind.replace("Escape", "Esc")
+    keybind = keybind.replace("Tab", "⇥")
+    keybind = keybind.replace("Print", "PrtSc")
+
+    return keybind
+
+
+# Markdown Generation
+def generate_markdown(dwm_groups, sxhkd_groups):
+    md = ["# Keybindings Cheat Sheet\n"]
+
+    # DWM Section
+    if dwm_groups:
+        md.append("# DWM Keybindings\n")
+        for group, bindings in dwm_groups.items():
+            if not bindings:
+                continue
+            md.append(f"## {group}\n")
+            md.append("| Key Combination | Function | Argument |")
+            md.append("|-----------------|----------|----------|")
+            for mods, key, func, arg in bindings:
+                combo = f"{mods}+{prettify_key(key)}" if mods else prettify_key(key)
+                md.append(f"| `{combo}` | `{func}` | `{arg}` |")
+            md.append("")
+
+    # SXHKD Section
+    if sxhkd_groups:
+        md.append("# SXHKD Keybindings\n")
+        for group, bindings in sxhkd_groups.items():
+            if not bindings:
+                continue
+            md.append(f"## {group}\n")
+            md.append("| Key Combination | Command |")
+            md.append("|-----------------|---------|")
+            for keybind, command in bindings:
+                md.append(f"| `{keybind}` | `{command}` |")
+            md.append("")
+
     return "\n".join(md)
 
 
@@ -158,10 +265,12 @@ def view_markdown(md_content):
         tmp_path = tmp.name
 
     viewer = None
-    for cmd in ["nvim", "glow -p", "moar", "less"]:
+    for cmd in ["nvim", "glow", "moar", "less"]:
         if (
             subprocess.call(
-                ["which", cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                ["which", cmd.split()[0]],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             == 0
         ):
@@ -169,16 +278,33 @@ def view_markdown(md_content):
             break
 
     if viewer:
-        subprocess.call([viewer, tmp_path])
+        if viewer == "glow":
+            subprocess.call(["glow", "-p", tmp_path])
+        else:
+            subprocess.call([viewer, tmp_path])
     else:
         print(md_content)
 
 
 if __name__ == "__main__":
-    if not os.path.exists(CONFIG_PATH):
-        print(f"Error: {CONFIG_PATH} not found.")
+    dwm_groups = {}
+    sxhkd_groups = {}
+
+    # Parse DWM config if it exists
+    if os.path.exists(DWM_CONFIG_PATH):
+        dwm_groups = parse_dwm_config(DWM_CONFIG_PATH)
+    else:
+        print(f"Warning: {DWM_CONFIG_PATH} not found, skipping DWM config.")
+
+    # Parse SXHKD config if it exists
+    if os.path.exists(SXHKD_CONFIG_PATH):
+        sxhkd_groups = parse_sxhkd_config(SXHKD_CONFIG_PATH)
+    else:
+        print(f"Warning: {SXHKD_CONFIG_PATH} not found, skipping SXHKD config.")
+
+    if not dwm_groups and not sxhkd_groups:
+        print("Error: No config files found.")
         exit(1)
 
-    groups = parse_config(CONFIG_PATH)
-    md = generate_markdown(groups)
+    md = generate_markdown(dwm_groups, sxhkd_groups)
     view_markdown(md)
