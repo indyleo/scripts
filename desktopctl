@@ -10,6 +10,7 @@ WALLPAPERS_DIR="$HOME/Pictures/Wallpapers"
 SUCKLESS_DIR="$HOME/Github/suckless"
 ALACRITTY_CONFIG="$HOME_CONFIG/alacritty"
 ROFI_CONFIG="$HOME_CONFIG/rofi"
+VENCORD_THEME="$HOME/.var/app/dev.vencord.Vesktop/config/vesktop/themes/"
 DUNST_CONFIG="$HOME_CONFIG/dunst"
 TMUX_CONFIG="$HOME_CONFIG/tmux"
 XRESOURCES="$HOME"
@@ -166,6 +167,9 @@ set_theme() {
     xrdb "${XRESOURCES}/.Xresources"
     echo -e "${GREEN}Alacritty and Xresources configured${RESET}"
     log "INFO" "Alacritty, Rofi, & Xresources configured"
+
+    ln -sf "${VENCORD_THEME}/Theme/midnight-${THEME}.theme.css" "${VENCORD_THEME}/midnight.theme.css"
+    log "INFO" "Vencord theme has been set"
 
     APPS=(dmenu dwm slock st)
     declare -a pids
