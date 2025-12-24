@@ -9,6 +9,7 @@ HOME_CONFIG="${XDG_CONFIG_HOME:-"$HOME/.config"}"
 WALLPAPERS_DIR="$HOME/Pictures/Wallpapers"
 SUCKLESS_DIR="$HOME/Github/suckless"
 ALACRITTY_CONFIG="$HOME_CONFIG/alacritty"
+ROFI_CONFIG="$HOME_CONFIG/rofi"
 DUNST_CONFIG="$HOME_CONFIG/dunst"
 TMUX_CONFIG="$HOME_CONFIG/tmux"
 XRESOURCES="$HOME"
@@ -160,10 +161,11 @@ set_theme() {
     log "INFO" "Dunst configured"
 
     ln -sf "${ALACRITTY_CONFIG}/alacritty_${THEME}.toml" "${ALACRITTY_CONFIG}/alacritty.toml"
+    ln -sf "${ROFI_CONFIG}/themes/${THEME}.rasi" "${ROFI_CONFIG}/themes/theme.rasi"
     ln -sf "${XRESOURCES}/.Xresources_${THEME}" "${XRESOURCES}/.Xresources"
     xrdb "${XRESOURCES}/.Xresources"
     echo -e "${GREEN}Alacritty and Xresources configured${RESET}"
-    log "INFO" "Alacritty and Xresources configured"
+    log "INFO" "Alacritty, Rofi, & Xresources configured"
 
     APPS=(dmenu dwm slock st)
     declare -a pids
