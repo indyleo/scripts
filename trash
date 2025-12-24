@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
 # ======================================
-# Standalone Trash Utility (no trash-cli)
-# ======================================
-# Features:
-#   - Move files to ~/.local/share/Trash
-#   - Restore files interactively (fzf)
-#   - List and empty trash safely
+# Improved Standalone Trash Utility
 # ======================================
 
 set -euo pipefail
@@ -13,7 +8,7 @@ set -euo pipefail
 TRASH_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/Trash"
 FILES_DIR="$TRASH_DIR/files"
 INFO_DIR="$TRASH_DIR/info"
-FZF=$(command -v fzf || true)
+FZF=$(command -v fzf 2>/dev/null || true)
 mkdir -p "$FILES_DIR" "$INFO_DIR"
 
 function usage() {
@@ -24,10 +19,10 @@ Usage:
   trash restore               Interactively restore trashed files
   trash empty [days]          Empty trash (optionally older than N days)
   trash size                  Show total trash size
-  help                        Show this help
+  trash help                  Show this help
 
 Examples:
-  trash put old.txt
+  trash put old.txt dir/
   trash list
   trash restore
   trash empty 30
@@ -37,103 +32,173 @@ EOF
 
 function timestamp() { date +"%Y-%m-%dT%H:%M:%S"; }
 
-# --- Move files to trash (interactive like rm -i) ---
+# --- Move files to trash ---
 function put_trash() {
     [[ $# -lt 1 ]] && echo "Error: specify files to trash" && exit 1
 
     for f in "$@"; do
         if [[ ! -e "$f" ]]; then
-            echo "⚠️  Skipping: $f (not found)"
+            echo "⚠️  Skipping: $f (not found)" >&2
             continue
         fi
 
-        # ask once per argument (file or directory)
+        # Resolve to absolute path BEFORE moving
+        orig_path=$(realpath "$f")
+        base=$(basename "$f")
+
+        # Interactive confirmation
         printf "trash: move '%s' to trash? [y/N]: " "$f"
-        read -r ans
+        read -r ans </dev/tty
         [[ "$ans" =~ ^[Yy]$ ]] || { echo "Skipped."; continue; }
 
-        base=$(basename "$f")
+        # Generate unique trash filename
         dest="$FILES_DIR/$base"
-        while [[ -e "$dest" ]]; do
-            dest="$FILES_DIR/${base%.*}_$(date +%s%N).${base##*.}"
-        done
+        if [[ -e "$dest" ]]; then
+            timestamp_suffix=$(date +%s)
+            dest="$FILES_DIR/${base}_${timestamp_suffix}"
+        fi
 
-        mv "$f" "$dest"
+        # Move file (handle cross-filesystem moves)
+        if ! mv "$f" "$dest" 2>/dev/null; then
+            # Fallback: copy then remove (for cross-filesystem)
+            cp -a "$f" "$dest" && rm -rf "$f"
+        fi
 
-        cat > "$INFO_DIR/$(basename "$dest").trashinfo" <<EOF
+        # Create trashinfo metadata
+        trash_name=$(basename "$dest")
+        cat > "$INFO_DIR/${trash_name}.trashinfo" <<EOF
 [Trash Info]
-Path=$(realpath "$f")
+Path=$orig_path
 DeletionDate=$(timestamp)
 EOF
 
-        echo " Moved to trash: $f"
+        echo "✓ Moved to trash: $f"
     done
 }
 
 # --- List trashed files ---
 function list_trash() {
-    echo " Trash contents:"
-    echo "----------------------------------------------"
-    if ! ls "$FILES_DIR"/* &>/dev/null; then
-        echo "(empty)"
+    if ! compgen -G "$INFO_DIR/*.trashinfo" >/dev/null; then
+        echo "(trash is empty)"
         return
     fi
+
+    printf "%-20s  %-8s  %-50s\n" "DELETED" "SIZE" "ORIGINAL PATH"
+    echo "--------------------------------------------------------------------------------"
+
     for info in "$INFO_DIR"/*.trashinfo; do
         [[ -f "$info" ]] || continue
-        name=$(basename "$info" .trashinfo)
-        path=$(grep '^Path=' "$info" | cut -d= -f2-)
-        date=$(grep '^DeletionDate=' "$info" | cut -d= -f2-)
-        size=$(du -sh "$FILES_DIR/$name" 2>/dev/null | awk '{print $1}')
-        echo "$date  [$size]  $(basename "$path")"
+
+        trash_name=$(basename "$info" .trashinfo)
+        orig_path=$(grep '^Path=' "$info" 2>/dev/null | cut -d= -f2- || echo "unknown")
+        date=$(grep '^DeletionDate=' "$info" 2>/dev/null | cut -d= -f2- || echo "unknown")
+
+        if [[ -e "$FILES_DIR/$trash_name" ]]; then
+            size=$(du -sh "$FILES_DIR/$trash_name" 2>/dev/null | awk '{print $1}')
+        else
+            size="missing"
+        fi
+
+        printf "%-20s  %-8s  %s\n" "$date" "$size" "$orig_path"
     done | sort -r
 }
 
 # --- Restore trashed files ---
 function restore_trash() {
     if [[ -z "$FZF" ]]; then
-        echo "Error: fzf not found. Please install fzf for interactive restore."
+        echo "Error: fzf not found. Install fzf for interactive restore." >&2
         exit 1
     fi
 
-    mapfile -t choices < <(
-        list_trash | fzf -m --ansi --prompt="Select files to restore> " | awk '{print $NF}'
-    )
+    if ! compgen -G "$INFO_DIR/*.trashinfo" >/dev/null; then
+        echo "(trash is empty)"
+        return
+    fi
 
-    [[ ${#choices[@]} -eq 0 ]] && echo "No files selected." && exit 0
+    # Build selection list with trash_name|original_path
+    temp_list=$(mktemp)
+    for info in "$INFO_DIR"/*.trashinfo; do
+        trash_name=$(basename "$info" .trashinfo)
+        orig_path=$(grep '^Path=' "$info" 2>/dev/null | cut -d= -f2-)
+        date=$(grep '^DeletionDate=' "$info" 2>/dev/null | cut -d= -f2-)
+        echo "$trash_name|$orig_path|$date"
+    done > "$temp_list"
 
-    for base in "${choices[@]}"; do
-        info="$INFO_DIR/$base.trashinfo"
-        file="$FILES_DIR/$base"
-        [[ -f "$info" && -e "$file" ]] || continue
-        orig_path=$(grep '^Path=' "$info" | cut -d= -f2-)
+    # Let user select with fzf
+    selections=$(cat "$temp_list" | \
+            awk -F'|' '{printf "%-20s  %s\n", $3, $2}' | \
+        fzf -m --ansi --prompt="Select files to restore> " || true)
+
+    [[ -z "$selections" ]] && { rm "$temp_list"; echo "No files selected."; exit 0; }
+
+    # Parse selections and restore
+    echo "$selections" | while read -r line; do
+        # Extract original path from selection
+        orig_path=$(echo "$line" | awk '{$1=""; print $0}' | sed 's/^ *//')
+
+        # Find matching trash_name
+        trash_name=$(grep -F "|$orig_path|" "$temp_list" | cut -d'|' -f1)
+
+        info="$INFO_DIR/${trash_name}.trashinfo"
+        file="$FILES_DIR/$trash_name"
+
+        if [[ ! -f "$info" || ! -e "$file" ]]; then
+            echo "⚠️  Skipping: $orig_path (metadata missing)" >&2
+            continue
+        fi
+
+        # Check if destination exists
+        if [[ -e "$orig_path" ]]; then
+            printf "⚠️  '%s' already exists. Overwrite? [y/N]: " "$orig_path"
+            read -r ans </dev/tty
+            [[ "$ans" =~ ^[Yy]$ ]] || { echo "Skipped."; continue; }
+            rm -rf "$orig_path"
+        fi
+
+        # Restore file
         mkdir -p "$(dirname "$orig_path")"
         mv "$file" "$orig_path" && rm "$info"
-        echo " Restored: $orig_path"
+        echo "✓ Restored: $orig_path"
     done
+
+    rm "$temp_list"
 }
 
-# --- Empty trash (optionally older than N days) ---
+# --- Empty trash ---
 function empty_trash() {
     local days="${1:-0}"
 
+    if ! compgen -G "$INFO_DIR/*.trashinfo" >/dev/null; then
+        echo "(trash is already empty)"
+        return
+    fi
+
     if [[ "$days" -gt 0 ]]; then
-        echo "󰃢 Removing items older than $days days..."
-        find "$INFO_DIR" -type f -mtime +"$days" -exec basename {} .trashinfo \; | while read -r f; do
-            rm -rf "$FILES_DIR/$f" "$INFO_DIR/$f.trashinfo"
+        echo "🗑️  Removing items older than $days days..."
+        count=0
+        find "$INFO_DIR" -type f -name "*.trashinfo" -mtime +"$days" | while read -r info; do
+            trash_name=$(basename "$info" .trashinfo)
+            rm -rf "$FILES_DIR/$trash_name" "$info"
+            ((count++)) || true
         done
+        echo "✓ Removed $count old item(s)"
     else
-        printf "  Permanently delete all trashed files? [y/N]: "
-        read -r ans
+        printf "⚠️  Permanently delete all trashed files? [y/N]: "
+        read -r ans </dev/tty
         [[ "$ans" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
         rm -rf "$FILES_DIR"/* "$INFO_DIR"/*
-        echo " Trash emptied."
+        echo "✓ Trash emptied."
     fi
 }
 
 # --- Show total trash size ---
 function trash_size() {
-    echo "  Trash size:"
-    du -sh "$FILES_DIR" 2>/dev/null || echo "(empty)"
+    if [[ -d "$FILES_DIR" ]]; then
+        echo "📊 Trash size:"
+        du -sh "$FILES_DIR" 2>/dev/null || echo "0B"
+    else
+        echo "(trash is empty)"
+    fi
 }
 
 # --- Main ---
@@ -141,15 +206,14 @@ cmd="${1:-help}"
 shift || true
 
 case "$cmd" in
-    put) put_trash "$@" ;;
+    put|rm) put_trash "$@" ;;
     list|ls) list_trash ;;
     restore) restore_trash ;;
     empty|clean) empty_trash "${1:-}" ;;
     size|du) trash_size ;;
     help|--help|-h) usage ;;
     *)
-        echo "Unknown command: $cmd"
+        echo "Unknown command: $cmd" >&2
         usage
         ;;
 esac
-
