@@ -1,8 +1,8 @@
-#!/bin/env bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 # =====================================
-# CONFIG
+# CONFIG & PATHS
 # =====================================
 THEME_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/theme"
 HOME_CONFIG="${XDG_CONFIG_HOME:-"$HOME/.config"}"
@@ -13,13 +13,12 @@ ROFI_CONFIG="$HOME_CONFIG/rofi"
 VENCORD_THEME="$HOME/.var/app/dev.vencord.Vesktop/config/vesktop/themes"
 DUNST_CONFIG="$HOME_CONFIG/dunst"
 TMUX_CONFIG="$HOME_CONFIG/tmux"
-XRESOURCES="$HOME"
 
 LOG_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/desktopctl.log"
 TIMEXWALR_PID_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/timexwalr.pid"
 
 # =====================================
-# COLOR OUTPUT
+# COLORS & LOGGING
 # =====================================
 RED="\033[1;31m"
 GREEN="\033[1;32m"
@@ -27,9 +26,6 @@ YELLOW="\033[1;33m"
 BLUE="\033[1;34m"
 RESET="\033[0m"
 
-# =====================================
-# LOG FUNCTION
-# =====================================
 log() {
     local level="$1"
     local msg="$2"
@@ -37,217 +33,182 @@ log() {
 }
 
 # =====================================
-# HELP MENU FUNCTION
+# WALLPAPER LOGIC (WAYLAND + SWWW)
 # =====================================
-show_help() {
-    cat <<EOF
-Usage: desktopctl COMMAND [ARGS]
 
-Commands:
-  theme <gruvbox|nord>           Switch theme
-  wallpaper random <dir>          Set a random wallpaper once
-  wallpaper time <dir> [s]       Start timed wallpaper daemon
-  wallpaper time-stop             Stop timed wallpaper daemon
-  wallpaper time-restart <dir> [s]  Restart timed wallpaper daemon
-  wallpaper theme                 Set wallpaper based on current theme
-	wallpaper theme-time [s]        Set timed wallpaper based on current theme
-  --help|-h                      Show this help menu
-EOF
+init_swww() {
+    if ! pgrep -x "swww-daemon" > /dev/null; then
+        echo -e "${YELLOW}Starting swww-daemon...${RESET}"
+        swww-daemon & disown
+        sleep 0.7
+    fi
 }
 
-# =====================================
-# WALLPAPER FUNCTIONS
-# =====================================
-wallpaper_xwalr() {
+wallpaper_set() {
     local DIR="$1"
+    init_swww
+
     if [[ ! -d "$DIR" ]]; then
         echo -e "${RED}Error: Directory does not exist: $DIR${RESET}"
-        show_help
-        exit 1
+        return 1
     fi
-    local MONITORS=($(xrandr | grep " connected" | cut -d ' ' -f1))
-    for monitor in "${MONITORS[@]}"; do
-        local wp=$(find "$DIR" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' \) | shuf -n 1)
-        xwallpaper --output "$monitor" --stretch "$wp"
-        echo -e "${GREEN}Wallpaper set on $monitor to $wp${RESET}"
-        log "INFO" "Wallpaper set on $monitor to $wp"
-    done
+
+    # 1. Pick random image
+    local IMG
+    IMG=$(find "$DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" -o -iname "*.gif" \) | shuf -n 1)
+
+    if [[ -z "$IMG" ]]; then
+        echo -e "${RED}No images found in $DIR${RESET}"
+        return 1
+    fi
+
+    # 2. Pick random transition
+    local TRANSITIONS=(grow fade wipe left right top bottom outer wave center)
+    local TT="${TRANSITIONS[RANDOM % ${#TRANSITIONS[@]}]}"
+
+    # 3. Build command
+    local CMD=(swww img "$IMG"
+        --transition-type "$TT"
+        --transition-duration 1.3
+        --transition-fps 60
+    )
+
+    # 4. Add random coordinates for radial/growth transitions
+    if [[ "$TT" =~ ^(grow|center|outer)$ ]]; then
+        local POS_X="0.$(printf "%02d" $((RANDOM%80+10)))"
+        local POS_Y="0.$(printf "%02d" $((RANDOM%80+10)))"
+        CMD+=(--transition-pos "$POS_X,$POS_Y")
+    fi
+
+    # Execute
+    "${CMD[@]}"
+    echo -e "${GREEN}Wallpaper set: $(basename "$IMG") (Transition: $TT)${RESET}"
+    log "INFO" "Wallpaper set to $IMG with transition $TT"
 }
 
 start_timexwalr() {
     local DIR="$1"
     local INTERVAL="${2:-900}"
 
-    if [[ ! -d "$DIR" ]]; then
-        echo -e "${RED}Error: Directory does not exist: $DIR${RESET}"
-        show_help
-        exit 1
-    fi
-
-    if [[ -f "$TIMEXWALR_PID_FILE" ]] && kill -0 "$(cat "$TIMEXWALR_PID_FILE")" &>/dev/null; then
-        echo -e "${YELLOW}timexwalr is already running (PID $(cat "$TIMEXWALR_PID_FILE"))${RESET}"
-        exit 0
-    fi
+    stop_timexwalr || true
 
     (
         while true; do
-            wallpaper_xwalr "$DIR"
+            wallpaper_set "$DIR" || true
             sleep "$INTERVAL"
         done
     ) &
     local PID=$!
     echo "$PID" > "$TIMEXWALR_PID_FILE"
-    echo -e "${GREEN}timexwalr started (PID $PID)${RESET}"
-    log "INFO" "timexwalr started on $DIR with interval $INTERVAL sec, PID $PID"
+    echo -e "${GREEN}Wallpaper daemon started (PID $PID)${RESET}"
 }
 
 stop_timexwalr() {
     if [[ -f "$TIMEXWALR_PID_FILE" ]]; then
         local PID
         PID=$(cat "$TIMEXWALR_PID_FILE")
-        if kill -0 "$PID" &>/dev/null; then
-            kill "$PID"
-            echo -e "${GREEN}timexwalr stopped (PID $PID)${RESET}"
-            log "INFO" "timexwalr stopped (PID $PID)"
-        else
-            echo -e "${YELLOW}timexwalr PID $PID not running${RESET}"
-        fi
+        kill "$PID" 2>/dev/null || true
         rm -f "$TIMEXWALR_PID_FILE"
-    else
-        echo -e "${YELLOW}timexwalr is not running${RESET}"
+        echo -e "${YELLOW}Wallpaper daemon stopped.${RESET}"
     fi
 }
 
-restart_timexwalr() {
-    local DIR="$1"
-    local INTERVAL="${2:-900}"
-    stop_timexwalr
-    start_timexwalr "$DIR" "$INTERVAL"
-}
-
-wallpaper_theme() {
-    if [[ ! -f "$THEME_FILE" ]]; then
-        echo -e "${RED}Error: Theme file not found at $THEME_FILE${RESET}"
-        exit 1
-    fi
-    local THEME
-    THEME=$(cat "$THEME_FILE")
-    [[ "$THEME" != "gruvbox" && "$THEME" != "nord" ]] && THEME="other"
-    wallpaper_xwalr "${WALLPAPERS_DIR}/${THEME}"
-}
-
 # =====================================
-# THEME FUNCTIONS
+# THEME SWITCHING
 # =====================================
+
 set_theme() {
     local THEME="$1"
     if [[ "$THEME" != "gruvbox" && "$THEME" != "nord" ]]; then
-        echo -e "${RED}Error: Invalid theme: $THEME${RESET}"
-        show_help
+        echo -e "${RED}Invalid theme: $THEME${RESET}"
         exit 1
     fi
-    if [[ -f "$THEME_FILE" && "$(cat "$THEME_FILE")" == "$THEME" ]]; then
-        echo -e "${YELLOW}Theme '$THEME' is already active.${RESET}"
-        return
-    fi
 
-    stop_timexwalr || true
-    start_timexwalr "${WALLPAPERS_DIR}/${THEME}" 900 & disown
+    echo -e "${BLUE}Switching to $THEME theme...${RESET}"
 
+    # Update daemon and set first wallpaper
+    start_timexwalr "${WALLPAPERS_DIR}/${THEME}" 900
+
+    # Notification settings (Dunst)
     ln -sf "${DUNST_CONFIG}/dunstrc_${THEME}" "${DUNST_CONFIG}/dunstrc"
     pkill -x dunst || true
     dunst & disown
-    echo -e "${GREEN}Dunst configured${RESET}"
-    log "INFO" "Dunst configured"
 
+    # Terminal, Rofi, and Tmux
     ln -sf "${ALACRITTY_CONFIG}/alacritty_${THEME}.toml" "${ALACRITTY_CONFIG}/alacritty.toml"
     ln -sf "${ROFI_CONFIG}/themes/${THEME}.rasi" "${ROFI_CONFIG}/themes/theme.rasi"
-    ln -sf "${XRESOURCES}/.Xresources_${THEME}" "${XRESOURCES}/.Xresources"
-    xrdb "${XRESOURCES}/.Xresources"
-    echo -e "${GREEN}Alacritty and Xresources configured${RESET}"
-    log "INFO" "Alacritty, Rofi, & Xresources configured"
+    ln -sf "${TMUX_CONFIG}/tmux_${THEME}.conf" "${TMUX_CONFIG}/tmux.conf"
 
-    [[ ! -d "${VENCORD_THEME}/Themes" ]] && mkdir -p "${VENCORD_THEME}/Themes"
-    if [[ ! -f "${VENCORD_THEME}/Themes/midnight-${THEME}.theme.css" ]]; then
-        wget -O "${VENCORD_THEME}/Themes/midnight-${THEME}.theme.css" "https://raw.githubusercontent.com/indyleo/VencordThemes/refs/heads/main/midnight-${THEME}.theme.css"
+    # Discord (Vencord/Vesktop)
+    mkdir -p "${VENCORD_THEME}/Themes"
+    local V_THEME_FILE="${VENCORD_THEME}/Themes/midnight-${THEME}.theme.css"
+    if [[ ! -f "$V_THEME_FILE" ]]; then
+        wget -qO "$V_THEME_FILE" "https://raw.githubusercontent.com/indyleo/VencordThemes/refs/heads/main/midnight-${THEME}.theme.css" || true
     fi
-    ln -sf "${VENCORD_THEME}/Themes/midnight-${THEME}.theme.css" "${VENCORD_THEME}/midnight.theme.css"
-    log "INFO" "Vencord theme has been set"
+    ln -sf "$V_THEME_FILE" "${VENCORD_THEME}/midnight.theme.css"
 
+    # Suckless builds (Optional / XWayland)
     APPS=(dmenu dwm slock st)
-    declare -a pids
     for APP in "${APPS[@]}"; do
         (
             APP_DIR="${SUCKLESS_DIR}/${APP}"
             if [[ -d "$APP_DIR" ]]; then
-                echo -e "${BLUE}Building $APP...${RESET}"
                 cd "$APP_DIR"
                 ln -sf "config_${THEME}.def.h" "config.def.h"
                 sudo cp config.def.h config.h
-                sudo make clean install
-                log "INFO" "$APP build finished"
-                echo -e "${GREEN}$APP build finished${RESET}"
-            else
-                echo -e "${YELLOW}Warning: $APP directory not found at $APP_DIR${RESET}"
-                log "WARN" "$APP directory not found at $APP_DIR"
+                sudo make clean install > /dev/null 2>&1
             fi
         ) &
-        pids+=($!)
     done
-    for pid in "${pids[@]}"; do wait $pid; done
-
-    ln -sf "${TMUX_CONFIG}/tmux_${THEME}.conf" "${TMUX_CONFIG}/tmux.conf"
 
     echo "$THEME" > "$THEME_FILE"
-    if pgrep -x dwmblocks > /dev/null; then
-        pkill -x dwmblocks
-        dwmblocks & disown
-    fi
-    if ! pgrep -x dwmblocks > /dev/null; then
-        dwmblocks & disown
-    fi
-    echo -e "${GREEN}Theme switched to $THEME${RESET}"
+    echo -e "${GREEN}Theme '$THEME' applied successfully.${RESET}"
     log "INFO" "Theme switched to $THEME"
 }
 
 # =====================================
-# MAIN CLI
+# CLI MENU
 # =====================================
-if [[ $# -eq 0 ]]; then
-    show_help
-    exit 0
-fi
+
+show_help() {
+    cat <<EOF
+Usage: desktopctl COMMAND [ARGS]
+
+Commands:
+  theme <gruvbox|nord>             Switch system theme and wallpaper dir
+  wallpaper random <dir>           Set a random wallpaper once
+  wallpaper time <dir> [s]         Start timed wallpaper daemon
+  wallpaper time-stop              Stop timed wallpaper daemon
+  wallpaper theme                  Set random wallpaper from current theme dir
+  wallpaper theme-time [s]         Start daemon using current theme dir
+EOF
+}
+
+[[ $# -eq 0 ]] && { show_help; exit 0; }
 
 COMMAND="$1"
 shift || true
 
 case "$COMMAND" in
-    theme) set_theme "${1:- }" ;;
+    theme) set_theme "${1:-}" ;;
     wallpaper)
-        if [[ $# -eq 0 ]]; then show_help; exit 1; fi
-        WP_CMD="$1"
-        shift
+        WP_CMD="${1:-}"
+        shift || true
         case "$WP_CMD" in
-            random) wallpaper_random "$1" ;;
-            time) wallpaper_time "$1" "${1:-900}" ;;
-            time-stop) wallpaper_time_stop ;;
-            time-restart) wallpaper_time_restart "$1" "${2:-900}" ;;
-            theme) wallpaper_theme ;;
-            theme-time)
-                INTERVAL="${1:-900}"
-                if [[ ! -f "$THEME_FILE" ]]; then
-                    echo -e "${RED}Error: Theme file not found at $THEME_FILE${RESET}"
-                    exit 1
-                fi
-                THEME=$(cat "$THEME_FILE")
-                [[ "$THEME" != "gruvbox" && "$THEME" != "nord" ]] && THEME="other"
-                start_timexwalr "${WALLPAPERS_DIR}/${THEME}" "$INTERVAL"
+            random)     wallpaper_set "${1:-$WALLPAPERS_DIR}" ;;
+            time)       start_timexwalr "${1:-$WALLPAPERS_DIR}" "${2:-900}" ;;
+            time-stop)  stop_timexwalr ;;
+            theme)
+                CUR_THEME=$(cat "$THEME_FILE" 2>/dev/null || echo "gruvbox")
+                wallpaper_set "${WALLPAPERS_DIR}/$CUR_THEME"
                 ;;
-
-            *) echo -e "${RED}Unknown wallpaper command: $WP_CMD${RESET}"; show_help ;;
+            theme-time)
+                CUR_THEME=$(cat "$THEME_FILE" 2>/dev/null || echo "gruvbox")
+                start_timexwalr "${WALLPAPERS_DIR}/$CUR_THEME" "${1:-900}"
+                ;;
+            *) show_help ;;
         esac
         ;;
-    --help|-h) show_help ;;
+    -h|--help) show_help ;;
     *) echo -e "${RED}Unknown command: $COMMAND${RESET}"; show_help ;;
 esac
-
