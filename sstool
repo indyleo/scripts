@@ -1,137 +1,77 @@
 #!/bin/env bash
 
 # Required binaries
-deps=(import magick xdotool xrandr notify-send xclip slop)
+deps=(grim slurp wl-copy notify-send magick jq hyprctl)
 RED=$(tput setaf 1)
 RESET=$(tput sgr0)
 
 missing=()
-
 for cmd in "${deps[@]}"; do
     command -v "$cmd" &>/dev/null || missing+=("$cmd")
 done
 
 if (( ${#missing[@]} )); then
-    echo "Missing dependencies:"
-    for cmd in "${missing[@]}"; do
-        echo "  - ${RED}$cmd${RESET}"
-    done
+    echo "Missing dependencies. Please install: ${missing[*]}"
     exit 1
 fi
 
-opt="${1}"
-
 SAVE_DIR="${HOME}/Pictures/Screenshots"
 mkdir -p "$SAVE_DIR"
-
 timestamp=$(date +"%Y-%m-%d_%H-%M-%S")
 filename="${SAVE_DIR}/${timestamp}.png"
-tmpfile=$(mktemp --suffix=.png); trap 'rm -f "$TMP"' EXIT
 
-function selection() {
-    if pgrep -x import >/dev/null; then
-        notify-send "Screenshot" "A selection is already in progress."
-        return
+function finalize() {
+    if [ -f "$1" ]; then
+        wl-copy < "$1"
+        notify-send "Screenshot Captured" "Saved to: $(basename "$1")" -i "$1"
     fi
-
-    notify-send "Select an area to capture..."
-    import "$filename" || { notify-send "Error:" "Failed to capture selection."; return; }
-    notify-send "Saved to:" "$filename"
-    xclip -selection clipboard -t image/png "$filename"
 }
 
+function selection() {
+    grim -g "$(slurp -b '#00000044' -c '#ffffff' -s '#ffffff11')" "$filename"
+    finalize "$filename"
+}
 
 function full() {
-    notify-send "Capturing full screen..."
-    import -window root "$filename"
-    notify-send "Saved to:" "$filename"
-    xclip -selection clipboard -t image/png "$filename"
+    grim "$filename"
+    finalize "$filename"
 }
 
 function window() {
-    notify-send "Capturing focused window..."
-    win_id=$(xdotool getactivewindow)
-    if [ -z "$win_id" ]; then
-        notify-send "Error:" "Could not get active window."
+    # Get the active window geometry from hyprctl
+    # We parse the 'at' (x,y) and 'size' (w,h) fields
+    window_geom=$(hyprctl activewindow -j | jq -r '"\(.at[0]),\(.at[1]) \(.size[0])x\(.size[1])"')
+
+    if [ "$window_geom" == "0,0 0x0" ]; then
+        notify-send "Error" "No active window detected."
         exit 1
     fi
-    import -window "$win_id" "$filename"
-    notify-send "Saved to:" "$filename"
-    xclip -selection clipboard -t image/png "$filename"
+
+    grim -g "$window_geom" "$filename"
+    finalize "$filename"
 }
 
 function screen() {
-    notify-send "Capturing active screen containing the focused window..."
-
-    win_id=$(xdotool getactivewindow)
-    if [ -z "$win_id" ]; then
-        notify-send "Error:" "Could not get active window."
-        exit 1
-    fi
-
-    # Get window absolute position
-    read -r win_x win_y <<< $(xdotool getwindowgeometry --shell "$win_id" | grep -E 'X=|Y=' | sed 's/X=//; s/Y=//' | tr '\n' ' ')
-
-    # Get monitors geometry from xrandr
-    monitors=$(xrandr | grep ' connected' | grep -oP '\d+x\d+\+\d+\+\d+')
-
-    monitor_geometry=""
-    for mon in $monitors; do
-        IFS='x+'
-        read -r mon_w mon_h mon_x mon_y <<< "$mon"
-        IFS=' '
-
-        if (( win_x >= mon_x && win_x < mon_x + mon_w && win_y >= mon_y && win_y < mon_y + mon_h )); then
-            monitor_geometry="${mon_w}x${mon_h}+${mon_x}+${mon_y}"
-            break
-        fi
-    done
-
-    if [ -z "$monitor_geometry" ]; then
-        notify-send "Warning:" "Could not detect active monitor, capturing full screen."
-        import -window root "$filename"
-    else
-        import -window root -crop "$monitor_geometry" "$filename"
-    fi
-
-    notify-send "Saved to:" "$filename"
-    xclip -selection clipboard -t image/png "$filename"
+    # Captures the monitor currently focused
+    monitor_name=$(hyprctl monitors -j | jq -r '.[] | select(.focused == true) | .name')
+    grim -o "$monitor_name" "$filename"
+    finalize "$filename"
 }
 
 function colorpicker() {
-    crop_area=$(slop --tolerance=0 --noopengl) || {
-        notify-send "Cancelled" "No area selected."
-        exit 1
-    }
-    magick import -window root -crop "$crop_area" "$tmpfile"
-    hex=$(magick "$tmpfile" -scale 1x1\! -format "#%[hex:p{0,0}]" info: 2>/dev/null || echo "#??????")
-    echo "$hex" | tee ~/.cache/last_color.hex | xclip -selection clipboard
-    notify-send -i "$tmpfile" "Color Picked" "Copied: $hex"
+    # hyprpicker is actually the best tool for this, but using grim/magick for compatibility
+    color=$(grim -g "$(slurp -p)" -t ppm - | magick - -format '%[pixel:p{0,0}]' txt:- | grep -E -o '#[0-9A-Fa-f]{6}')
+    if [ -n "$color" ]; then
+        echo "$color" | wl-copy
+        notify-send "Color Picked" "$color copied to clipboard."
+    fi
 }
 
-function help_menu() {
-    cat <<EOF
-Usage: $(basename "$0") [OPTION]
-
-Options:
-  -h, --help        Show this help message
-  -s, --select      Select an area to capture
-  -f, --full        Capture full screen
-  -w, --window      Capture focused window
-  -c, --colorpicker Capture color picker
-EOF
-}
-
-case "$opt" in
+case "$1" in
     --select|-s) selection ;;
-    --screen|-sc) screen ;;
-    --full|-f) full ;;
     --window|-w) window ;;
+    --full|-f)   full ;;
+    --screen|-sc) screen ;;
     --colorpicker|-c) colorpicker ;;
-    --help|-h) help_menu ;;
-    *)
-        echo "Error: '${opt:- }' Invalid option."
-        help_menu
-        exit 1
-        ;;
+    *) echo "Usage: $0 {--select|--window|--full|--screen|--colorpicker}" ;;
 esac
