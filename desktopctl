@@ -14,7 +14,6 @@ VENCORD_THEME="$HOME/.var/app/dev.vencord.Vesktop/config/vesktop/themes"
 DUNST_CONFIG="$HOME_CONFIG/dunst"
 TMUX_CONFIG="$HOME_CONFIG/tmux"
 XRESOURCES="$HOME"
-STARTPAGE="$HOME/Github/portfilio/startpage/"
 
 LOG_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/desktopctl.log"
 TIMEXWALR_PID_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/timexwalr.pid"
@@ -168,6 +167,7 @@ set_theme() {
     echo -e "${GREEN}Alacritty and Xresources configured${RESET}"
     log "INFO" "Alacritty, Rofi, & Xresources configured"
 
+    [[ ! -d "${VENCORD_THEME}/Themes" ]] && mkdir -p "${VENCORD_THEME}/Themes"
     if [[ ! -f "${VENCORD_THEME}/Themes/midnight-${THEME}.theme.css" ]]; then
         wget -O "${VENCORD_THEME}/Themes/midnight-${THEME}.theme.css" "https://raw.githubusercontent.com/indyleo/VencordThemes/refs/heads/main/midnight-${THEME}.theme.css"
     fi
@@ -197,11 +197,6 @@ set_theme() {
     for pid in "${pids[@]}"; do wait $pid; done
 
     ln -sf "${TMUX_CONFIG}/tmux_${THEME}.conf" "${TMUX_CONFIG}/tmux.conf"
-    if [[ -d "$STARTPAGE" ]]; then
-        echo "$THEME" > "${STARTPAGE}/theme.txt"
-        echo -e "${GREEN}Startpage theme set${RESET}"
-        log "INFO" "Startpage theme set"
-    fi
 
     echo "$THEME" > "$THEME_FILE"
     if pgrep -x dwmblocks > /dev/null; then
