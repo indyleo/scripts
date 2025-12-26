@@ -10,7 +10,7 @@ WALLPAPERS_DIR="$HOME/Pictures/Wallpapers"
 SUCKLESS_DIR="$HOME/Github/suckless"
 ALACRITTY_CONFIG="$HOME_CONFIG/alacritty"
 ROFI_CONFIG="$HOME_CONFIG/rofi"
-VENCORD_THEME="$HOME/.var/app/dev.vencord.Vesktop/config/vesktop/themes"
+VENCORD_THEME="$HOME_CONFIG/vensktop/themes"
 DUNST_CONFIG="$HOME_CONFIG/dunst"
 TMUX_CONFIG="$HOME_CONFIG/tmux"
 
