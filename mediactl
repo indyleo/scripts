@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # mediactl - Unified media player controller
-# Manages browser-based media (YouTube, Spotify Web) and dedicated players (Spotify, MPD, SubsonicTUI)
-# with intelligent priority-based source selection
+# Manages browser-based media and dedicated players with priority-based selection.
 
 set -euo pipefail
 
@@ -10,16 +9,19 @@ set -euo pipefail
 # ============================================================================
 
 readonly SCRIPT_NAME="mediactl"
-readonly VERSION="1.2.1"  # updated version with fixes
+readonly VERSION="1.3.0"
 
+# Priority 1: Browsers (Usually video content)
 readonly BROWSER_PLAYERS=(
     "firefox"
     "chromium"
     "chrome"
     "brave"
+    "vivaldi"
     "plasma-browser-integration"
 )
 
+# Priority 2: Dedicated Music Apps
 readonly SONG_PLAYERS=(
     "spotify"
     "SubsonicTUI"
@@ -29,6 +31,7 @@ readonly SONG_PLAYERS=(
     "mopidy"
     "elisa"
     "rhythmbox"
+    "vlc"
 )
 
 readonly CACHE_DIR="${XDG_RUNTIME_DIR:-/tmp}/mediactl"
@@ -36,6 +39,7 @@ readonly PLAYER_LIST_CACHE="$CACHE_DIR/players"
 readonly CACHE_LOCKFILE="$CACHE_DIR/players.lock"
 readonly CACHE_LIFETIME=1  # seconds
 
+# Custom Icons (Nerd Fonts recommended)
 readonly ICON_BROWSER="🌐"
 readonly ICON_SONG="🎵"
 readonly ICON_PLAYING=" "
@@ -93,27 +97,22 @@ function get_all_players() {
         return 0
     fi
 
-    # Use file locking to prevent concurrent writes
+    # Use file locking to prevent concurrent writes (e.g., polybar multiple modules)
     (
-        # Try to acquire lock with 2 second timeout
         if ! flock -w 2 200; then
-            # Lock acquisition failed, try reading existing cache
             cat "$PLAYER_LIST_CACHE" 2>/dev/null || echo ""
             return 1
         fi
 
-        # Double-check cache freshness after acquiring lock
         if is_cache_fresh "$PLAYER_LIST_CACHE"; then
             cat "$PLAYER_LIST_CACHE"
             return 0
         fi
 
-        # Fetch players with timeout
         local players
         if players=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -l 2>/dev/null); then
             echo "$players" | tee "$PLAYER_LIST_CACHE"
         else
-            # If playerctl fails, return empty but don't cache
             echo ""
             return 1
         fi
@@ -141,27 +140,19 @@ function get_player_status_safe() {
     timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" status 2>/dev/null || echo "Stopped"
 }
 
-function get_browser_players() {
+function get_players_by_type() {
+    local type="$1"
     local all_players
     all_players=$(get_all_players)
 
     while IFS= read -r player; do
         [[ -z "$player" ]] && continue
-        if is_browser_player "$player"; then
-            local status
-            status=$(get_player_status_safe "$player")
-            echo "$player|$status"
-        fi
-    done <<< "$all_players"
-}
 
-function get_song_players() {
-    local all_players
-    all_players=$(get_all_players)
+        local match=0
+        if [[ "$type" == "browser" ]] && is_browser_player "$player"; then match=1; fi
+        if [[ "$type" == "song" ]] && is_song_player "$player"; then match=1; fi
 
-    while IFS= read -r player; do
-        [[ -z "$player" ]] && continue
-        if is_song_player "$player"; then
+        if [[ $match -eq 1 ]]; then
             local status
             status=$(get_player_status_safe "$player")
             echo "$player|$status"
@@ -173,47 +164,60 @@ function get_song_players() {
 # PRIORITY RESOLUTION
 # ============================================================================
 
+# Logic: Browser Playing > Song Playing > Browser Paused > Song Paused > Idle
 function get_active_player() {
     local filter="${1:-}"
-
     local active_info
 
+    # 1. Handle Explicit Filters
     if [[ "$filter" == "browser" ]]; then
-        active_info=$(get_browser_players | awk -F'|' '$2=="Playing" || $2=="Paused"{print "browser|"$1"|"$2; exit}')
+        active_info=$(get_players_by_type "browser" | awk -F'|' '$2=="Playing" || $2=="Paused"{print "browser|"$1"|"$2; exit}')
         [[ -z "$active_info" ]] && active_info="idle||Idle"
         echo "$active_info"
         return
     fi
 
     if [[ "$filter" == "song" ]]; then
-        active_info=$(get_song_players | awk -F'|' '$2=="Playing" || $2=="Paused"{print "song|"$1"|"$2; exit}')
+        active_info=$(get_players_by_type "song" | awk -F'|' '$2=="Playing" || $2=="Paused"{print "song|"$1"|"$2; exit}')
         [[ -z "$active_info" ]] && active_info="idle||Idle"
         echo "$active_info"
         return
     fi
 
-    # Default: browser > song
-    active_info=$(get_browser_players | awk -F'|' '$2=="Playing"{print "browser|"$1"|"$2; exit}')
-    [[ -z "$active_info" ]] && active_info=$(get_song_players | awk -F'|' '$2=="Playing"{print "song|"$1"|"$2; exit}')
+    # 2. Priority: Something is PLAYING
+    # Check Browser Playing
+    active_info=$(get_players_by_type "browser" | awk -F'|' '$2=="Playing"{print "browser|"$1"|"$2; exit}')
+
+    # Check Song Playing
+    if [[ -z "$active_info" ]]; then
+        active_info=$(get_players_by_type "song" | awk -F'|' '$2=="Playing"{print "song|"$1"|"$2; exit}')
+    fi
+
+    # 3. Priority: Fallback to PAUSED (so the bar doesn't go blank)
+    if [[ -z "$active_info" ]]; then
+        # Check Browser Paused
+        active_info=$(get_players_by_type "browser" | awk -F'|' '$2=="Paused"{print "browser|"$1"|"$2; exit}')
+    fi
+
+    if [[ -z "$active_info" ]]; then
+        # Check Song Paused
+        active_info=$(get_players_by_type "song" | awk -F'|' '$2=="Paused"{print "song|"$1"|"$2; exit}')
+    fi
+
+    # 4. Default to Idle
     [[ -z "$active_info" ]] && active_info="idle||Idle"
     echo "$active_info"
 }
 
 # ============================================================================
-# METADATA RETRIEVAL
+# METADATA & STATE
 # ============================================================================
 
 function get_player_metadata() {
     local player="$1"
-
-    [[ "$player" == "idle" ]] && {
-        echo "Idle||||"
-        return 0
-    }
+    [[ "$player" == "idle" ]] && { echo "Idle||||"; return 0; }
 
     local status title artist album art_url
-
-    # Use timeout for all playerctl commands to prevent hanging
     status=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" status 2>/dev/null || echo "Stopped")
     title=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" metadata title 2>/dev/null || echo "Unknown")
     artist=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" metadata artist 2>/dev/null || echo "Unknown")
@@ -222,10 +226,6 @@ function get_player_metadata() {
 
     echo "$status|$title|$artist|$album|$art_url"
 }
-
-# ============================================================================
-# STATE MANAGEMENT
-# ============================================================================
 
 function get_state() {
     local filter="${1:-}"
@@ -243,8 +243,7 @@ function get_state() {
 }
 
 function get_status_icon() {
-    local status="$1"
-    case "$status" in
+    case "$1" in
         Playing) echo "$ICON_PLAYING" ;;
         Paused)  echo "$ICON_PAUSED" ;;
         Stopped) echo "$ICON_STOPPED" ;;
@@ -253,33 +252,15 @@ function get_status_icon() {
     esac
 }
 
-function get_source_icon() {
-    local type="$1"
-    case "$type" in
-        browser) echo "$ICON_BROWSER" ;;
-        song)    echo "$ICON_SONG" ;;
-        *)       echo "" ;;
-    esac
-}
-
 function format_title() {
     local title="$1"
     local cutpoint="${2:-50}"
-
-    [[ "$title" == "Unknown" || "$title" == "Idle" ]] && {
-        echo "$title"
-        return
-    }
-
-    if [[ ${#title} -gt $cutpoint ]]; then
-        echo "${title:0:$cutpoint}…"
-    else
-        echo "$title"
-    fi
+    [[ "$title" == "Unknown" || "$title" == "Idle" ]] && { echo "$title"; return; }
+    if [[ ${#title} -gt $cutpoint ]]; then echo "${title:0:$cutpoint}…"; else echo "$title"; fi
 }
 
 # ============================================================================
-# CONTROL COMMANDS
+# CONTROL & COMMANDS
 # ============================================================================
 
 function send_control() {
@@ -288,23 +269,12 @@ function send_control() {
     active_info=$(get_active_player "$SOURCE")
     IFS='|' read -r type player status <<< "$active_info"
 
-    [[ "$type" == "idle" ]] && {
-        echo "No active player for source '${SOURCE:-auto}'" >&2
-        return 1
-    }
+    [[ "$type" == "idle" ]] && { echo "No active player." >&2; return 1; }
 
-    if ! timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" "$command" 2>/dev/null; then
-        echo "Failed to send $command to $player (timeout or error)" >&2
-        return 1
-    fi
+    timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" "$command" 2>/dev/null
 }
 
-# ============================================================================
-# COMMAND HANDLERS
-# ============================================================================
-
 function cmd_status() { get_state "$SOURCE"; }
-
 function cmd_title() {
     local cutpoint="${1:-50}"
     local state title
@@ -312,31 +282,22 @@ function cmd_title() {
     IFS='|' read -r _ _ _ title _ _ _ <<< "$state"
     format_title "$title" "$cutpoint"
 }
-
 function cmd_state() {
     local state type status
     state=$(get_state "$SOURCE")
-    IFS='|' read -r type _ status _ _ _ _ <<< "$state"
-    [[ "$type" == "idle" ]] || [[ "$status" != "Playing" ]] && { echo "$ICON_IDLE"; return; }
+    IFS='|' read -r type _ status _ <<< "$state"
+    [[ "$type" == "idle" ]] && { echo "$ICON_IDLE"; return; }
     get_status_icon "$status"
 }
-
 function cmd_state_title() {
     local cutpoint="${1:-50}"
     local state type status title icon
     state=$(get_state "$SOURCE")
-    IFS='|' read -r type _ status title _ _ _ <<< "$state"
-    [[ "$type" == "idle" ]] || [[ "$status" != "Playing" ]] && { echo "$ICON_IDLE Idle"; return; }
+    IFS='|' read -r type _ status title _ <<< "$state"
+    [[ "$type" == "idle" ]] && { echo "$ICON_IDLE Idle"; return; }
     icon=$(get_status_icon "$status")
     title=$(format_title "$title" "$cutpoint")
     echo "$icon $title"
-}
-
-function cmd_get_active_player() {
-    local active_info type
-    active_info=$(get_active_player "$SOURCE")
-    IFS='|' read -r type _ _ <<< "$active_info"
-    echo "$type"
 }
 
 function cmd_play_pause() { send_control play-pause; }
@@ -344,77 +305,39 @@ function cmd_next()       { send_control next; }
 function cmd_previous()   { send_control previous; }
 
 # ============================================================================
-# HELP & VERSION
+# MAIN
 # ============================================================================
 
 function show_help() {
     cat << EOF
-$SCRIPT_NAME v$VERSION - Unified media player controller
-
-USAGE:
-    $SCRIPT_NAME [--source <browser|song>] <command> [options]
-
-COMMANDS:
-    status              Get full state (type|player|status|title|artist|album|art_url)
-    title [cutpoint]    Get formatted title (default cutpoint: 50)
-    state               Get status icon only
-    state-title [cut]   Get icon + title
-    get-active-player   Get active source type (browser|song|idle)
-    play-pause          Toggle playback
-    next                Next track
-    previous            Previous track
-    help                Show this help message
-    version             Show version
-
-SOURCE FILTER:
-    --source <browser|song>  Restrict commands to a specific category
-
-EXAMPLES:
-    $SCRIPT_NAME --source browser play-pause
-    $SCRIPT_NAME -s song next
-    $SCRIPT_NAME state-title 30
-
-IMPROVEMENTS IN v1.2.1:
-    - Fixed race condition in cache writes (file locking)
-    - Added timeouts to prevent hanging on unresponsive players
-    - Better error handling for concurrent access
-    - Improved cache invalidation logic
-
+$SCRIPT_NAME v$VERSION
+USAGE: $SCRIPT_NAME [--source <browser|song>] <command>
+COMMANDS: status, title, state, state-title, play-pause, next, previous
 EOF
 }
-
-function show_version() { echo "$SCRIPT_NAME v$VERSION"; }
-
-# ============================================================================
-# MAIN
-# ============================================================================
 
 function main() {
     check_dependencies
     init_cache_dir
 
-    # Parse optional source flag
     if [[ $# -ge 2 ]] && [[ "$1" == "--source" || "$1" == "-s" ]]; then
         SOURCE="$2"
         shift 2
-        [[ "$SOURCE" != "browser" && "$SOURCE" != "song" ]] && die "Invalid source: $SOURCE"
     fi
 
     local command="${1:-help}"
     shift || true
 
     case "$command" in
-        status)           cmd_status ;;
-        title)            cmd_title "$@" ;;
-        state)            cmd_state ;;
-        state-title)      cmd_state_title "$@" ;;
-        get-active-player) cmd_get_active_player ;;
-        play-pause)       cmd_play_pause ;;
-        next)             cmd_next ;;
-        previous)         cmd_previous ;;
-        help|--help|-h)   show_help ;;
-        version|--version|-v) show_version ;;
-        *)                die "Unknown command: $command (try '$SCRIPT_NAME help')" ;;
+        status)            cmd_status ;;
+        title)             cmd_title "$@" ;;
+        state)             cmd_state ;;
+        state-title)       cmd_state_title "$@" ;;
+        play-pause)        cmd_play_pause ;;
+        next)              cmd_next ;;
+        previous)          cmd_previous ;;
+        help|--help|-h)    show_help ;;
+        *)                 die "Unknown command: $command" ;;
     esac
 }
 

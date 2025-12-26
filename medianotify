@@ -11,17 +11,18 @@ set -euo pipefail
 readonly SCRIPT_NAME="medianotify"
 readonly STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/medianotify"
 readonly STATE_FILE="$STATE_DIR/last_state"
+readonly EVENT_PIPE="$STATE_DIR/event_pipe"
 readonly NOTIFICATION_TIMEOUT=5000
 readonly NOTIFICATION_APP="Media Player"
 
-# Debounce settings (prevent notification spam from rapid events)
-readonly DEBOUNCE_TIME=0.3  # seconds
-declare -g LAST_EVENT_TIME=0
+# Debounce settings (milliseconds)
+readonly DEBOUNCE_TIME_MS=300
+declare -g LAST_EVENT_TIME_MS=0
 
-# Track notification history to prevent duplicates
+# Track notification history (store timestamps in seconds)
 declare -gA NOTIFIED_TRACKS=()
 
-# Job tracking for proper cleanup
+# Job tracking
 declare -ga MONITOR_PIDS=()
 
 # ============================================================================
@@ -41,29 +42,33 @@ function check_dependencies() {
     command -v mediactl &>/dev/null || die "mediactl not found in PATH"
     command -v playerctl &>/dev/null || die "playerctl not found in PATH"
     command -v notify-send &>/dev/null || die "notify-send not found"
-    command -v bc &>/dev/null || die "bc not found (required for debouncing)"
+    # bc is no longer required
 }
 
 function init_state_dir() {
     mkdir -p "$STATE_DIR"
+    if [[ ! -p "$EVENT_PIPE" ]]; then
+        rm -f "$EVENT_PIPE"
+        mkfifo "$EVENT_PIPE"
+    fi
 }
 
-function get_current_time() {
-    date +%s.%N
+function get_current_time_ms() {
+    # Returns current time in milliseconds
+    date +%s%3N
 }
 
 function should_debounce() {
-    local current_time
-    current_time=$(get_current_time)
+    local current_time_ms
+    current_time_ms=$(get_current_time_ms)
 
-    local elapsed
-    elapsed=$(echo "$current_time - $LAST_EVENT_TIME" | bc)
+    local elapsed=$((current_time_ms - LAST_EVENT_TIME_MS))
 
-    if (( $(echo "$elapsed < $DEBOUNCE_TIME" | bc -l) )); then
+    if (( elapsed < DEBOUNCE_TIME_MS )); then
         return 0  # Should debounce
     fi
 
-    LAST_EVENT_TIME=$current_time
+    LAST_EVENT_TIME_MS=$current_time_ms
     return 1  # Don't debounce
 }
 
@@ -80,14 +85,11 @@ function load_state() {
 }
 
 function save_state() {
-    local state="$1"
-    echo "$state" > "$STATE_FILE"
+    echo "$1" > "$STATE_FILE"
 }
 
 function get_track_key() {
-    local title="$1"
-    local artist="$2"
-    echo "${title}::${artist}"
+    echo "${1}::${2}"
 }
 
 function should_notify() {
@@ -106,58 +108,27 @@ function should_notify() {
     local track_key
     track_key=$(get_track_key "$new_title" "$new_artist")
 
-    # Check if we've already notified about this track being played
-    local current_time
-    current_time=$(date +%s)
+    local current_time_sec
+    current_time_sec=$(date +%s)
 
-    # If we notified about this track in the last 10 seconds, skip
+    # Check history window (10 seconds)
     if [[ -n "${NOTIFIED_TRACKS[$track_key]:-}" ]]; then
         local last_notif_time="${NOTIFIED_TRACKS[$track_key]}"
-        local time_diff=$((current_time - last_notif_time))
+        local time_diff=$((current_time_sec - last_notif_time))
 
         if [[ $time_diff -lt 10 ]]; then
             return 1
         fi
     fi
 
-    # Update notification timestamp for this track
-    NOTIFIED_TRACKS[$track_key]=$current_time
-
+    # Update notification timestamp
+    NOTIFIED_TRACKS[$track_key]=$current_time_sec
     return 0
 }
 
 # ============================================================================
 # NOTIFICATION FORMATTING
 # ============================================================================
-
-function get_notification_title() {
-    local new_type="$1"
-
-    local source_icon
-    case "$new_type" in
-        browser) source_icon="🌐" ;;
-        song)    source_icon="🎵" ;;
-        *)       source_icon="" ;;
-    esac
-
-    echo "$source_icon Now Playing"
-}
-
-function get_notification_body() {
-    local title="$1"
-    local artist="$2"
-    local album="$3"
-
-    local body="$title"
-
-    [[ -n "$artist" && "$artist" != "Unknown" ]] && \
-        body="$body"$'\n'"by $artist"
-
-    [[ -n "$album" && "$album" != "Unknown" ]] && \
-        body="$body"$'\n'"from $album"
-
-    echo "$body"
-}
 
 function send_notification() {
     local old_state="$1"
@@ -167,18 +138,30 @@ function send_notification() {
     local new_type new_status new_title new_artist new_album
     IFS='|' read -r new_type _ new_status new_title new_artist new_album <<< "$new_state"
 
-    local notif_title notif_body
-    notif_title=$(get_notification_title "$new_type")
-    notif_body=$(get_notification_body "$new_title" "$new_artist" "$new_album")
+    local source_icon
+    case "$new_type" in
+        browser) source_icon="🌐" ;;
+        song)    source_icon="🎵" ;;
+        *)       source_icon="" ;;
+    esac
+
+    local notif_title="$source_icon Now Playing"
+    local notif_body="$new_title"
+
+    [[ -n "$new_artist" && "$new_artist" != "Unknown" ]] && \
+        notif_body="$notif_body"$'\n'"by $new_artist"
+
+    [[ -n "$new_album" && "$new_album" != "Unknown" ]] && \
+        notif_body="$notif_body"$'\n'"from $new_album"
 
     local notify_cmd=(
         notify-send
         -t "$NOTIFICATION_TIMEOUT"
         -a "$NOTIFICATION_APP"
         -u normal
+        -h string:x-canonical-private-synchronous:medianotify
     )
 
-    # Add album art if available
     if [[ -n "$art_url" ]]; then
         local art_path="${art_url#file://}"
         [[ -f "$art_path" ]] && notify_cmd+=(-i "$art_path")
@@ -186,12 +169,8 @@ function send_notification() {
 
     notify_cmd+=("$notif_title" "$notif_body")
 
-    "${notify_cmd[@]}" 2>/dev/null || {
-        log "Failed to send notification"
-        return 1
-    }
-
-    log "Notification sent: $notif_title - $new_title"
+    "${notify_cmd[@]}" 2>/dev/null || log "Failed to send notification"
+    log "Notification sent: $new_title"
 }
 
 # ============================================================================
@@ -199,112 +178,109 @@ function send_notification() {
 # ============================================================================
 
 function handle_event() {
-    # Debounce rapid successive events
+    # Note: This function now runs in the MAIN process scope
+
     if should_debounce; then
         return
     fi
 
-    # Get current state from mediactl (uses its intelligent prioritization)
+    # Get current state from mediactl
     local current_state
     current_state=$(mediactl status 2>/dev/null || echo "idle||Idle|||")
 
-    # Extract relevant fields
     local type player status title artist album art_url
     IFS='|' read -r type player status title artist album art_url <<< "$current_state"
 
-    # Validate we got the expected number of fields
     if [[ -z "$type" ]]; then
-        log "Warning: Invalid state format from mediactl"
         return
     fi
 
-    # Create state key for comparison (without art_url to match saved format)
     local state_key="$type|$player|$status|$title|$artist|$album"
-
     local last_state
     last_state=$(load_state)
 
-    # Check if notification is needed
     if should_notify "$last_state" "$state_key"; then
         send_notification "$last_state" "$state_key" "$art_url"
     fi
 
-    # Update state
     save_state "$state_key"
 }
 
 # ============================================================================
-# EVENT MONITORING
+# MONITORING LOGIC
 # ============================================================================
 
-function kill_monitors() {
-    log "Stopping existing monitors..."
-
-    # Kill tracked background jobs
+function kill_writers() {
+    # Only kill the background 'playerctl' processes feeding the pipe
     for pid in "${MONITOR_PIDS[@]}"; do
         if kill -0 "$pid" 2>/dev/null; then
             kill "$pid" 2>/dev/null || true
         fi
     done
-
-    # Also kill any playerctl processes we started
-    pkill -P $$ playerctl 2>/dev/null || true
-
-    # Clear the array
     MONITOR_PIDS=()
-
-    # Give processes time to die
-    sleep 0.2
 }
 
-function monitor_events() {
-    log "Starting event-driven media monitoring"
+function spawn_writers() {
+    kill_writers
+    local current_players="$1"
 
-    # Handle initial state
-    LAST_EVENT_TIME=0
-    handle_event
+    if [[ -n "$current_players" ]]; then
+        log "Monitoring: $(echo "$current_players" | tr '\n' ' ')"
 
-    # Keep track of known players
-    local known_players=""
+        # We redirect output to the Named Pipe
+        # We assume the Main Loop is already reading from it
+        playerctl -a -F metadata > "$EVENT_PIPE" 2>/dev/null &
+        MONITOR_PIDS+=($!)
 
-    # Main monitoring loop
-    while true; do
-        # Get current list of players
-        local current_players
-        current_players=$(playerctl -l 2>/dev/null || echo "")
+        playerctl -a -F status > "$EVENT_PIPE" 2>/dev/null &
+        MONITOR_PIDS+=($!)
+    fi
+}
 
-        # If players changed, restart monitoring
-        if [[ "$current_players" != "$known_players" ]]; then
-            log "Player list changed, updating monitor..."
-            known_players="$current_players"
+function main_loop() {
+    log "Starting daemon..."
 
-            # Kill existing monitors
-            kill_monitors
+    # Ensure FIFO exists
+    init_state_dir
 
-            # If we have players, start monitoring them
-            if [[ -n "$current_players" ]]; then
-                log "Monitoring players: $(echo "$current_players" | tr '\n' ' ')"
+    # 1. Open the FIFO for Read+Write (FD 3).
+    # This prevents the 'read' loop from receiving EOF when writer processes die/restart.
+    exec 3<> "$EVENT_PIPE"
 
-                # Start monitoring in background and track PIDs
-                playerctl -a -F metadata 2>/dev/null | while read -r line; do
-                    handle_event
-                done &
-                MONITOR_PIDS+=($!)
+    # 2. Start the background check for player list changes
+    (
+        local known_players=""
+        while true; do
+            local current_players
+            current_players=$(playerctl -l 2>/dev/null || echo "")
 
-                playerctl -a -F status 2>/dev/null | while read -r line; do
-                    handle_event
-                done &
-                MONITOR_PIDS+=($!)
-
-                log "Started ${#MONITOR_PIDS[@]} monitor processes"
-            else
-                log "No players available, waiting..."
+            if [[ "$current_players" != "$known_players" ]]; then
+                # Write a special internal signal to the pipe to trigger update
+                echo "INTERNAL_UPDATE_PLAYERS $current_players" > "$EVENT_PIPE"
+                known_players="$current_players"
             fi
-        fi
+            sleep 2
+        done
+    ) &
+    local CHECKER_PID=$!
 
-        # Check for player changes every 2 seconds
-        sleep 2
+    # 3. Main Blocking Loop: Reads from FIFO
+    # Because we read from FD 3 or the file, and we keep it open, this loop never dies.
+    while read -r line <&3; do
+        if [[ "$line" == "INTERNAL_UPDATE_PLAYERS "* ]]; then
+            # Player list changed
+            local new_list="${line#INTERNAL_UPDATE_PLAYERS }"
+            spawn_writers "$new_list"
+            # Trigger an immediate check
+            handle_event
+        else
+            # Standard playerctl output or empty line
+            handle_event
+        fi
     done
+
+    # If we get here, something broke the pipe mechanism
+    kill "$CHECKER_PID" 2>/dev/null
 }
 
 # ============================================================================
@@ -312,112 +288,19 @@ function monitor_events() {
 # ============================================================================
 
 function cleanup() {
-    log "Shutting down gracefully"
-
-    # Kill background playerctl processes
-    kill_monitors
-
-    # Clean up FIFO if it exists
-    rm -f "$STATE_DIR/events" 2>/dev/null || true
-
+    log "Shutting down..."
+    kill_writers
+    pkill -P $$ 2>/dev/null || true
+    rm -f "$EVENT_PIPE" "$STATE_DIR/events" 2>/dev/null
+    exec 3>&- # Close FD
     exit 0
 }
 
 trap cleanup SIGINT SIGTERM EXIT
 
 # ============================================================================
-# HELP & VERSION
+# ENTRY POINT
 # ============================================================================
 
-function show_help() {
-    cat << EOF
-$SCRIPT_NAME - Event-driven media player notification daemon
-
-USAGE:
-    $SCRIPT_NAME [options]
-
-OPTIONS:
-    -h, --help      Show this help message
-    -v, --version   Show version
-
-DESCRIPTION:
-    Monitors media player state via playerctl EVENTS (no polling!)
-    and queries mediactl for intelligent source prioritization.
-    Sends desktop notifications when tracks change or playback starts.
-
-FEATURES:
-    - Event-driven (instant response, zero polling delay)
-    - No CPU usage when idle (only wakes on actual media events)
-    - Deduplicates notifications (no spam)
-    - Uses mediactl's intelligent browser/song prioritization
-    - Shows source indicator (browser 🌐 vs song 🎵)
-    - Album art support
-    - Smart debouncing for rapid events
-    - Persistent state across restarts
-    - Track-based notification history (10s window)
-
-NOTIFICATION TRIGGERS:
-    ✓ Track starts playing (new track)
-    ✓ Resume from paused/stopped to playing (new track only)
-    ✓ Source changes while playing (browser ↔ song)
-    ✗ No notification when pausing
-    ✗ No notification when stopping
-    ✗ No notification when idle
-    ✗ No duplicate notifications for same track within 10s
-
-HOW IT WORKS:
-    1. Listens to playerctl events from ALL players (--all-players)
-    2. On any event, queries mediactl for current prioritized state
-    3. Debounces rapid successive events (${DEBOUNCE_TIME}s window)
-    4. Tracks notification history to prevent duplicates
-    5. Sends notification only when appropriate
-
-RUNNING AS A SERVICE:
-    systemd user service:
-        1. Create ~/.config/systemd/user/medianotify.service:
-
-           [Unit]
-           Description=Media notification daemon
-           After=graphical-session.target
-
-           [Service]
-           Type=simple
-           ExecStart=/path/to/medianotify
-           Restart=on-failure
-
-           [Install]
-           WantedBy=default.target
-
-        2. systemctl --user enable --now medianotify.service
-
-REQUIREMENTS:
-    - mediactl (your custom media controller)
-    - playerctl (for event monitoring)
-    - notify-send (for notifications)
-    - bc (for floating-point debounce calculations)
-
-EOF
-}
-
-function show_version() {
-    echo "$SCRIPT_NAME v2.0.1 (event-driven, fixed)"
-}
-
-# ============================================================================
-# MAIN
-# ============================================================================
-
-function main() {
-    case "${1:-}" in
-        -h|--help)    show_help; exit 0 ;;
-        -v|--version) show_version; exit 0 ;;
-        "")           ;;
-        *)            die "Unknown option: $1 (try --help)" ;;
-    esac
-
-    check_dependencies
-    init_state_dir
-    monitor_events
-}
-
-main "$@"
+check_dependencies
+main_loop
