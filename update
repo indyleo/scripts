@@ -1,99 +1,219 @@
-#!/bin/env bash
+#!/usr/bin/env bash
 
+# Strict mode for safety
 set -euo pipefail
 
-# === Functions ===
+# === Helpers ===
+
+# Check for sudo availability and usage
+function run_priv() {
+    if [ "$EUID" -ne 0 ]; then
+        if command -v sudo &>/dev/null; then
+            sudo "$@"
+        else
+            echo "❌ Error: This command requires root privileges, but sudo is not installed."
+            return 1
+        fi
+    else
+        "$@"
+    fi
+}
+
+# === Core Functions ===
 
 function update_system() {
-	echo -e "\n🔄 Updating APT packages..."
-	sudo apt-get update && sudo apt-get upgrade -y && sudo apt-get autoremove -y
+    echo -e "\n🔄 Detecting OS and updating system packages..."
+
+    if [ -f /etc/os-release ]; then
+        # Source the OS release file to get ID and ID_LIKE
+        . /etc/os-release
+
+        # Normalize distros based on ID or ID_LIKE
+        case "${ID:-linux}" in
+            debian|ubuntu|linuxmint|pop|kali|raspbian)
+                echo "👉 Detected Debian/Ubuntu based system."
+                run_priv apt-get update && run_priv apt-get upgrade -y && run_priv apt-get autoremove -y
+                ;;
+            fedora|rhel|centos|almalinux|rocky)
+                echo "👉 Detected RHEL/Fedora based system."
+                run_priv dnf upgrade --refresh -y
+                ;;
+            arch|manjaro|endeavouros|garuda)
+                echo "👉 Detected Arch Linux based system."
+                run_priv pacman -Syu --noconfirm
+                ;;
+            opensuse*|suse)
+                echo "👉 Detected OpenSUSE."
+                run_priv zypper refresh && run_priv zypper update -y
+                ;;
+            alpine)
+                echo "👉 Detected Alpine Linux."
+                run_priv apk update && run_priv apk upgrade
+                ;;
+            void)
+                echo "👉 Detected Void Linux."
+                run_priv xbps-install -Su
+                ;;
+            *)
+                # Fallback for ID_LIKE (e.g., some Arch derivatives don't set ID=arch)
+                if [[ "${ID_LIKE:-}" == *"arch"* ]]; then
+                    run_priv pacman -Syu --noconfirm
+                elif [[ "${ID_LIKE:-}" == *"debian"* ]]; then
+                    run_priv apt-get update && run_priv apt-get upgrade -y
+                elif [[ "${ID_LIKE:-}" == *"rhel"* || "${ID_LIKE:-}" == *"fedora"* ]]; then
+                    run_priv dnf upgrade --refresh -y
+                else
+                    echo "⚠️  Could not detect package manager for '$ID'. Skipping system update."
+                fi
+                ;;
+        esac
+    else
+        echo "⚠️  /etc/os-release not found. Cannot determine OS."
+    fi
 }
 
 function update_flatpak() {
-	if command -v flatpak &>/dev/null; then
-		echo -e "\n📦 Updating Flatpak..."
-		flatpak update -y
-	fi
+    if command -v flatpak &>/dev/null; then
+        echo -e "\n📦 Updating Flatpak..."
+        flatpak update -y
+    fi
 }
 
 function update_rust() {
-	if command -v rustup &>/dev/null; then
-		echo -e "\n🦀 Updating Rust..."
-		rustup update
-	fi
+    if command -v rustup &>/dev/null; then
+        echo -e "\n🦀 Updating Rust..."
+        rustup update
+    fi
 }
 
 function update_bob() {
-	if command -v bob &>/dev/null; then
-		echo -e "\n🎛️ Updating Bob..."
-		bob.py update stable
-		bob.py update nightly
-	fi
+    # Check for 'bob' (standard cargo install) or 'bob.py'
+    if command -v bob &>/dev/null; then
+        BOB_CMD="bob"
+    elif command -v bob.py &>/dev/null; then
+        BOB_CMD="bob.py"
+    else
+        return
+    fi
+
+    echo -e "\n🎛️ Updating Bob ($BOB_CMD)..."
+    $BOB_CMD update stable
+    $BOB_CMD update nightly
 }
 
 function update_pipx() {
-	if command -v pipx &>/dev/null; then
-		echo -e "\n🐍 Updating pipx..."
-		pipx upgrade-all
-	fi
+    if command -v pipx &>/dev/null; then
+        echo -e "\n🐍 Updating pipx..."
+        pipx upgrade-all
+    fi
 }
 
 function update_neovim() {
-	if command -v nvim &>/dev/null; then
-		echo -e "\n💡 Updating Neovim plugins..."
-		nvim --headless "+Lazy! sync" +qa
-	fi
+    if command -v nvim &>/dev/null; then
+        echo -e "\n💡 Updating Neovim plugins..."
+        nvim --headless "+Lazy! sync" +qa
+    fi
 }
 
 function update_tmux_plugins() {
-	TPM="$HOME/.tmux/plugins/tpm/bin/update_plugins"
-	if [ -x "$TPM" ]; then
-		echo -e "\n🔧 Updating tmux plugins..."
-		"$TPM" all
-	else
-		echo "❗ TPM not found at $TPM"
-	fi
+    TPM="${XDG_CONFIG_HOME:-$HOME/.config}/tmux/plugins/tpm/bin/update_plugins"
+    # Check legacy path if XDG path doesn't exist
+    if [ ! -f "$TPM" ]; then
+        TPM="$HOME/.tmux/plugins/tpm/bin/update_plugins"
+    fi
+
+    if [ -x "$TPM" ]; then
+        echo -e "\n🔧 Updating tmux plugins..."
+        "$TPM" all
+    else
+        echo "ℹ️  TPM (Tmux Plugin Manager) script not found. Skipping."
+    fi
 }
 
 function reload_tmux_config() {
-	if [ -n "$TMUX" ]; then
-		tmux source-file "${XDG_CONFIG_HOME:-$HOME/.config}/tmux/tmux.conf"
-		echo "♻️ Reloaded tmux config"
-	else
-		echo "ℹ️ Not inside a tmux session."
-	fi
+    if [ -n "${TMUX:-}" ]; then
+        local tmux_conf="${XDG_CONFIG_HOME:-$HOME/.config}/tmux/tmux.conf"
+        if [ ! -f "$tmux_conf" ]; then
+            tmux_conf="$HOME/.tmux.conf"
+        fi
+
+        if [ -f "$tmux_conf" ]; then
+            tmux source-file "$tmux_conf"
+            echo "♻️  Reloaded tmux config"
+        else
+            echo "❗ Could not find tmux config file."
+        fi
+    else
+        echo "ℹ️  Not inside a tmux session."
+    fi
 }
 
-# === Menu ===
+function run_all() {
+    update_system
+    update_flatpak
+    update_rust
+    update_bob
+    update_pipx
+    update_neovim
+    update_tmux_plugins
+    reload_tmux_config
+}
 
-function main_menu() {
-	echo -e "🔄 System Update\n📦 Flatpak Update\n🦀 Rustup Update\n🎛️ Bob Update\n🐍 pipx Update\n💡 Neovim Plugin Update\n🔧 Tmux Plugin Update\n♻️ Reload Tmux Config\n✅ Run All\n❌ Exit" | fzf --prompt="Dashboard > "
+# === Menus ===
+
+function fzf_menu() {
+    echo -e "🔄 System Update\n📦 Flatpak Update\n🦀 Rustup Update\n🎛️ Bob Update\n🐍 pipx Update\n💡 Neovim Plugin Update\n🔧 Tmux Plugin Update\n♻️ Reload Tmux Config\n✅ Run All\n❌ Exit" | fzf --prompt="Dashboard > "
+}
+
+function simple_menu() {
+    echo -e "\n--- Update Dashboard ---"
+    PS3="Select an option: "
+    options=("System Update" "Flatpak Update" "Rustup Update" "Bob Update" "pipx Update" "Neovim Plugin Update" "Tmux Plugin Update" "Reload Tmux Config" "Run All" "Exit")
+    select opt in "${options[@]}"; do
+        case $opt in
+            "System Update") echo "🔄 System Update"; return 0 ;;
+            "Flatpak Update") echo "📦 Flatpak Update"; return 0 ;;
+            "Rustup Update") echo "🦀 Rustup Update"; return 0 ;;
+            "Bob Update") echo "🎛️ Bob Update"; return 0 ;;
+            "pipx Update") echo "🐍 pipx Update"; return 0 ;;
+            "Neovim Plugin Update") echo "💡 Neovim Plugin Update"; return 0 ;;
+            "Tmux Plugin Update") echo "🔧 Tmux Plugin Update"; return 0 ;;
+            "Reload Tmux Config") echo "♻️ Reload Tmux Config"; return 0 ;;
+            "Run All") echo "✅ Run All"; return 0 ;;
+            "Exit") echo "❌ Exit"; return 0 ;;
+            *) echo "Invalid option $REPLY" ;;
+        esac
+    done
 }
 
 # === Run Loop ===
 
 while true; do
-	case "$(main_menu)" in
-		"🔄 System Update") update_system ;;
-		"📦 Flatpak Update") update_flatpak ;;
-		"🦀 Rustup Update") update_rust ;;
-		"🎛️ Bob Update") update_bob ;;
-		"🐍 pipx Update") update_pipx ;;
-		"💡 Neovim Plugin Update") update_neovim ;;
-		"🔧 Tmux Plugin Update") update_tmux_plugins ;;
-		"♻️ Reload Tmux Config") reload_tmux_config ;;
-		"✅ Run All")
-			update_system
-			update_flatpak
-			update_rust
-			update_bob
-			update_pipx
-			update_neovim
-			update_tmux_plugins
-			reload_tmux_config
-			;;
-		"❌ Exit") break ;;
-	esac
-	echo -e "\n✅ Done. Press Enter to return to the dashboard..."
-	read -r
+    # Choose menu style based on fzf availability
+    if command -v fzf &>/dev/null; then
+        SELECTION=$(fzf_menu)
+    else
+        SELECTION=$(simple_menu)
+    fi
+
+    # Handle empty selection (ctrl+c in fzf)
+    if [ -z "$SELECTION" ]; then
+        break
+    fi
+
+    case "$SELECTION" in
+        *"System Update") update_system ;;
+        *"Flatpak Update") update_flatpak ;;
+        *"Rustup Update") update_rust ;;
+        *"Bob Update") update_bob ;;
+        *"pipx Update") update_pipx ;;
+        *"Neovim Plugin Update") update_neovim ;;
+        *"Tmux Plugin Update") update_tmux_plugins ;;
+        *"Reload Tmux Config") reload_tmux_config ;;
+        *"Run All") run_all ;;
+        *"Exit") break ;;
+    esac
+
+    echo -e "\n✅ Done. Press Enter to return to the dashboard..."
+    read -r
 done
