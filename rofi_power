@@ -1,23 +1,38 @@
-#!/bin/env bash
+#!/usr/bin/env bash
 
-# rofi prompt
-options="Lock\nLogout\nReboot\nShutdown"
-choice=$(echo -e "$options" | rofi -dmenu -p "Power Menu")
+# === Icons (Requires a Nerd Font installed) ===
+# Common alternatives:         
+LOCK=" Lock"
+LOGOUT="󰍃 Logout"
+REBOOT=" Reboot"
+SHUTDOWN=" Shutdown"
 
+# === Menu ===
+# Combine options separated by newlines
+options="$LOCK\n$LOGOUT\n$REBOOT\n$SHUTDOWN"
+
+# Run Rofi
+# -p sets the prompt title
+# -mesg adds a little message line (optional)
+choice=$(echo -e "$options" | rofi -dmenu -i -p "Power Menu")
+
+# === Actions ===
 case "$choice" in
-    Lock)
+    "$LOCK")
         slock
         ;;
-    Logout)
+    "$LOGOUT")
         # Try graceful termination first
         loginctl terminate-user "$USER" || pkill -15 xinit
         ;;
-    Reboot)
+    "$REBOOT")
         systemctl reboot
         ;;
-    Shutdown)
+    "$SHUTDOWN")
         systemctl poweroff
         ;;
     *)
+        # Do nothing if escaped
+        exit 1
         ;;
 esac
