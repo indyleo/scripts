@@ -19,7 +19,7 @@ choice=$(echo -e "$options" | rofi -dmenu -i -p "Power Menu")
 # === Actions ===
 case "$choice" in
     "$LOCK")
-        slock
+        hyprlock
         ;;
     "$LOGOUT")
         # Try graceful termination first
