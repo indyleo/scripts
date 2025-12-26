@@ -11,9 +11,6 @@ done
 
 # Constants
 script_name=$(basename "$0")
-brightness_status="restatus rt 25"
-volume_status="restatus rt 24"
-mic_status="restatus rt 23"
 
 # Arguments
 subsys="${1:-}"
@@ -39,18 +36,18 @@ function run_and_check() {
 }
 
 # Brightness
-function brightness_inc() { run_and_check brightnessctl set "${num}%+"; $brightness_status; }
-function brightness_dec() { run_and_check brightnessctl set "${num}%-"; $brightness_status; }
+function brightness_inc() { run_and_check brightnessctl set "${num}%+"; }
+function brightness_dec() { run_and_check brightnessctl set "${num}%-"; }
 
 # Volume
-function volume_inc() { run_and_check pamixer -i "$num"; $volume_status; }
-function volume_dec() { run_and_check pamixer -d "$num"; $volume_status; }
-function volume_togglemute() { run_and_check pamixer --toggle-mute; $volume_status; }
+function volume_inc() { run_and_check pamixer -i "$num"; }
+function volume_dec() { run_and_check pamixer -d "$num"; }
+function volume_togglemute() { run_and_check pamixer --toggle-mute; }
 
 # Microphone
-function mic_inc() { run_and_check pamixer --default-source -i "$num"; $mic_status; }
-function mic_dec() { run_and_check pamixer --default-source -d "$num"; $mic_status; }
-function mic_toggle() { run_and_check pamixer --default-source --toggle-mute; $mic_status; }
+function mic_inc() { run_and_check pamixer --default-source -i "$num"; }
+function mic_dec() { run_and_check pamixer --default-source -d "$num"; }
+function mic_toggle() { run_and_check pamixer --default-source --toggle-mute; }
 
 # Wi-Fi
 function wifi_toggle() {

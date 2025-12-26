@@ -44,7 +44,6 @@ function record() {
     echo "$outputloc" > /tmp/recording_outputdir
 
     notify-send "🎙 Recording started"
-    restatus rt "$SIGNAL"
 }
 
 function end_record() {
@@ -68,7 +67,6 @@ function end_record() {
 
     rm -fv /tmp/*pid /tmp/recording_timestamp /tmp/recording_outputdir
     notify-send "Recording merged"
-    restatus rt "$SIGNAL"
 }
 
 function toggle_record() {
@@ -89,7 +87,6 @@ function start_stream() {
         -bufsize 1500k "rtmp://$SERVER.live-video.net/app/$STREAM_KEY" &
     echo $! > /tmp/streampid
     notify-send "📡 Twitch stream started"
-    restatus rt "$SIGNAL"
 }
 
 function stop_stream() {
@@ -97,7 +94,6 @@ function stop_stream() {
     wait
     rm -fv /tmp/streampid
     notify-send "Twitch stream stopped"
-    restatus rt "$SIGNAL"
 }
 
 function toggle_stream() {

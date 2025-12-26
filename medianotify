@@ -41,7 +41,6 @@ function check_dependencies() {
     command -v mediactl &>/dev/null || die "mediactl not found in PATH"
     command -v playerctl &>/dev/null || die "playerctl not found in PATH"
     command -v notify-send &>/dev/null || die "notify-send not found"
-    command -v restatus &>/dev/null || die "restatus not found in PATH"
     command -v bc &>/dev/null || die "bc not found (required for debouncing)"
 }
 
@@ -230,13 +229,6 @@ function handle_event() {
         send_notification "$last_state" "$state_key" "$art_url"
     fi
 
-    # Trigger restatus update if state changed
-    if [[ "$state_key" != "$last_state" ]]; then
-        if ! restatus rt 22 2>/dev/null; then
-            log "Warning: Failed to update status bar"
-        fi
-    fi
-
     # Update state
     save_state "$state_key"
 }
@@ -402,7 +394,6 @@ REQUIREMENTS:
     - mediactl (your custom media controller)
     - playerctl (for event monitoring)
     - notify-send (for notifications)
-    - restatus (for status bar updates)
     - bc (for floating-point debounce calculations)
 
 EOF
