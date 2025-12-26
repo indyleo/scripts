@@ -4,16 +4,7 @@ set -euo pipefail
 # =====================================
 # CONFIG & PATHS
 # =====================================
-THEME_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/theme"
-HOME_CONFIG="${XDG_CONFIG_HOME:-"$HOME/.config"}"
 WALLPAPERS_DIR="$HOME/Pictures/Wallpapers"
-SUCKLESS_DIR="$HOME/Github/suckless"
-ALACRITTY_CONFIG="$HOME_CONFIG/alacritty"
-ROFI_CONFIG="$HOME_CONFIG/rofi"
-VENCORD_THEME="$HOME_CONFIG/vensktop/themes"
-DUNST_CONFIG="$HOME_CONFIG/dunst"
-TMUX_CONFIG="$HOME_CONFIG/tmux"
-
 LOG_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/desktopctl.log"
 TIMEXWALR_PID_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/timexwalr.pid"
 
@@ -100,70 +91,22 @@ start_timexwalr() {
     ) &
     local PID=$!
     echo "$PID" > "$TIMEXWALR_PID_FILE"
-    echo -e "${GREEN}Wallpaper daemon started (PID $PID)${RESET}"
+    echo -e "${GREEN}Wallpaper daemon started on directory '$DIR' (PID $PID)${RESET}"
 }
 
 stop_timexwalr() {
     if [[ -f "$TIMEXWALR_PID_FILE" ]]; then
         local PID
         PID=$(cat "$TIMEXWALR_PID_FILE")
-        kill "$PID" 2>/dev/null || true
+        if kill "$PID" 2>/dev/null; then
+            echo -e "${YELLOW}Wallpaper daemon stopped.${RESET}"
+        else
+            echo -e "${RED}Daemon process $PID not found, removing lock file.${RESET}"
+        fi
         rm -f "$TIMEXWALR_PID_FILE"
-        echo -e "${YELLOW}Wallpaper daemon stopped.${RESET}"
+    else
+        echo -e "${YELLOW}No wallpaper daemon running.${RESET}"
     fi
-}
-
-# =====================================
-# THEME SWITCHING
-# =====================================
-
-set_theme() {
-    local THEME="$1"
-    if [[ "$THEME" != "gruvbox" && "$THEME" != "nord" ]]; then
-        echo -e "${RED}Invalid theme: $THEME${RESET}"
-        exit 1
-    fi
-
-    echo -e "${BLUE}Switching to $THEME theme...${RESET}"
-
-    # Update daemon and set first wallpaper
-    start_timexwalr "${WALLPAPERS_DIR}/${THEME}" 900
-
-    # Notification settings (Dunst)
-    ln -sf "${DUNST_CONFIG}/dunstrc_${THEME}" "${DUNST_CONFIG}/dunstrc"
-    pkill -x dunst || true
-    dunst & disown
-
-    # Terminal, Rofi, and Tmux
-    ln -sf "${ALACRITTY_CONFIG}/alacritty_${THEME}.toml" "${ALACRITTY_CONFIG}/alacritty.toml"
-    ln -sf "${ROFI_CONFIG}/themes/${THEME}.rasi" "${ROFI_CONFIG}/themes/theme.rasi"
-    ln -sf "${TMUX_CONFIG}/tmux_${THEME}.conf" "${TMUX_CONFIG}/tmux.conf"
-
-    # Discord (Vencord/Vesktop)
-    mkdir -p "${VENCORD_THEME}/Themes"
-    local V_THEME_FILE="${VENCORD_THEME}/Themes/midnight-${THEME}.theme.css"
-    if [[ ! -f "$V_THEME_FILE" ]]; then
-        wget -qO "$V_THEME_FILE" "https://raw.githubusercontent.com/indyleo/VencordThemes/refs/heads/main/midnight-${THEME}.theme.css" || true
-    fi
-    ln -sf "$V_THEME_FILE" "${VENCORD_THEME}/midnight.theme.css"
-
-    # Suckless builds (Optional / XWayland)
-    APPS=(dmenu dwm slock st)
-    for APP in "${APPS[@]}"; do
-        (
-            APP_DIR="${SUCKLESS_DIR}/${APP}"
-            if [[ -d "$APP_DIR" ]]; then
-                cd "$APP_DIR"
-                ln -sf "config_${THEME}.def.h" "config.def.h"
-                sudo cp config.def.h config.h
-                sudo make clean install > /dev/null 2>&1
-            fi
-        ) &
-    done
-
-    echo "$THEME" > "$THEME_FILE"
-    echo -e "${GREEN}Theme '$THEME' applied successfully.${RESET}"
-    log "INFO" "Theme switched to $THEME"
 }
 
 # =====================================
@@ -175,12 +118,13 @@ show_help() {
 Usage: desktopctl COMMAND [ARGS]
 
 Commands:
-  theme <gruvbox|nord>             Switch system theme and wallpaper dir
-  wallpaper random <dir>           Set a random wallpaper once
-  wallpaper time <dir> [s]         Start timed wallpaper daemon
-  wallpaper time-stop              Stop timed wallpaper daemon
-  wallpaper theme                  Set random wallpaper from current theme dir
-  wallpaper theme-time [s]         Start daemon using current theme dir
+  random <dir>            Set a random wallpaper immediately from <dir>
+  time <dir> [seconds]    Start wallpaper cycle daemon (Default: 900s)
+  stop                    Stop the wallpaper cycle daemon
+
+Examples:
+  desktopctl random ~/Pictures/Wallpapers
+  desktopctl time ~/Pictures/Wallpapers/Anime 300
 EOF
 }
 
@@ -190,25 +134,20 @@ COMMAND="$1"
 shift || true
 
 case "$COMMAND" in
-    theme) set_theme "${1:-}" ;;
-    wallpaper)
-        WP_CMD="${1:-}"
-        shift || true
-        case "$WP_CMD" in
-            random)     wallpaper_set "${1:-$WALLPAPERS_DIR}" ;;
-            time)       start_timexwalr "${1:-$WALLPAPERS_DIR}" "${2:-900}" ;;
-            time-stop)  stop_timexwalr ;;
-            theme)
-                CUR_THEME=$(cat "$THEME_FILE" 2>/dev/null || echo "gruvbox")
-                wallpaper_set "${WALLPAPERS_DIR}/$CUR_THEME"
-                ;;
-            theme-time)
-                CUR_THEME=$(cat "$THEME_FILE" 2>/dev/null || echo "gruvbox")
-                start_timexwalr "${WALLPAPERS_DIR}/$CUR_THEME" "${1:-900}"
-                ;;
-            *) show_help ;;
-        esac
+    random)
+        wallpaper_set "${1:-$WALLPAPERS_DIR}"
         ;;
-    -h|--help) show_help ;;
-    *) echo -e "${RED}Unknown command: $COMMAND${RESET}"; show_help ;;
+    time)
+        start_timexwalr "${1:-$WALLPAPERS_DIR}" "${2:-900}"
+        ;;
+    stop|time-stop)
+        stop_timexwalr
+        ;;
+    -h|--help)
+        show_help
+        ;;
+    *)
+        echo -e "${RED}Unknown command: $COMMAND${RESET}"
+        show_help
+        ;;
 esac

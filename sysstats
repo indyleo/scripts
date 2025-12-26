@@ -4,48 +4,17 @@ set -euo pipefail
 
 opt="${1:-}"
 
-# ===== GLOBAL THEME CONFIG =====
-readonly THEME_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/theme"
-THEME="$(cat "$THEME_FILE" 2>/dev/null | tr '[:upper:]' '[:lower:]' || echo "gruvbox")"
-
 # Theme color definitions
-declare -A COLORS
-
-if [[ $THEME == *gruvbox* ]]; then
-    COLORS=(
-        [WHITE]="#ebdbb2"
-        [GREEN]="#98971a"
-        [YELLOW]="#d79921"
-        [RED]="#cc241d"
-        [ORANGE]="#d65d0e"
-        [BLUE]="#458588"
-        [PURPLE]="#b16286"
-        [BG]="#282828"
-    )
-elif [[ $THEME == *nord* ]]; then
-    COLORS=(
-        [WHITE]="#ECEFF4"
-        [GREEN]="#A3BE8C"
-        [YELLOW]="#EBCB8B"
-        [RED]="#BF616A"
-        [ORANGE]="#D08770"
-        [BLUE]="#81A1C1"
-        [PURPLE]="#B48EAD"
-        [BG]="#2E3440"
-    )
-else
-    # Default to gruvbox
-    COLORS=(
-        [WHITE]="#ebdbb2"
-        [GREEN]="#98971a"
-        [YELLOW]="#d79921"
-        [RED]="#cc241d"
-        [ORANGE]="#d65d0e"
-        [BLUE]="#458588"
-        [PURPLE]="#b16286"
-        [BG]="#282828"
-    )
-fi
+COLORS=(
+    [WHITE]="#ECEFF4"
+    [GREEN]="#A3BE8C"
+    [YELLOW]="#EBCB8B"
+    [RED]="#BF616A"
+    [ORANGE]="#D08770"
+    [BLUE]="#81A1C1"
+    [PURPLE]="#B48EAD"
+    [BG]="#2E3440"
+)
 
 # Helper function to get gradient color
 function get_gradient_color() {
