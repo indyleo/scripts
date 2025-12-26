@@ -72,7 +72,78 @@ function airplane_toggle() {
     [[ "$state" == "enabled" ]] && run_and_check nmcli radio all off || run_and_check nmcli radio all on
 }
 
-# ... [The help menus and dispatch logic remain the same as your original script] ...
+# Global help menu
+function global_help() {
+    cat <<EOF
+	Usage: $script_name SUBSYSTEM ACTION [NUM]
+
+	Available subsystems:
+	bri|brightness      Screen brightness
+	vol|volume          System volume
+	mic                 Microphone
+	wifi                Wi-Fi
+	bt                  Bluetooth
+	airplane            Airplane mode
+
+	For subsystem-specific help:
+	$script_name SUBSYSTEM --help
+EOF
+}
+
+# Subsystem-specific help menus
+function brightness_help() {
+    cat <<EOF
+	Brightness (bri) controls:
+	--inc | -i NUM      Increase brightness by NUM (default 5)
+	--dec | -d NUM      Decrease brightness by NUM (default 5)
+	--help              Show this menu
+EOF
+}
+
+function volume_help() {
+    cat <<EOF
+	Volume (vol) controls:
+	--inc | -i NUM      Increase volume by NUM (default 5)
+	--dec | -d NUM      Decrease volume by NUM (default 5)
+	--toggle            Toggle mute/unmute
+	--help              Show this menu
+EOF
+}
+
+function mic_help() {
+    cat <<EOF
+	Microphone (mic) controls:
+	--inc | -i NUM      Increase mic volume by NUM (default 5)
+	--dec | -d NUM      Decrease mic volume by NUM (default 5)
+	--toggle            Toggle mic mute/unmute
+	--help              Show this menu
+EOF
+}
+
+function wifi_help() {
+    cat <<EOF
+	Wi-Fi controls:
+	--toggle            Toggle Wi-Fi on/off
+	--help              Show this menu
+EOF
+}
+
+function bt_help() {
+    cat <<EOF
+	Bluetooth (bt) controls:
+	--toggle            Toggle Bluetooth on/off
+	--help              Show this menu
+EOF
+}
+
+function airplane_help() {
+    cat <<EOF
+	Airplane mode controls:
+	--toggle            Toggle airplane mode on/off (disables/enables Wi-Fi & Bluetooth)
+	--help              Show this menu
+EOF
+}
+
 
 # Dispatch
 case "$subsys" in
@@ -126,3 +197,5 @@ case "$subsys" in
     help|-h|"") global_help ;;
     *) echo "Invalid subsystem '$subsys'"; global_help; exit 1 ;;
 esac
+
+
