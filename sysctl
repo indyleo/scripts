@@ -45,7 +45,8 @@ function brightness_inc() { run_and_check brightnessctl set "${num}%+"; }
 function brightness_dec() { run_and_check brightnessctl set "${num}%-"; }
 
 # Volume (Sink)
-function volume_inc() { run_and_check wpctl set-volume @DEFAULT_AUDIO_SINK@ "${val_decimal}+"; }
+# UPDATED: Added --limit 1.0 to ensure volume does not exceed 100%
+function volume_inc() { run_and_check wpctl set-volume @DEFAULT_AUDIO_SINK@ "${val_decimal}+" --limit 1.0; }
 function volume_dec() { run_and_check wpctl set-volume @DEFAULT_AUDIO_SINK@ "${val_decimal}-"; }
 function volume_togglemute() { run_and_check wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle; }
 
@@ -75,72 +76,72 @@ function airplane_toggle() {
 # Global help menu
 function global_help() {
     cat <<EOF
-	Usage: $script_name SUBSYSTEM ACTION [NUM]
+    Usage: $script_name SUBSYSTEM ACTION [NUM]
 
-	Available subsystems:
-	bri|brightness      Screen brightness
-	vol|volume          System volume
-	mic                 Microphone
-	wifi                Wi-Fi
-	bt                  Bluetooth
-	airplane            Airplane mode
+    Available subsystems:
+    bri|brightness      Screen brightness
+    vol|volume          System volume
+    mic                 Microphone
+    wifi                Wi-Fi
+    bt                  Bluetooth
+    airplane            Airplane mode
 
-	For subsystem-specific help:
-	$script_name SUBSYSTEM --help
+    For subsystem-specific help:
+    $script_name SUBSYSTEM --help
 EOF
 }
 
 # Subsystem-specific help menus
 function brightness_help() {
     cat <<EOF
-	Brightness (bri) controls:
-	--inc | -i NUM      Increase brightness by NUM (default 5)
-	--dec | -d NUM      Decrease brightness by NUM (default 5)
-	--help              Show this menu
+    Brightness (bri) controls:
+    --inc | -i NUM      Increase brightness by NUM (default 5)
+    --dec | -d NUM      Decrease brightness by NUM (default 5)
+    --help              Show this menu
 EOF
 }
 
 function volume_help() {
     cat <<EOF
-	Volume (vol) controls:
-	--inc | -i NUM      Increase volume by NUM (default 5)
-	--dec | -d NUM      Decrease volume by NUM (default 5)
-	--toggle            Toggle mute/unmute
-	--help              Show this menu
+    Volume (vol) controls:
+    --inc | -i NUM      Increase volume by NUM (default 5, max 100%)
+    --dec | -d NUM      Decrease volume by NUM (default 5)
+    --toggle            Toggle mute/unmute
+    --help              Show this menu
 EOF
 }
 
 function mic_help() {
     cat <<EOF
-	Microphone (mic) controls:
-	--inc | -i NUM      Increase mic volume by NUM (default 5)
-	--dec | -d NUM      Decrease mic volume by NUM (default 5)
-	--toggle            Toggle mic mute/unmute
-	--help              Show this menu
+    Microphone (mic) controls:
+    --inc | -i NUM      Increase mic volume by NUM (default 5)
+    --dec | -d NUM      Decrease mic volume by NUM (default 5)
+    --toggle            Toggle mic mute/unmute
+    --help              Show this menu
 EOF
 }
 
 function wifi_help() {
     cat <<EOF
-	Wi-Fi controls:
-	--toggle            Toggle Wi-Fi on/off
-	--help              Show this menu
+    Wi-Fi controls:
+    --toggle            Toggle Wi-Fi on/off
+    --help              Show this menu
 EOF
 }
 
 function bt_help() {
     cat <<EOF
-	Bluetooth (bt) controls:
-	--toggle            Toggle Bluetooth on/off
-	--help              Show this menu
+    Bluetooth (bt) controls:
+    --toggle            Toggle Bluetooth on/off
+    --help              Show this menu
 EOF
 }
 
 function airplane_help() {
     cat <<EOF
-	Airplane mode controls:
-	--toggle            Toggle airplane mode on/off (disables/enables Wi-Fi & Bluetooth)
-	--help              Show this menu
+    Airplane mode controls:
+    --toggle            Toggle airplane mode on/off (disables/enables Wi-Fi & Bluetooth)
+    --help              Show this menu
 EOF
 }
 
@@ -197,5 +198,3 @@ case "$subsys" in
     help|-h|"") global_help ;;
     *) echo "Invalid subsystem '$subsys'"; global_help; exit 1 ;;
 esac
-
-
