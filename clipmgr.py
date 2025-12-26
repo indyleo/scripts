@@ -2,6 +2,7 @@
 """
 Wayland Clipboard manager with grouped menus, text/image support, and persistence.
 Handles history, pinning, and image caching via wl-clipboard and rofi.
+Optimized for older versions of wl-clipboard using foreground backgrounding.
 """
 
 from __future__ import annotations
@@ -63,16 +64,27 @@ class Clip:
 
 
 def copy_to_clipboard(clip: Clip) -> None:
-    """Uses wl-copy with --daemon to ensure the data stays in the compositor."""
+    """
+    Uses wl-copy with --foreground.
+    Kills old wl-copy processes first to prevent process accumulation.
+    """
     env = os.environ.copy()
+
+    try:
+        subprocess.run(["pkill", "wl-copy"], check=False)
+    except OSError:
+        pass
+
     try:
         if clip.type == "text" and clip.content:
             subprocess.Popen(
-                ["wl-copy", "--daemon", clip.content], env=env, start_new_session=True
+                ["wl-copy", "--foreground", clip.content],
+                env=env,
+                start_new_session=True,
             )
         elif clip.type == "image" and clip.path:
             subprocess.Popen(
-                ["wl-copy", "--daemon", "--type", "image/png", "--file", clip.path],
+                ["wl-copy", "--foreground", "--type", "image/png", "--file", clip.path],
                 env=env,
                 start_new_session=True,
             )
@@ -111,7 +123,7 @@ def get_clipboard_content() -> Optional[Clip]:
         text = text_proc.stdout.strip()
         if text:
             return Clip(type="text", content=text)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
         pass
     return None
 
@@ -136,32 +148,46 @@ class ClipboardManager:
             try:
                 with path.open("r", encoding="utf-8") as f:
                     return [Clip(**c) for c in json.load(f)]
-            except (json.JSONDecodeError, KeyError, TypeError):
+            except (json.JSONDecodeError, KeyError, TypeError, OSError):
                 return []
 
         self.history = _load_file(HISTORY_PATH)
         self.pinned = _load_file(PIN_PATH)
 
     def save(self) -> None:
-        """Trims and saves history items to disk."""
+        """Trims and saves history and pinned items to disk."""
         with _lock:
-            seen = set()
-            unique_hist = []
-            for c in self.history:
-                val = c.content if c.type == "text" else c.path
-                if val and val not in seen:
-                    unique_hist.append(c)
-                    seen.add(val)
 
-            self.history = unique_hist[:MAX_TEXT_HISTORY]
-            with HISTORY_PATH.open("w", encoding="utf-8") as f:
-                json.dump([asdict(c) for c in self.history], f, indent=2)
+            def _dedup(clips: list[Clip], limit: int) -> list[Clip]:
+                seen = set()
+                unique = []
+                for c in clips:
+                    val = c.content if c.type == "text" else c.path
+                    if val and val not in seen:
+                        unique.append(c)
+                        seen.add(val)
+                return unique[:limit]
+
+            self.history = _dedup(self.history, MAX_TEXT_HISTORY)
+            self.pinned = _dedup(self.pinned, MAX_PINNED_HISTORY)
+
+            try:
+                with HISTORY_PATH.open("w", encoding="utf-8") as f:
+                    json.dump([asdict(c) for c in self.history], f, indent=2)
+                with PIN_PATH.open("w", encoding="utf-8") as f:
+                    json.dump([asdict(c) for c in self.pinned], f, indent=2)
+            except OSError as e:
+                print(f"Failed to save history: {e}")
 
     def add_clip(self, clip: Clip) -> None:
         """Adds a new clip to history, moving it to the top if it exists."""
         val = clip.content if clip.type == "text" else clip.path
         if not val:
             return
+
+        if any((p.content if p.type == "text" else p.path) == val for p in self.pinned):
+            return
+
         self.history = [
             h
             for h in self.history
@@ -170,31 +196,62 @@ class ClipboardManager:
         self.history.insert(0, clip)
         self.save()
 
-    def select_clip(self) -> None:
-        """Opens Rofi menu to select an item from history or pinned clips."""
-        self.load()
-        lines = []
-        mapping = []
+    def toggle_pin(self, clip: Clip) -> None:
+        """Adds to pinned if not there, otherwise removes it."""
+        val = clip.content if clip.type == "text" else clip.path
+        if not val:
+            return
 
-        for p in self.pinned:
-            content = p.content[:PREVIEW_MAX] if p.content else "Unknown"
+        target_idx = -1
+        for i, p in enumerate(self.pinned):
+            if (p.content if p.type == "text" else p.path) == val:
+                target_idx = i
+                break
+
+        if target_idx != -1:
+            removed = self.pinned.pop(target_idx)
+            self.history.insert(0, removed)
+        else:
+            self.pinned.insert(0, clip)
+            self.history = [
+                h
+                for h in self.history
+                if (h.content if h.type == "text" else h.path) != val
+            ]
+
+        self.save()
+
+    def select_clip(self) -> None:
+        """Opens Rofi menu with [P#], [T#], and [I#] prefixes."""
+        self.load()
+        lines, mapping = [], []
+
+        # Pinned entries
+        for i, p in enumerate(self.pinned, 1):
+            content = (p.content or "")[:PREVIEW_MAX].replace("\n", " ")
             lbl = (
-                f"📌 {content}"
+                f"[P{i}] {content}"
                 if p.type == "text"
-                else f"📌 IMAGE: {Path(p.path or '').name}"
+                else f"[P{i}] IMAGE: {Path(p.path or '').name}"
             )
             lines.append(lbl)
             mapping.append(p)
 
-        for h in self.history:
-            content = h.content[:PREVIEW_MAX] if h.content else "Unknown"
-            lbl = (
-                f"🕒 {content}"
-                if h.type == "text"
-                else f"📸 IMAGE: {Path(h.path or '').name}"
-            )
-            lines.append(lbl)
-            mapping.append(h)
+        if self.history:
+            lines.append("--- History ---")
+            mapping.append(None)  # Placeholder for the separator
+
+            t_idx, i_idx = 1, 1
+            for h in self.history:
+                content = (h.content or "")[:PREVIEW_MAX].replace("\n", " ")
+                if h.type == "text":
+                    lbl = f"[T{t_idx}] {content}"
+                    t_idx += 1
+                else:
+                    lbl = f"[I{i_idx}] IMAGE: {Path(h.path or '').name}"
+                    i_idx += 1
+                lines.append(lbl)
+                mapping.append(h)
 
         if not lines:
             return
@@ -208,9 +265,40 @@ class ClipboardManager:
 
         try:
             idx_str = res.stdout.decode().strip()
-            if idx_str:
-                selected_clip = mapping[int(idx_str)]
+            if not idx_str:
+                return
+
+            idx = int(idx_str)
+            selected_clip = mapping[idx]
+            if selected_clip is None:  # User clicked the separator
+                return
+
+            sel_val = (
+                selected_clip.content
+                if selected_clip.type == "text"
+                else selected_clip.path
+            )
+            is_currently_pinned = any(
+                (p.content if p.type == "text" else p.path) == sel_val
+                for p in self.pinned
+            )
+
+            pin_label = "Unpin" if is_currently_pinned else "Pin"
+            actions = ["Apply (Copy)", f"{pin_label} Item"]
+
+            act_res = subprocess.run(
+                ["rofi", "-dmenu", "-i", "-p", "Action"],
+                input="\n".join(actions).encode(),
+                capture_output=True,
+                check=False,
+            )
+
+            choice = act_res.stdout.decode().strip()
+            if "Apply" in choice:
                 copy_to_clipboard(selected_clip)
+            elif "Pin" in choice:
+                self.toggle_pin(selected_clip)
+
         except (ValueError, IndexError):
             pass
 
@@ -243,9 +331,12 @@ def main() -> None:
     elif args.command == "select":
         mgr.select_clip()
     elif args.command == "clear":
-        for p in [HISTORY_PATH, PIN_PATH]:
-            if p.exists():
+        for p in [HISTORY_PATH, PIN_PATH, IMAGE_DIR]:
+            if p.is_file():
                 p.unlink()
+            elif p.is_dir():
+                for f in p.iterdir():
+                    f.unlink()
         print("Cleared.")
 
 
