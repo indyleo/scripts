@@ -5,6 +5,7 @@ set -euo pipefail
 opt="${1:-}"
 
 # Theme color definitions
+declare -A COLORS
 COLORS=(
     [WHITE]="#ECEFF4"
     [GREEN]="#A3BE8C"
@@ -304,10 +305,6 @@ function help_menu() {
 	volume      Display volume
 	brightness  Display brightness
 	all         Display all stats (combined)
-
-	Environment:
-	Theme is read from: ${THEME_FILE}
-	Current theme: ${THEME}
 EOF
 }
 
