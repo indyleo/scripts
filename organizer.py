@@ -7,12 +7,20 @@ import json
 import logging
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
-from typing import Set
+from typing import Dict, Set
 
-from watchdog.events import FileSystemEventHandler
-from watchdog.observers import Observer
+# Third-party dependency
+try:
+    from watchdog.events import FileSystemEventHandler
+    from watchdog.observers import Observer
+except ImportError:
+    print(
+        "Error: 'watchdog' library not found. Please install it using: pip install watchdog"
+    )
+    sys.exit(1)
 
 # === Default config ===
 DEFAULT_CONFIG = {
@@ -139,9 +147,6 @@ DEFAULT_CONFIG = {
             "ts",
             "tsx",
             "jsx",
-            "json",
-            "yaml",
-            "yml",
             "toml",
             "ini",
             "lua",
@@ -166,6 +171,7 @@ DEFAULT_CONFIG = {
             "whl",
             "nupkg",
             "rpmnew",
+            "dmg",
         ],
         "Img": ["iso", "img", "vdi", "vmdk", "qcow2", "vhd", "qcow", "vhdx"],
     },
@@ -177,6 +183,7 @@ DEFAULT_CONFIG = {
         ".!qB",
         ".aria2",
         ".qldKpe",
+        ".opdownload",
     ],
     "log_file": str(
         Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
@@ -188,17 +195,12 @@ DEFAULT_CONFIG = {
 
 CONFIG_PATH = Path.home() / ".download_organizer_config.json"
 
-# === Globals ===
-DOWNLOADS = Path(DEFAULT_CONFIG["downloads_dir"])
-DIRS = {k: Path(v) for k, v in DEFAULT_CONFIG["dirs"].items()}
-EXTENSIONS = {k: set(v) for k, v in DEFAULT_CONFIG["extensions"].items()}
-TEMP_EXTENSIONS: Set[str] = set(DEFAULT_CONFIG["temp_extensions"])
-CLEANUP_EMPTY_DIRS = DEFAULT_CONFIG["cleanup_empty_dirs"]
-CONFIG_RELOAD_INTERVAL = DEFAULT_CONFIG["config_reload_interval"]
-
 # === Logger setup ===
-logger = logging.getLogger()
+logger = logging.getLogger("DownloadOrganizer")
 logger.setLevel(logging.INFO)
+
+# Ensure log directory exists
+Path(DEFAULT_CONFIG["log_file"]).parent.mkdir(parents=True, exist_ok=True)
 
 fh = logging.FileHandler(DEFAULT_CONFIG["log_file"])
 fh.setLevel(logging.INFO)
@@ -211,50 +213,67 @@ sh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 logger.addHandler(sh)
 
 
-# === Config reload ===
-def reload_config() -> None:
-    """Reload configuration from JSON file if it exists."""
-    global DIRS, EXTENSIONS, TEMP_EXTENSIONS, CLEANUP_EMPTY_DIRS, DOWNLOADS, CONFIG_RELOAD_INTERVAL
-    if CONFIG_PATH.exists():
+# === Configuration Class ===
+class Settings:
+    """Holds the runtime configuration to avoid global variable warnings."""
+
+    def __init__(self):
+        self.downloads: Path = Path(DEFAULT_CONFIG["downloads_dir"])
+        self.dirs: Dict[str, Path] = {
+            k: Path(v) for k, v in DEFAULT_CONFIG["dirs"].items()
+        }
+        self.extensions: Dict[str, Set[str]] = {
+            k: set(v) for k, v in DEFAULT_CONFIG["extensions"].items()
+        }
+        self.temp_extensions: Set[str] = set(DEFAULT_CONFIG["temp_extensions"])
+        self.cleanup: bool = DEFAULT_CONFIG["cleanup_empty_dirs"]
+        self.reload_interval: int = DEFAULT_CONFIG["config_reload_interval"]
+
+    def load_from_file(self) -> None:
+        """Reload configuration from JSON file if it exists."""
+        if not CONFIG_PATH.exists():
+            return
+
         try:
             with open(CONFIG_PATH, encoding="utf-8") as f:
                 cfg = json.load(f)
-            DOWNLOADS = Path(cfg.get("downloads_dir", str(DOWNLOADS)))
-            DIRS = {
-                k: Path(v)
-                for k, v in cfg.get(
-                    "dirs", {k: str(v) for k, v in DIRS.items()}
-                ).items()
-            }
-            EXTENSIONS = {
-                k: set(v)
-                for k, v in cfg.get(
-                    "extensions", {k: list(v) for k, v in EXTENSIONS.items()}
-                ).items()
-            }
-            TEMP_EXTENSIONS.update(cfg.get("temp_extensions", []))
-            CLEANUP_EMPTY_DIRS = cfg.get("cleanup_empty_dirs", CLEANUP_EMPTY_DIRS)
-            CONFIG_RELOAD_INTERVAL = cfg.get(
-                "config_reload_interval", CONFIG_RELOAD_INTERVAL
+
+            if "downloads_dir" in cfg:
+                self.downloads = Path(cfg["downloads_dir"])
+            if "dirs" in cfg:
+                self.dirs = {k: Path(v) for k, v in cfg["dirs"].items()}
+            if "extensions" in cfg:
+                self.extensions = {k: set(v) for k, v in cfg["extensions"].items()}
+            if "temp_extensions" in cfg:
+                self.temp_extensions = set(cfg["temp_extensions"])
+
+            self.cleanup = cfg.get("cleanup_empty_dirs", self.cleanup)
+            self.reload_interval = cfg.get(
+                "config_reload_interval", self.reload_interval
             )
-            logger.info("Configuration reloaded")
-        except Exception as e:
+
+            logger.debug("Configuration reloaded")
+        except (json.JSONDecodeError, OSError) as e:
             logger.error("Failed to reload config: %s", e)
+
+
+# Instantiate global settings
+config = Settings()
 
 
 # === Setup directories ===
 def setup_dirs() -> None:
     """Ensure all target directories exist."""
-    for d in DIRS.values():
+    for d in config.dirs.values():
         d.mkdir(parents=True, exist_ok=True)
-    DOWNLOADS.mkdir(parents=True, exist_ok=True)
+    config.downloads.mkdir(parents=True, exist_ok=True)
 
 
 # === File category & unique path ===
 def get_category(file: Path) -> str:
     """Return category based on file extension."""
     ext = file.suffix.lower().lstrip(".")
-    for category, exts in EXTENSIONS.items():
+    for category, exts in config.extensions.items():
         if ext in exts:
             return category
     return "Other"
@@ -262,28 +281,55 @@ def get_category(file: Path) -> str:
 
 def get_unique_path(target: Path) -> Path:
     """Return a unique path to avoid overwriting."""
+    if not target.exists():
+        return target
+
+    stem = target.stem
+    suffix = target.suffix
+    parent = target.parent
     counter = 1
-    while target.exists():
-        target = target.with_name(f"{target.stem}_{counter}{target.suffix}")
+
+    while True:
+        new_name = f"{stem}_{counter}{suffix}"
+        new_target = parent / new_name
+        if not new_target.exists():
+            return new_target
         counter += 1
-    return target
 
 
 # === File readiness ===
-def is_file_ready(file: Path, retries: int = 10, delay: float = 1.0) -> bool:
-    """Check if file is fully downloaded and ready to move."""
-    if file.suffix.lower() in TEMP_EXTENSIONS or file.name.startswith("."):
+def is_file_ready(file: Path, retries: int = 5, delay: float = 1.0) -> bool:
+    """
+    Check if file is fully downloaded and ready to move.
+    Checks for: Temp extensions, stable size, and file locking.
+    """
+    if not file.exists():
         return False
+
+    if file.suffix.lower() in config.temp_extensions or file.name.startswith("."):
+        return False
+
     prev_size = -1
     for _ in range(retries):
         try:
+            # 1. Check size
             size = file.stat().st_size
+
+            # 2. Check lock (Exclusive access check)
+            # Using 'with' to ensure the file handle is closed immediately (Pylint R1732)
+            with open(file, "ab"):
+                pass
+
             if size > 0 and size == prev_size:
                 return True
+
             prev_size = size
-        except FileNotFoundError:
-            return False
+        except (OSError, PermissionError, FileNotFoundError):
+            # File is locked, being written to, or vanished
+            pass
+
         time.sleep(delay)
+
     return False
 
 
@@ -293,56 +339,64 @@ def move_file(file: Path) -> None:
     if not file.is_file():
         return
 
-    if file.suffix.lower() in TEMP_EXTENSIONS or file.name.startswith("."):
-        logger.info("Skipping in-progress or temporary file: %s", file.name)
+    # Quick check before expensive lock checks
+    if file.suffix.lower() in config.temp_extensions or file.name.startswith("."):
         return
 
     if not is_file_ready(file):
-        logger.info("File not ready yet: %s", file.name)
         return
 
     category = get_category(file)
-    target_dir = DIRS.get(category, DIRS["Other"])
+    target_dir = config.dirs.get(category, config.dirs["Other"])
+
+    # Ensure target dir exists
+    target_dir.mkdir(parents=True, exist_ok=True)
+
     target = get_unique_path(target_dir / file.name)
 
     attempts = 3
     for _ in range(attempts):
         try:
             shutil.move(str(file), str(target))
-            logger.info("✓ Moved %s → %s", file.name, category)
+            logger.info("✓ Moved %s -> %s/%s", file.name, category, target.name)
             break
         except (OSError, shutil.Error) as e:
             logger.error("Failed to move %s: %s", file.name, e)
-            time.sleep(0.5)
+            time.sleep(1)
 
-    if CLEANUP_EMPTY_DIRS:
+    if config.cleanup:
         cleanup_empty_dirs(file.parent)
 
 
 # === Organize existing files ===
 def organize_existing() -> None:
     """Organize all existing files in downloads directory."""
-    logger.info("Organizing existing files...")
-    reload_config()
-    for file in DOWNLOADS.iterdir():
+    logger.info("Organizing existing files in %s...", config.downloads)
+    config.load_from_file()
+
+    if not config.downloads.exists():
+        logger.error("Downloads directory does not exist: %s", config.downloads)
+        return
+
+    for file in config.downloads.iterdir():
         move_file(file)
+    logger.info("Organization of existing files complete.")
 
 
 # === Cleanup empty dirs ===
 def cleanup_empty_dirs(directory: Path) -> None:
     """Recursively remove empty directories."""
     try:
-        if (
-            directory != DOWNLOADS
-            and directory.exists()
-            and directory.is_dir()
-            and not any(directory.iterdir())
-        ):
+        # Don't delete the main downloads folder or dirs outside it
+        if directory == config.downloads or not directory.exists():
+            return
+
+        if directory.is_dir() and not any(directory.iterdir()):
             directory.rmdir()
             logger.info("Removed empty directory: %s", directory)
             cleanup_empty_dirs(directory.parent)
-    except OSError as e:
-        logger.error("Failed to remove directory %s: %s", directory, e)
+    except OSError:
+        pass
 
 
 # === Watchdog handler ===
@@ -352,8 +406,15 @@ class DownloadHandler(FileSystemEventHandler):
     def on_created(self, event):
         """Called when a new file is created."""
         if not event.is_directory:
-            time.sleep(0.2)
-            move_file(Path(str(event.src_path)))
+            # Short sleep to let the OS register the file handle
+            time.sleep(0.5)
+            # os.fsdecode ensures we pass a string, satisfying Pyright (bytes | str issue)
+            move_file(Path(os.fsdecode(event.src_path)))
+
+    def on_modified(self, event):
+        """Called when a file is modified."""
+        if not event.is_directory:
+            move_file(Path(os.fsdecode(event.src_path)))
 
 
 # === Main ===
@@ -373,32 +434,35 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if not args.organize and not args.daemon:
-        parser.print_help()
-        return
-
     setup_dirs()
-    reload_config()
+    config.load_from_file()
 
     if args.organize:
         organize_existing()
 
     if args.daemon:
+        logger.info("Starting daemon, watching: %s", config.downloads)
         observer = Observer()
-        observer.schedule(DownloadHandler(), str(DOWNLOADS), recursive=False)
+        handler = DownloadHandler()
+        observer.schedule(handler, str(config.downloads), recursive=False)
         observer.start()
-        logger.info("Watching %s", DOWNLOADS)
+
         last_reload = time.time()
         try:
             while True:
-                now = time.time()
-                if now - last_reload >= CONFIG_RELOAD_INTERVAL:
-                    reload_config()
-                    last_reload = now
                 time.sleep(1)
+                now = time.time()
+                # Reload config periodically
+                if now - last_reload >= config.reload_interval:
+                    config.load_from_file()
+                    last_reload = now
         except KeyboardInterrupt:
+            logger.info("Stopping daemon...")
             observer.stop()
         observer.join()
+
+    if not args.organize and not args.daemon:
+        parser.print_help()
 
 
 if __name__ == "__main__":
