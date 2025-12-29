@@ -1,0 +1,95 @@
+#!/bin/env bash
+# Screen Recording & Streaming Manager (Wayland + NVENC Edition)
+
+# --- Ensure dependencies ---
+# slurp is used for geometry selection if needed, though we default to full screen
+for cmd in wf-recorder rofi notify-send ffmpeg; do
+    if ! command -v $cmd &> /dev/null; then
+        echo "Error: $cmd not found. Please install it first."
+        exit 1
+    fi
+done
+
+# --- Variables ---
+FPS_REC=60
+FPS_STREAM=30
+STREAM_KEY="$TWITCH_TOKEN"
+SERVER="ingest.global-contribute"
+# NVENC uses h264_nvenc. We use 'p' (pixel format) and 'preset' via -p (codec-param)
+VIDEO_CODEC="h264_nvenc"
+
+# --- Functions ---
+
+function record() {
+    now="$(date '+%a__%b%d__%H_%M_%S')"
+    outputfile="$HOME/Videos/recording_${now}.mkv"
+
+    # wf-recorder handles audio and video in one process
+    # -a: default audio device
+    # -c: h264_nvenc for NVIDIA
+    # -p: sets encoder-specific options
+    wf-recorder \
+        -a \
+        -r "$FPS_REC" \
+        -c "$VIDEO_CODEC" \
+        -p preset=p4 \
+        -p tune=hq \
+        -f "$outputfile" &
+
+    echo $! > /tmp/recpid
+    notify-send "🎙 Recording started" "Saving to $outputfile"
+}
+
+function end_record() {
+    # SIGINT (2) is cleaner for wf-recorder to finish the file properly
+    kill -SIGINT "$(cat /tmp/recpid)"
+    rm -f /tmp/recpid
+    notify-send "Recording saved"
+}
+
+function toggle_record() {
+    if [[ -f /tmp/recpid ]]; then
+        end_record
+    else
+        record
+    fi
+}
+
+function start_stream() {
+    # Streaming to Twitch usually requires a specific FLV muxer and CBR
+    # We use -m flv and output to the RTMP URL
+    wf-recorder \
+        -a \
+        -r "$FPS_STREAM" \
+        -c "$VIDEO_CODEC" \
+        -p preset=p4 \
+        -p rc=cbr \
+        -p bitrate=4500K \
+        -m flv \
+        -f "rtmp://$SERVER.live-video.net/app/$STREAM_KEY" &
+
+    echo $! > /tmp/streampid
+    notify-send "📡 Twitch stream started"
+}
+
+function stop_stream() {
+    kill -SIGINT "$(cat /tmp/streampid)"
+    rm -f /tmp/streampid
+    notify-send "Twitch stream stopped"
+}
+
+function toggle_stream() {
+    if [[ -f /tmp/streampid ]]; then
+        stop_stream
+    else
+        start_stream
+    fi
+}
+
+# --- Main Menu ---
+choice=$(printf "Record Toggle\nStream Toggle" | rofi -dmenu -p "Select action:")
+case "$choice" in
+    "Record Toggle") toggle_record ;;
+    "Stream Toggle") toggle_stream ;;
+    *) exit 1 ;;
+esac
