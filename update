@@ -79,13 +79,6 @@ function update_flatpak() {
     fi
 }
 
-function update_rust() {
-    if command -v rustup &>/dev/null; then
-        echo -e "\n🦀 Updating Rust..."
-        rustup update
-    fi
-}
-
 function update_pipx() {
     if command -v pipx &>/dev/null; then
         echo -e "\n🐍 Updating pipx..."
@@ -136,8 +129,6 @@ function reload_tmux_config() {
 function run_all() {
     update_system
     update_flatpak
-    update_rust
-    update_bob
     update_pipx
     update_neovim
     update_tmux_plugins
@@ -189,8 +180,6 @@ while true; do
     case "$SELECTION" in
         *"System Update") update_system ;;
         *"Flatpak Update") update_flatpak ;;
-        *"Rustup Update") update_rust ;;
-        *"Bob Update") update_bob ;;
         *"pipx Update") update_pipx ;;
         *"Neovim Plugin Update") update_neovim ;;
         *"Tmux Plugin Update") update_tmux_plugins ;;
