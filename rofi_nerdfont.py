@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Nerd Font Icon Picker
-Downloads Nerd Font icons and provides a rofi interface for selection
+Nerd Font Icon Picker (Wayland version)
+Downloads Nerd Font icons and provides a fuzzy finder interface for selection
 """
 
 import argparse
@@ -72,37 +72,44 @@ def download_nerdfont_data():
 
 def check_dependencies():
     """Check if required tools are available"""
-    # Check for rofi
-    has_rofi = (
-        subprocess.run(["which", "rofi"], capture_output=True, check=False).returncode
-        == 0
-    )
+    # Check for fuzzy finder (try wofi, fuzzel, tofi, or rofi)
+    finders = ["wofi", "fuzzel", "tofi", "rofi"]
+    selected_finder = None
 
-    if not has_rofi:
-        print("Error: rofi not found. Please install rofi.", file=sys.stderr)
-        sys.exit(1)
+    for finder in finders:
+        if (
+            subprocess.run(
+                ["which", finder], capture_output=True, check=False
+            ).returncode
+            == 0
+        ):
+            selected_finder = finder
+            break
 
-    # Check for xclip or xsel
-    has_xclip = (
-        subprocess.run(["which", "xclip"], capture_output=True, check=False).returncode
-        == 0
-    )
-    has_xsel = (
-        subprocess.run(["which", "xsel"], capture_output=True, check=False).returncode
-        == 0
-    )
-
-    if not (has_xclip or has_xsel):
+    if not selected_finder:
         print(
-            "Error: Neither xclip nor xsel found. Please install one.", file=sys.stderr
+            "Error: No fuzzy finder found. Please install one of: wofi, fuzzel, tofi, or rofi.",
+            file=sys.stderr,
         )
         sys.exit(1)
 
-    return "xclip" if has_xclip else "xsel"
+    # Check for Wayland clipboard tool (wl-copy from wl-clipboard)
+    has_wl_copy = (
+        subprocess.run(
+            ["which", "wl-copy"], capture_output=True, check=False
+        ).returncode
+        == 0
+    )
+
+    if not has_wl_copy:
+        print("Error: wl-copy not found. Please install wl-clipboard.", file=sys.stderr)
+        sys.exit(1)
+
+    return selected_finder
 
 
-def show_selection_menu():
-    """Display selection menu using rofi"""
+def show_selection_menu(finder):
+    """Display selection menu using available fuzzy finder"""
     if not NERDFONT_FILE.exists():
         print("Cache file not found. Downloading...", file=sys.stderr)
         if not download_nerdfont_data():
@@ -111,7 +118,15 @@ def show_selection_menu():
     with open(NERDFONT_FILE, "r", encoding="utf-8") as f:
         icons_data = f.read()
 
-    cmd = ["rofi", "-dmenu", "-l", "10", "-p", "Select Icon:"]
+    # Configure command based on finder
+    if finder == "wofi":
+        cmd = ["wofi", "--dmenu", "--lines", "10", "--prompt", "Select Icon:"]
+    elif finder == "fuzzel":
+        cmd = ["fuzzel", "--dmenu", "--lines", "10", "--prompt", "Select Icon: "]
+    elif finder == "tofi":
+        cmd = ["tofi", "--prompt-text", "Select Icon: "]
+    else:  # rofi (can work on Wayland)
+        cmd = ["rofi", "-dmenu", "-l", "10", "-p", "Select Icon:"]
 
     try:
         result = subprocess.run(
@@ -135,25 +150,16 @@ def show_selection_menu():
     return None
 
 
-def copy_to_clipboard(text, clipboard_tool):
-    """Copy text to clipboard"""
+def copy_to_clipboard(text):
+    """Copy text to clipboard using wl-copy"""
     try:
-        if clipboard_tool == "xclip":
-            subprocess.run(
-                ["xclip", "-selection", "clipboard"],
-                input=text,
-                text=True,
-                encoding="utf-8",
-                check=True,
-            )
-        else:  # xsel
-            subprocess.run(
-                ["xsel", "--clipboard"],
-                input=text,
-                text=True,
-                encoding="utf-8",
-                check=True,
-            )
+        subprocess.run(
+            ["wl-copy"],
+            input=text,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
         return True
     except subprocess.CalledProcessError as e:
         print(f"Error copying to clipboard: {e}", file=sys.stderr)
@@ -173,7 +179,7 @@ def send_notification(icon):
 def main():
     """Main function"""
     parser = argparse.ArgumentParser(
-        description="Nerd Font Icon Picker - Download and select icons"
+        description="Nerd Font Icon Picker (Wayland) - Download and select icons"
     )
     parser.add_argument(
         "--update", action="store_true", help="Force update the icon cache"
@@ -192,13 +198,13 @@ def main():
         sys.exit(0 if success else 1)
 
     # Check dependencies
-    clipboard_tool = check_dependencies()
+    finder = check_dependencies()
 
     # Show selection menu
-    selected_icon = show_selection_menu()
+    selected_icon = show_selection_menu(finder)
 
     if selected_icon:
-        if copy_to_clipboard(selected_icon, clipboard_tool):
+        if copy_to_clipboard(selected_icon):
             send_notification(selected_icon)
             print(selected_icon)  # Also print to stdout
         else:
