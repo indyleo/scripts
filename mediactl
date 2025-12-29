@@ -40,15 +40,15 @@ readonly CACHE_LOCKFILE="$CACHE_DIR/players.lock"
 readonly CACHE_LIFETIME=1  # seconds
 
 # Custom Icons (Nerd Fonts recommended)
-readonly ICON_BROWSER="🌐"
-readonly ICON_SONG="🎵"
+readonly ICON_BROWSER="󰖟"
+readonly ICON_SONG=""
 readonly ICON_PLAYING=" "
 readonly ICON_PAUSED=" "
 readonly ICON_STOPPED=" "
 readonly ICON_IDLE=" "
 
 # Command timeout (prevent hanging on unresponsive players)
-readonly PLAYERCTL_TIMEOUT=2
+readonly PLAYERCTL_TIMEOUT=3
 
 SOURCE=""  # global source filter
 
