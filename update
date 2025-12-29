@@ -86,21 +86,6 @@ function update_rust() {
     fi
 }
 
-function update_bob() {
-    # Check for 'bob' (standard cargo install) or 'bob.py'
-    if command -v bob &>/dev/null; then
-        BOB_CMD="bob"
-    elif command -v bob.py &>/dev/null; then
-        BOB_CMD="bob.py"
-    else
-        return
-    fi
-
-    echo -e "\n🎛️ Updating Bob ($BOB_CMD)..."
-    $BOB_CMD update stable
-    $BOB_CMD update nightly
-}
-
 function update_pipx() {
     if command -v pipx &>/dev/null; then
         echo -e "\n🐍 Updating pipx..."
