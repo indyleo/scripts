@@ -87,9 +87,9 @@ function toggle_stream() {
 }
 
 # --- Main Menu ---
-choice=$(printf "Record Toggle\nStream Toggle" | rofi -dmenu -p "Select action:")
+choice=$(printf " Record Toggle\n Stream Toggle" | rofi -dmenu -p "Select action:")
 case "$choice" in
-    "Record Toggle") toggle_record ;;
-    "Stream Toggle") toggle_stream ;;
+    " Record Toggle") toggle_record ;;
+    " Stream Toggle") toggle_stream ;;
     *) exit 1 ;;
 esac
