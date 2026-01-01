@@ -265,13 +265,34 @@ function format_title() {
 
 function send_control() {
     local command="$1"
+    shift
     local active_info type player status
     active_info=$(get_active_player "$SOURCE")
     IFS='|' read -r type player status <<< "$active_info"
 
     [[ "$type" == "idle" ]] && { echo "No active player." >&2; return 1; }
 
-    timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" "$command" 2>/dev/null
+    timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" "$command" "$@" 2>/dev/null
+}
+
+# Handles forward skipping (default +)
+function cmd_skip() {
+    local val="${1:-5}"
+    # Strip any existing plus/minus to format correctly
+    local clean_val="${val#[+-]}"
+
+    if [[ "$val" == -* ]]; then
+        send_control position "$clean_val-"
+    else
+        send_control position "$clean_val+"
+    fi
+}
+
+# Handles backward skipping (always -)
+function cmd_back() {
+    local val="${1:-5}"
+    local clean_val="${val#[+-]}"
+    send_control position "$clean_val-"
 }
 
 function cmd_status() { get_state "$SOURCE"; }
@@ -311,8 +332,31 @@ function cmd_previous()   { send_control previous; }
 function show_help() {
     cat << EOF
 $SCRIPT_NAME v$VERSION
-USAGE: $SCRIPT_NAME [--source <browser|song>] <command>
-COMMANDS: status, title, state, state-title, play-pause, next, previous
+A unified media controller for browsers and music players.
+
+USAGE:
+    $SCRIPT_NAME [options] <command> [args]
+
+OPTIONS:
+    -s, --source <browser|song>    Force command to a specific player type.
+
+INFORMATION COMMANDS:
+    status                         Get raw pipe-separated player state.
+    state                          Show only the status icon (Playing/Paused).
+    title [limit]                  Show current title (default limit 50 chars).
+    state-title [limit]            Show icon and title together.
+
+CONTROL COMMANDS:
+    play-pause                     Toggle playback.
+    next                           Skip to next track.
+    previous                       Return to previous track.
+    skip [seconds]                 Seek forward (default 5s). Use - for backward.
+    back [seconds]                 Seek backward (default 5s).
+
+EXAMPLES:
+    $SCRIPT_NAME skip 15            # Move forward 15 seconds
+    $SCRIPT_NAME back               # Move backward 5 seconds
+    $SCRIPT_NAME --source song next # Skip track only on music players
 EOF
 }
 
@@ -336,9 +380,9 @@ function main() {
         play-pause)        cmd_play_pause ;;
         next)              cmd_next ;;
         previous)          cmd_previous ;;
+        skip|forward)      cmd_skip "$@" ;;  # Forward/Skip
+        back|rewind)       cmd_back "$@" ;;  # Back/Rewind
         help|--help|-h)    show_help ;;
         *)                 die "Unknown command: $command" ;;
     esac
 }
-
-main "$@"
