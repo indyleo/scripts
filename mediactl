@@ -386,3 +386,5 @@ function main() {
         *)                 die "Unknown command: $command" ;;
     esac
 }
+
+main "$@"
