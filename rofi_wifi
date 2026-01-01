@@ -1,34 +1,45 @@
-#!/bin/env bash
+#!/usr/bin/env bash
 
-# Simple rofi Wi-Fi connector using NetworkManager (nmcli)
+# Dependencies: rofi, nmcli, notify-send
 
-# Dependencies: rofi, nmcli, notify-send (optional)
+# 1. Get the list of networks
+# Using -g (get) to avoid header rows and complex awk formatting
+# SSID:SIGNAL:SECURITY
+msg="Scanning for Wi-Fi..."
+notify-send -t 1000 "Wi-Fi" "$msg"
 
-# Get available networks
-networks=$(nmcli -t -f SSID,SIGNAL,SECURITY dev wifi list | awk -F: '!seen[$1]++ && $1 != "" { printf "%-30s  %3s%%  %s\n", $1, $2, $3 }')
+networks=$(nmcli -t -f SSID,SIGNAL,SECURITY dev wifi list | \
+    awk -F: '!seen[$1]++ && $1 != "" {printf "%s | %s%% | %s\n", $1, $2, $3}')
 
-[ -z "$networks" ] && {
-    notify-send "Wi-Fi" "No networks found"
-    exit 1
-}
+[ -z "$networks" ] && notify-send "Wi-Fi" "No networks found" && exit 1
 
-# Pick network
-chosen=$(echo "$networks" | rofi -dmenu -l 10 -p "Select Wi-Fi:" | awk '{print $1}')
-[ -z "$chosen" ] && exit 1
+# 2. Pick network - We use 'last field' logic or custom delimiters to keep spaces
+selection=$(echo "$networks" | rofi -dmenu -i -l 10 -p "Wi-Fi:")
+[ -z "$selection" ] && exit 1
 
-# Check if already connected
-if nmcli -t -f NAME con show --active | grep -Fxq "$chosen"; then
+# Extract fields based on our custom delimiter " | "
+chosen=$(echo "$selection" | awk -F ' | ' '{print $1}')
+security=$(echo "$selection" | awk -F ' | ' '{print $3}')
+
+# 3. Check if already connected
+active_con=$(nmcli -t -f NAME con show --active)
+if echo "$active_con" | grep -Fxq "$chosen"; then
     notify-send "Wi-Fi" "Already connected to $chosen"
     exit 0
 fi
 
-# Check if it needs a password
-security=$(nmcli -t -f SSID,SECURITY dev wifi list | grep -F "$chosen" | awk -F: '{print $2}' | head -n1)
-
-if [[ "$security" == "--" || "$security" == "" ]]; then
-    nmcli dev wifi connect "$chosen" && notify-send "Wi-Fi" "Connected to $chosen" && exit 0
+# 4. Connect logic
+if [[ "$security" == "--" || -z "$security" ]]; then
+    success_msg=$(nmcli dev wifi connect "$chosen" 2>&1)
 else
-    password=$(echo "" | rofi -dmenu -p "Password for $chosen:")
+    password=$(rofi -dmenu -password -p "Password for $chosen:")
     [ -z "$password" ] && exit 1
-    nmcli dev wifi connect "$chosen" password "$password" && notify-send "Wi-Fi" "Connected to $chosen" || notify-send "Wi-Fi" "Connection failed"
+    success_msg=$(nmcli dev wifi connect "$chosen" password "$password" 2>&1)
+fi
+
+# 5. Final Notification
+if [ $? -eq 0 ]; then
+    notify-send "Wi-Fi" "Connected to $chosen"
+else
+    notify-send "Wi-Fi" "Failed: $success_msg"
 fi
