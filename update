@@ -40,7 +40,28 @@ function update_system() {
                 ;;
             arch|manjaro|endeavouros|garuda)
                 echo "👉 Detected Arch Linux based system."
-                run_priv pacman -Syu --noconfirm
+
+                # Check if running as root (AUR helpers generally discourage/block root)
+                if [ "$EUID" -eq 0 ]; then
+                    echo "⚠️  Running as root: Skipping AUR helpers and using pacman directly."
+                    pacman -Syu --noconfirm
+                else
+                    # Check for Common AUR Helpers
+                    if command -v paru &>/dev/null; then
+                        echo "✨ Found AUR helper: paru"
+                        # paru updates both repo and AUR
+                        paru -Syu
+                    elif command -v yay &>/dev/null; then
+                        echo "✨ Found AUR helper: yay"
+                        yay -Syu
+                    elif command -v pikaur &>/dev/null; then
+                        echo "✨ Found AUR helper: pikaur"
+                        pikaur -Syu
+                    else
+                        echo "ℹ️  No AUR helper found. Using standard pacman."
+                        run_priv pacman -Syu --noconfirm
+                    fi
+                fi
                 ;;
             opensuse*|suse)
                 echo "👉 Detected OpenSUSE."
@@ -55,9 +76,18 @@ function update_system() {
                 run_priv xbps-install -Su
                 ;;
             *)
-                # Fallback for ID_LIKE (e.g., some Arch derivatives don't set ID=arch)
+                # Fallback Logic
                 if [[ "${ID_LIKE:-}" == *"arch"* ]]; then
-                    run_priv pacman -Syu --noconfirm
+                    # Repeat Arch Logic for ID_LIKE matches
+                    if [ "$EUID" -ne 0 ] && command -v yay &>/dev/null; then
+                        echo "✨ Found AUR helper: yay"
+                        yay -Syu
+                    elif [ "$EUID" -ne 0 ] && command -v paru &>/dev/null; then
+                        echo "✨ Found AUR helper: paru"
+                        paru -Syu
+                    else
+                        run_priv pacman -Syu --noconfirm
+                    fi
                 elif [[ "${ID_LIKE:-}" == *"debian"* ]]; then
                     run_priv apt-get update && run_priv apt-get upgrade -y
                 elif [[ "${ID_LIKE:-}" == *"rhel"* || "${ID_LIKE:-}" == *"fedora"* ]]; then
@@ -79,6 +109,20 @@ function update_flatpak() {
     fi
 }
 
+function update_rustup() {
+    if command -v rustup &>/dev/null; then
+        echo -e "\n🦀 Updating Rustup..."
+        rustup update
+    fi
+}
+
+function update_bob() {
+    if command -v bob &>/dev/null; then
+        echo -e "\n🎛️ Updating Bob (Neovim Version Manager)..."
+        bob update
+    fi
+}
+
 function update_pipx() {
     if command -v pipx &>/dev/null; then
         echo -e "\n🐍 Updating pipx..."
@@ -95,7 +139,6 @@ function update_neovim() {
 
 function update_tmux_plugins() {
     TPM="${XDG_CONFIG_HOME:-$HOME/.config}/tmux/plugins/tpm/bin/update_plugins"
-    # Check legacy path if XDG path doesn't exist
     if [ ! -f "$TPM" ]; then
         TPM="$HOME/.tmux/plugins/tpm/bin/update_plugins"
     fi
@@ -104,22 +147,18 @@ function update_tmux_plugins() {
         echo -e "\n🔧 Updating tmux plugins..."
         "$TPM" all
     else
-        echo "ℹ️  TPM (Tmux Plugin Manager) script not found. Skipping."
+        echo "ℹ️  TPM script not found. Skipping."
     fi
 }
 
 function reload_tmux_config() {
     if [ -n "${TMUX:-}" ]; then
         local tmux_conf="${XDG_CONFIG_HOME:-$HOME/.config}/tmux/tmux.conf"
-        if [ ! -f "$tmux_conf" ]; then
-            tmux_conf="$HOME/.tmux.conf"
-        fi
+        [ ! -f "$tmux_conf" ] && tmux_conf="$HOME/.tmux.conf"
 
         if [ -f "$tmux_conf" ]; then
             tmux source-file "$tmux_conf"
             echo "♻️  Reloaded tmux config"
-        else
-            echo "❗ Could not find tmux config file."
         fi
     else
         echo "ℹ️  Not inside a tmux session."
@@ -129,6 +168,8 @@ function reload_tmux_config() {
 function run_all() {
     update_system
     update_flatpak
+    update_rustup
+    update_bob
     update_pipx
     update_neovim
     update_tmux_plugins
@@ -147,15 +188,15 @@ function simple_menu() {
     options=("System Update" "Flatpak Update" "Rustup Update" "Bob Update" "pipx Update" "Neovim Plugin Update" "Tmux Plugin Update" "Reload Tmux Config" "Run All" "Exit")
     select opt in "${options[@]}"; do
         case $opt in
-            "System Update") echo "🔄 System Update"; return 0 ;;
-            "Flatpak Update") echo "📦 Flatpak Update"; return 0 ;;
-            "Rustup Update") echo "🦀 Rustup Update"; return 0 ;;
-            "Bob Update") echo "🎛️ Bob Update"; return 0 ;;
-            "pipx Update") echo "🐍 pipx Update"; return 0 ;;
-            "Neovim Plugin Update") echo "💡 Neovim Plugin Update"; return 0 ;;
-            "Tmux Plugin Update") echo "🔧 Tmux Plugin Update"; return 0 ;;
-            "Reload Tmux Config") echo "♻️ Reload Tmux Config"; return 0 ;;
-            "Run All") echo "✅ Run All"; return 0 ;;
+            "System Update") update_system; return 0 ;;
+            "Flatpak Update") update_flatpak; return 0 ;;
+            "Rustup Update") update_rustup; return 0 ;;
+            "Bob Update") update_bob; return 0 ;;
+            "pipx Update") update_pipx; return 0 ;;
+            "Neovim Plugin Update") update_neovim; return 0 ;;
+            "Tmux Plugin Update") update_tmux_plugins; return 0 ;;
+            "Reload Tmux Config") reload_tmux_config; return 0 ;;
+            "Run All") run_all; return 0 ;;
             "Exit") echo "❌ Exit"; return 0 ;;
             *) echo "Invalid option $REPLY" ;;
         esac
@@ -165,21 +206,19 @@ function simple_menu() {
 # === Run Loop ===
 
 while true; do
-    # Choose menu style based on fzf availability
     if command -v fzf &>/dev/null; then
         SELECTION=$(fzf_menu)
     else
         SELECTION=$(simple_menu)
     fi
 
-    # Handle empty selection (ctrl+c in fzf)
-    if [ -z "$SELECTION" ]; then
-        break
-    fi
+    if [ -z "$SELECTION" ]; then break; fi
 
     case "$SELECTION" in
         *"System Update") update_system ;;
         *"Flatpak Update") update_flatpak ;;
+        *"Rustup Update") update_rustup ;;
+        *"Bob Update") update_bob ;;
         *"pipx Update") update_pipx ;;
         *"Neovim Plugin Update") update_neovim ;;
         *"Tmux Plugin Update") update_tmux_plugins ;;
