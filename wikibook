@@ -1,0 +1,30 @@
+#!/bin/bash
+# wikibook
+
+# Define the wiki scripts and their display names
+WIKIS=(
+    "Terraria Wiki:terrabook"
+    "Calamity Wiki:calbook"
+    "Infernum Wiki:inferbook"
+    "Fargo's Wiki:fargobook"
+)
+
+# Show rofi menu to select which wiki
+selected=$(printf '%s\n' "${WIKIS[@]}" | cut -d':' -f1 | rofi -dmenu -i -p "Select Wiki")
+
+# Exit if nothing selected
+if [ -z "$selected" ]; then
+    exit 0
+fi
+
+# Find the corresponding script and execute it
+for wiki in "${WIKIS[@]}"; do
+    display_name="${wiki%%:*}"
+    script_name="${wiki##*:}"
+
+    if [ "$selected" = "$display_name" ]; then
+        # Execute the wiki script
+        "$script_name"
+        exit 0
+    fi
+done
