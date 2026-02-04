@@ -231,7 +231,7 @@ function help_menu() {
     cat <<EOF
     Usage: $(basename "$0") [OPTION]
 
-    Display system statistics for dwmblocks-async.
+    Display system statistics for bars.
 
     Options:
     -h, --help  Show this help message
