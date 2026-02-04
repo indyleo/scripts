@@ -4,30 +4,6 @@ set -euo pipefail
 
 opt="${1:-}"
 
-# Theme color definitions
-declare -A COLORS
-COLORS=(
-    [WHITE]="#ECEFF4"
-    [GREEN]="#A3BE8C"
-    [YELLOW]="#EBCB8B"
-    [RED]="#BF616A"
-    [ORANGE]="#D08770"
-    [BLUE]="#81A1C1"
-    [PURPLE]="#B48EAD"
-    [BG]="#2E3440"
-)
-
-# Helper function to get gradient color
-function get_gradient_color() {
-    local percent=$1
-
-    if   [[ $percent -le 20 ]]; then echo "${COLORS[RED]}"
-    elif [[ $percent -le 40 ]]; then echo "${COLORS[ORANGE]}"
-    elif [[ $percent -le 60 ]]; then echo "${COLORS[YELLOW]}"
-    else echo "${COLORS[GREEN]}"
-    fi
-}
-
 function ttime() {
     date +"󰥔  %I:%M %p"
 }
@@ -62,44 +38,39 @@ function memory_usage() {
 }
 
 function wifi_status() {
-    local current icon msg color
+    local current icon msg
     current=$(iwgetid -r 2>/dev/null || true)
 
     if [[ -z "$current" ]]; then
         icon="󰖪"
         msg="Disconnected"
-        color="${COLORS[RED]}"
     else
         icon="󰖩"
         msg="$current"
-        color="${COLORS[GREEN]}"
     fi
-    echo "^c${COLORS[WHITE]}^${icon} ^c${color}^${msg}^d^"
+    echo "${icon} ${msg}"
 }
 
 function tail_status() {
-    local icon msg color
+    local icon msg
 
     if tailscale status &>/dev/null; then
         if tailscale status | grep -q "Logged out"; then
             icon="󰈂"
             msg="Not connected"
-            color="${COLORS[RED]}"
         else
             icon="󰈁"
             msg="Connected"
-            color="${COLORS[GREEN]}"
         fi
     else
         icon="󰈂"
         msg="Not connected"
-        color="${COLORS[RED]}"
     fi
-    echo "^c${COLORS[WHITE]}^${icon} ^c${color}^${msg}^d^"
+    echo "${icon} ${msg}"
 }
 
 function is_media() {
-    local rec=0 stream=0 icon msg color
+    local rec=0 stream=0 icon msg
 
     [[ -f "/tmp/recpid" ]] && rec=1
     [[ -f "/tmp/streampid" ]] && stream=1
@@ -107,26 +78,22 @@ function is_media() {
     if [[ $rec -eq 1 && $stream -eq 1 ]]; then
         icon=" 󰑊"
         msg="Recording & Streaming"
-        color="${COLORS[GREEN]}"
     elif [[ $rec -eq 1 ]]; then
         icon=" 󰑊"
         msg="Recording"
-        color="${COLORS[GREEN]}"
     elif [[ $stream -eq 1 ]]; then
         icon=" 󰑊"
         msg="Streaming"
-        color="${COLORS[GREEN]}"
     else
         icon=" "
         msg="Idle"
-        color="${COLORS[RED]}"
     fi
 
-    echo "^c${COLORS[WHITE]}^${icon} ^c${color}^${msg}^d^"
+    echo "${icon} ${msg}"
 }
 
 function bbattery() {
-    local battery_info valid_batteries active_battery_line percent status icon color
+    local battery_info valid_batteries active_battery_line percent status icon
 
     battery_info=$(acpi -b 2>/dev/null || echo "")
     [[ -z "$battery_info" ]] && return
@@ -156,7 +123,6 @@ function bbattery() {
             elif [[ $percent -ge 10 ]];  then icon="󰢜"
             else                          icon="󰢟"
             fi
-            color=$(get_gradient_color "$percent")
             ;;
         Discharging)
             if   [[ $percent -ge 100 ]]; then icon="󰁹"
@@ -171,58 +137,49 @@ function bbattery() {
             elif [[ $percent -ge 10 ]];  then icon="󰁺"
             else                          icon="󰂎"
             fi
-            color=$(get_gradient_color "$percent")
             ;;
         Full)
             icon="󰂄"
-            color="${COLORS[GREEN]}"
             ;;
         *)
             icon="󰂑"
-            color="${COLORS[WHITE]}"
             ;;
     esac
 
-    echo "^c${COLORS[WHITE]}^${icon} ^c${color}^${percent}%^d^"
+    echo "${icon} ${percent}%"
 }
 
 function vvolume() {
-    local vol muted icon color msg
+    local vol muted icon msg
 
     vol="$(pamixer --get-volume 2>/dev/null || echo "0")"
     muted=$(pamixer --get-mute 2>/dev/null || echo "false")
 
     if [[ "$muted" == "true" || "$vol" -eq 0 ]]; then
         icon="󰝟"
-        color="${COLORS[RED]}"
         msg="Muted"
     elif [[ "$vol" -eq 100 ]]; then
         icon="󰶬"
-        color="${COLORS[GREEN]}"
         msg="${vol}%"
     elif [[ "$vol" -ge 75 ]]; then
         icon="󰕾"
-        color="${COLORS[GREEN]}"
         msg="${vol}%"
     elif [[ "$vol" -ge 50 ]]; then
         icon="󰕾"
-        color="${COLORS[YELLOW]}"
         msg="${vol}%"
     elif [[ "$vol" -ge 25 ]]; then
         icon="󰖀"
-        color="${COLORS[ORANGE]}"
         msg="${vol}%"
     else
         icon="󰕿"
-        color="${COLORS[RED]}"
         msg="${vol}%"
     fi
 
-    echo "^c${COLORS[WHITE]}^${icon} ^c${color}^${msg}^d^"
+    echo "${icon} ${msg}"
 }
 
 function mmicrophone() {
-    local vol muted icon color msg
+    local vol muted icon msg
 
     vol="$(pamixer --default-source --get-volume 2>/dev/null || echo 0)"
     muted="$(pamixer --default-source --get-mute 2>/dev/null || echo false)"
@@ -233,36 +190,22 @@ function mmicrophone() {
 
     if [[ "$muted" == "true" || "$vol" -eq 0 ]]; then
         icon=""
-        color="${COLORS[RED]}"
         msg="Muted"
-    elif [[ "$vol" -ge 75 ]]; then
-        color="${COLORS[GREEN]}"
-        msg="${vol}%"
-    elif [[ "$vol" -ge 50 ]]; then
-        color="${COLORS[YELLOW]}"
-        msg="${vol}%"
-    elif [[ "$vol" -ge 25 ]]; then
-        color="${COLORS[ORANGE]}"
-        msg="${vol}%"
     else
-        color="${COLORS[RED]}"
         msg="${vol}%"
     fi
 
-    echo "^c${COLORS[WHITE]}^${icon} ^c${color}^${msg}^d^"
+    echo "${icon} ${msg}"
 }
 
 function bbrightness() {
-    local brightness_raw max_brightness brightness icon color
+    local brightness_raw max_brightness brightness icon
 
     brightness_raw=$(cat /sys/class/backlight/*/brightness 2>/dev/null || echo "0")
     max_brightness=$(cat /sys/class/backlight/*/max_brightness 2>/dev/null || echo "100")
 
     [[ -z "$brightness_raw" || -z "$max_brightness" || "$max_brightness" -eq 0 ]] && brightness=0 || \
         brightness=$(( (brightness_raw * 100 + max_brightness / 2) / max_brightness ))
-
-
-    color=$(get_gradient_color "$brightness")
 
     if   [[ "$brightness" -ge 100 ]]; then icon="󰛨"
     elif [[ "$brightness" -ge 90 ]];  then icon="󱩖"
@@ -277,7 +220,7 @@ function bbrightness() {
     else icon="󱩎"
     fi
 
-    echo "^c${COLORS[WHITE]}^${icon} ^c${color}^${brightness}%^d^"
+    echo "${icon} ${brightness}%"
 }
 
 function all_stats() {
@@ -286,25 +229,25 @@ function all_stats() {
 
 function help_menu() {
     cat <<EOF
-	Usage: $(basename "$0") [OPTION]
+    Usage: $(basename "$0") [OPTION]
 
-	Display system statistics for dwmblocks-async.
+    Display system statistics for dwmblocks-async.
 
-	Options:
-	-h, --help  Show this help message
-	cpu         Display CPU load
-	mem         Display memory usage
-	disk        Display disk usage
-	wifi        Display WiFi connection status
-	tail        Display Tailscale connection status
-	date        Display date
-	time        Display time
-	date_time   Display date and time
-	ismedia     Display recording/streaming status
-	battery     Display battery status
-	volume      Display volume
-	brightness  Display brightness
-	all         Display all stats (combined)
+    Options:
+    -h, --help  Show this help message
+    cpu         Display CPU load
+    mem         Display memory usage
+    disk        Display disk usage
+    wifi        Display WiFi connection status
+    tail        Display Tailscale connection status
+    date        Display date
+    time        Display time
+    date_time   Display date and time
+    ismedia     Display recording/streaming status
+    battery     Display battery status
+    volume      Display volume
+    brightness  Display brightness
+    all         Display all stats (combined)
 EOF
 }
 
