@@ -3,9 +3,6 @@ set -euo pipefail
 
 # Constants
 SCRIPT_NAME=$(basename "$0")
-NOTIFY_ICON="preferences-system" # Default icon for notifications
-NOTIFY_TIMEOUT=2000              # 2 seconds
-
 # Check required commands
 DEPS=(brightnessctl wpctl nmcli bluetoothctl awk notify-send)
 for cmd in "${DEPS[@]}"; do
@@ -30,15 +27,6 @@ else
 fi
 
 # --- Helper Functions ---
-
-# Send a desktop notification
-# Usage: notify_user "Title" "Message" "Icon"
-function notify_user() {
-    local title="$1"
-    local msg="$2"
-    local icon="${3:-$NOTIFY_ICON}"
-    notify-send -t "$NOTIFY_TIMEOUT" -i "$icon" "$title" "$msg"
-}
 
 # Run command and report
 function run_cmd() {
@@ -87,7 +75,6 @@ function adjust_volume() {
     new_vol=$(get_volume_percent "$target")
     local type="Volume"
     [[ "$target" == "@DEFAULT_AUDIO_SOURCE@" ]] && type="Mic"
-    notify_user "$type" "Level: ${new_vol}%" "audio-volume-high"
 }
 
 function toggle_mute() {
@@ -99,7 +86,6 @@ function toggle_mute() {
     local type="Audio"
     [[ "$target" == "@DEFAULT_AUDIO_SOURCE@" ]] && type="Microphone"
 
-    notify_user "$type" "$status" "audio-volume-medium"
 }
 
 # --- Brightness Logic ---
@@ -114,7 +100,6 @@ function adjust_brightness() {
     current_max=$(brightnessctl max)
     percent=$(( current_val * 100 / current_max ))
 
-    notify_user "Brightness" "${percent}%" "display-brightness-symbolic"
 }
 
 # --- Network/Radio Logic ---
@@ -124,10 +109,8 @@ function wifi_toggle() {
     state=$(nmcli radio wifi)
     if [[ "$state" == "enabled" ]]; then
         run_cmd nmcli radio wifi off
-        notify_user "Wi-Fi" "Disabled" "network-wireless-offline"
     else
         run_cmd nmcli radio wifi on
-        notify_user "Wi-Fi" "Enabled" "network-wireless"
     fi
 }
 
@@ -137,10 +120,8 @@ function bt_toggle() {
     state=$(bluetoothctl show | grep "Powered: yes")
     if [[ -n "$state" ]]; then
         run_cmd bluetoothctl power off
-        notify_user "Bluetooth" "Disabled" "bluetooth-disabled"
     else
         run_cmd bluetoothctl power on
-        notify_user "Bluetooth" "Enabled" "bluetooth-active"
     fi
 }
 
@@ -153,12 +134,10 @@ function airplane_toggle() {
     if [[ "$wifi_state" == "enabled" || "$bt_state" -eq 1 ]]; then
         nmcli radio wifi off
         bluetoothctl power off
-        notify_user "Airplane Mode" "Enabled" "airplane-mode"
         echo "✅ Airplane Mode ON"
     else
         nmcli radio wifi on
         bluetoothctl power on
-        notify_user "Airplane Mode" "Disabled" "network-wireless"
         echo "✅ Airplane Mode OFF"
     fi
 }
