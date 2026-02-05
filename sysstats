@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+# Strict mode: Exit on error, unset vars, and pipe failures
 set -euo pipefail
 
 opt="${1:-}"
@@ -18,27 +19,34 @@ function date_time() {
 
 function cpu_load() {
     local load
+    # /proc/loadavg field 1 is 1-minute load.
     load="$(awk '{print $1}' /proc/loadavg)"
     echo "  $load%"
 }
 
 function disk_usage() {
-    local disk_info total used
-    disk_info=$(df -h / | tail -1)
-    total=$(echo "$disk_info" | awk '{print $2}')
-    used=$(echo "$disk_info" | awk '{print $3}')
+    local used total
+    # Use awk to grab specific columns from the second line (NR==2) to avoid header issues
+    read -r used total <<< "$(df -h / | awk 'NR==2 {print $3, $2}')"
     echo "󰋊 $used/$total"
 }
 
 function memory_usage() {
     local used total
-    used="$(free -h | awk 'NR==2 {print $3}')"
-    total="$(free -h | awk 'NR==2 {print $2}')"
-    echo "󰍛 $used/$total"
+    # Parse free -h output safely
+    read -r total used <<< "$(free -h | awk 'NR==2 {print $2, $3}')"
+    echo "  $used/$total"
 }
 
 function wifi_status() {
     local current icon msg
+
+    # Check if iwgetid exists to avoid crash
+    if ! command -v iwgetid &> /dev/null; then
+        echo "󰖪 No tool"
+        return
+    fi
+
     current=$(iwgetid -r 2>/dev/null || true)
 
     if [[ -z "$current" ]]; then
@@ -52,10 +60,17 @@ function wifi_status() {
 }
 
 function tail_status() {
-    local icon msg
+    local icon msg status_out
 
-    if tailscale status &>/dev/null; then
-        if tailscale status | grep -q "Logged out"; then
+    # check if tailscale exists
+    if ! command -v tailscale &> /dev/null; then
+        echo "󰈂 No tool"
+        return
+    fi
+
+    # Capture output once to prevent lag
+    if status_out=$(tailscale status 2>&1); then
+        if echo "$status_out" | grep -q "Logged out"; then
             icon="󰈂"
             msg="Not connected"
         else
@@ -95,9 +110,15 @@ function is_media() {
 function bbattery() {
     local battery_info valid_batteries active_battery_line percent status icon
 
+    if ! command -v acpi &> /dev/null; then
+        echo "󰂑 No acpi"
+        return
+    fi
+
     battery_info=$(acpi -b 2>/dev/null || echo "")
     [[ -z "$battery_info" ]] && return
 
+    # Filter out unknowns, grab the first valid line
     valid_batteries=$(echo "$battery_info" | grep -v "Unknown" | grep -v "rate information unavailable" || true)
 
     if [[ -n "$valid_batteries" ]]; then
@@ -106,12 +127,15 @@ function bbattery() {
         active_battery_line=$(echo "$battery_info" | head -n 1)
     fi
 
-    percent=$(echo "$active_battery_line" | grep -o '[0-9]\+%' | tr -d '%' || echo "0")
-    status=$(echo "$active_battery_line" | cut -d: -f2 | cut -d, -f1 | xargs)
+    # Extract percentage safely
+    percent=$(echo "$active_battery_line" | grep -o '[0-9]\+%' | tr -d '%' | head -n 1 || echo "0")
+
+    # Extract status safely
+    status=$(echo "$active_battery_line" | awk -F', ' '{print $1}' | awk -F': ' '{print $2}' || echo "Unknown")
 
     case "$status" in
         Charging|Not\ charging)
-            if   [[ $percent -ge 100 ]]; then icon="󰂅"
+            if    [[ $percent -ge 100 ]]; then icon="󰂅"
             elif [[ $percent -ge 90 ]];  then icon="󰂋"
             elif [[ $percent -ge 80 ]];  then icon="󰂊"
             elif [[ $percent -ge 70 ]];  then icon="󰢞"
@@ -125,7 +149,7 @@ function bbattery() {
             fi
             ;;
         Discharging)
-            if   [[ $percent -ge 100 ]]; then icon="󰁹"
+            if    [[ $percent -ge 100 ]]; then icon="󰁹"
             elif [[ $percent -ge 90 ]];  then icon="󰂂"
             elif [[ $percent -ge 80 ]];  then icon="󰂁"
             elif [[ $percent -ge 70 ]];  then icon="󰂀"
@@ -151,6 +175,11 @@ function bbattery() {
 
 function vvolume() {
     local vol muted icon msg
+
+    if ! command -v pamixer &> /dev/null; then
+        echo "󰝟 No tool"
+        return
+    fi
 
     vol="$(pamixer --get-volume 2>/dev/null || echo "0")"
     muted=$(pamixer --get-mute 2>/dev/null || echo "false")
@@ -181,28 +210,38 @@ function vvolume() {
 function mmicrophone() {
     local vol muted icon msg
 
+    if ! command -v pamixer &> /dev/null; then
+        echo " No tool"
+        return
+    fi
+
     vol="$(pamixer --default-source --get-volume 2>/dev/null || echo 0)"
     muted="$(pamixer --default-source --get-mute 2>/dev/null || echo false)"
 
-    if [[ "$muted" == "false" || "$vol" -gt 0 ]]; then
+    if [[ "$muted" == "false" && "$vol" -gt 0 ]]; then
         icon=""
-    fi
-
-    if [[ "$muted" == "true" || "$vol" -eq 0 ]]; then
+        msg="${vol}%"
+    else
         icon=""
         msg="Muted"
-    else
-        msg="${vol}%"
     fi
 
     echo "${icon} ${msg}"
 }
 
 function bbrightness() {
-    local brightness_raw max_brightness brightness icon
+    local brightness_raw max_brightness brightness icon backlight_dir
 
-    brightness_raw=$(cat /sys/class/backlight/*/brightness 2>/dev/null || echo "0")
-    max_brightness=$(cat /sys/class/backlight/*/max_brightness 2>/dev/null || echo "100")
+    # Fix: Handle multiple backlight controllers by picking the first one found
+    backlight_dir=$(find /sys/class/backlight/ -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)
+
+    if [[ -z "$backlight_dir" ]]; then
+        echo "󰛨 N/A"
+        return
+    fi
+
+    brightness_raw=$(cat "$backlight_dir/brightness" 2>/dev/null || echo "0")
+    max_brightness=$(cat "$backlight_dir/max_brightness" 2>/dev/null || echo "100")
 
     [[ -z "$brightness_raw" || -z "$max_brightness" || "$max_brightness" -eq 0 ]] && brightness=0 || \
         brightness=$(( (brightness_raw * 100 + max_brightness / 2) / max_brightness ))
@@ -217,14 +256,14 @@ function bbrightness() {
     elif [[ "$brightness" -ge 30 ]];  then icon="󱩑"
     elif [[ "$brightness" -ge 20 ]];  then icon="󱩐"
     elif [[ "$brightness" -ge 10 ]];  then icon="󱩏"
-    else icon="󱩎"
+    else                                icon="󱩎"
     fi
 
     echo "${icon} ${brightness}%"
 }
 
 function all_stats() {
-    echo "$(is_media) | $(disk_usage) | $(memory_usage) | $(cpu_load) | $(bbrightness) | $(mmicrophone) |  $(vvolume) | $(bbattery) | $(wifi_status) | $(tail_status) | $(date_time)"
+    echo "$(is_media) | $(disk_usage) | $(memory_usage) | $(cpu_load) | $(bbrightness) | $(mmicrophone) | $(vvolume) | $(bbattery) | $(wifi_status) | $(tail_status) | $(date_time)"
 }
 
 function help_menu() {
@@ -234,20 +273,21 @@ function help_menu() {
     Display system statistics for bars.
 
     Options:
-    -h, --help  Show this help message
-    cpu         Display CPU load
-    mem         Display memory usage
-    disk        Display disk usage
-    wifi        Display WiFi connection status
-    tail        Display Tailscale connection status
-    date        Display date
-    time        Display time
-    date_time   Display date and time
-    ismedia     Display recording/streaming status
-    battery     Display battery status
-    volume      Display volume
-    brightness  Display brightness
-    all         Display all stats (combined)
+    -h, --help      Show this help message
+    cpu             Display CPU load
+    mem             Display memory usage
+    disk            Display disk usage
+    wifi            Display WiFi connection status
+    tail            Display Tailscale connection status
+    date            Display date
+    time            Display time
+    date_time       Display date and time
+    ismedia         Display recording/streaming status
+    battery         Display battery status
+    volume          Display volume
+    microphone      Display microphone status
+    brightness      Display brightness
+    all             Display all stats (combined)
 EOF
 }
 
@@ -267,8 +307,9 @@ case "$opt" in
     brightness) bbrightness ;;
     all)        all_stats ;;
     --help|-h)  help_menu ;;
+    "")         help_menu ;; # Handle empty argument
     *)
-        echo "Error: Unknown argument '${opt:- }'." >&2
+        echo "Error: Unknown argument '${opt}'." >&2
         help_menu
         exit 1
         ;;
