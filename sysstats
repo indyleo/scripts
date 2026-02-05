@@ -140,33 +140,33 @@ function wifi_status() {
                 quality=$(echo "$active_line" | cut -d':' -f3)
 
                 # Set icon based on signal strength
-                if   [[ $quality -ge 75 ]]; then icon="󰖩"
-                elif [[ $quality -ge 50 ]]; then icon="󰖨"
-                elif [[ $quality -ge 25 ]]; then icon="󰖥"
-                else                             icon="󰖡"
-                fi
+		            if   [[ $quality -ge 75 ]]; then icon="󰤨"
+    		        elif [[ $quality -ge 50 ]]; then icon="󰤥"
+        		    elif [[ $quality -ge 25 ]]; then icon="󰤢"
+            		else                             icon="󰤟"
+            		fi
 
-                msg="$current ${quality}%"
+								msg="$current (${quality}%)"
                 echo "${icon} ${msg}"
                 return
             fi
         fi
 
         # If we get here, no active connection via nmcli
-        echo "󰖪 Offline"
+        echo "󰤮 Offline"
         return
     fi
 
     # Fallback to iwgetid if nmcli not available
     if ! command -v iwgetid &> /dev/null; then
-        echo "󰖪 No tool"
+        echo "󰤮 No tool"
         return
     fi
 
     current=$(iwgetid -r 2>/dev/null || true)
 
     if [[ -z "$current" ]]; then
-        icon="󰖪"
+        icon="󰤮"
         msg="Disconnected"
     else
         # Get signal strength using iwconfig or iw
@@ -210,14 +210,14 @@ function wifi_status() {
 
         # Set icon based on signal strength
         if [[ -n "$quality" ]]; then
-            if   [[ $quality -ge 75 ]]; then icon="󰖩"
-            elif [[ $quality -ge 50 ]]; then icon="󰖨"
-            elif [[ $quality -ge 25 ]]; then icon="󰖥"
-            else                             icon="󰖡"
+            if   [[ $quality -ge 75 ]]; then icon="󰤨"
+            elif [[ $quality -ge 50 ]]; then icon="󰤥"
+            elif [[ $quality -ge 25 ]]; then icon="󰤢"
+            else                             icon="󰤟"
             fi
-            msg="$current ${quality}%"
+						msg="$current (${quality}%)"
         else
-            icon="󰖩"
+            icon="󰤨"
             msg="$current"
         fi
     fi
