@@ -281,45 +281,47 @@ function bbrightness() {
 }
 
 function ggpu() {
-    local usage="" temp="" card_path="/sys/class/drm/card1"
+    local usage="" temp=""
+    local intel_card="/sys/class/drm/card1"
 
-    # 1. Check for NVIDIA first (useful if card1 is actually the dGPU)
+    # 1. Try NVIDIA
     if command -v nvidia-smi &> /dev/null; then
-        local dgpu_info
-        dgpu_info=$(nvidia-smi --query-gpu=utilization.gpu,temperature.gpu --format=csv,noheader,nounits 2>/dev/null | head -n 1)
-        if [[ -n "$dgpu_info" ]]; then
-            usage=$(echo "$dgpu_info" | awk -F', ' '{print $1}')
-            temp=$(echo "$dgpu_info" | awk -F', ' '{print $2}')
-            echo "󰢮 ${usage}% (${temp}°C)"
-            return
+        if dgpu_out=$(nvidia-smi --query-gpu=utilization.gpu,temperature.gpu --format=csv,noheader,nounits 2>/dev/null); then
+            usage=$(echo "$dgpu_out" | awk -F', ' '{print $1}' | xargs)
+            temp=$(echo "$dgpu_out" | awk -F', ' '{print $2}' | xargs)
+            if [[ -n "$usage" ]]; then
+                echo "󰢮 ${usage}% (${temp}°C)"
+                return
+            fi
         fi
     fi
 
-    # 2. Intel iGPU Logic specifically for card1
-    if [[ -f "$card_path/gt_cur_freq_mhz" ]]; then
+    # 2. Get Temperature (iGPU shares CPU die)
+    # Check thermal_zone (most reliable on laptops)
+    if [[ -f /sys/class/thermal/thermal_zone0/temp ]]; then
+        temp=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
+        temp=$(( temp / 1000 ))
+    fi
+
+    # 3. Intel iGPU Logic (Targeting card1)
+    if [[ -d "$intel_card" ]]; then
         local cur max
-        # Using || true or || cur="" ensures 'set -e' doesn't kill the script if read fails
-        cur=$(cat "$card_path/gt_cur_freq_mhz" 2>/dev/null) || cur=""
-        max=$(cat "$card_path/gt_max_freq_mhz" 2>/dev/null) || max=""
+        cur=$(cat "$intel_card/gt_cur_freq_mhz" 2>/dev/null || echo "0")
+        max=$(cat "$intel_card/gt_max_freq_mhz" 2>/dev/null || echo "0")
 
-        if [[ -n "$cur" && -n "$max" && "$max" -gt 0 ]]; then
-            usage=$(( cur * 100 / max ))
-            echo "󰢮 ${usage}% (${cur}MHz)"
+        if [[ "${max:-0}" -gt 0 ]]; then
+            usage=$(( ${cur:-0} * 100 / ${max:-0} ))
+            echo "󰢮 iGPU: ${usage}% (${temp:-?}°C)"
             return
         fi
     fi
 
-    # 3. Fallback: Check for AMD on card1 (different file name)
-    if [[ -f "$card_path/device/gpu_busy_percent" ]]; then
-        usage=$(cat "$card_path/device/gpu_busy_percent" 2>/dev/null) || usage=""
-        if [[ -n "$usage" ]]; then
-            echo "󰢮 ${usage}%"
-            return
-        fi
+    # 4. Fallback
+    if lspci 2>/dev/null | grep -iq 'vga.*intel'; then
+        echo "󰢮 Intel iGPU (${temp:-?}°C)"
+    else
+        echo "󰢮 No GPU"
     fi
-
-    # 4. Final Fallback if files exist but are unreadable
-    echo "󰢮 iGPU"
 }
 
 function kkernel() {
