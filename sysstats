@@ -361,23 +361,31 @@ function updates() {
 }
 
 function weather() {
-    local icon code temp
+    local weather_data icon code temp
+
+    # 1. Fetch data. We use %k and %t separately to avoid splitting issues.
+    # We use || true to ensure 'set -e' doesn't kill the script if the net is down.
     code=$(curl -4 -sL --max-time 3 "wttr.in?format=%k" 2>/dev/null || echo "")
     temp=$(curl -4 -sL --max-time 3 "wttr.in?format=%t" 2>/dev/null || echo "")
 
+    # 2. If we have no temperature, exit silently
     [[ -z "$temp" ]] && return
+
+    # 3. Clean the temperature string (remove + and spaces)
     temp=$(echo "$temp" | tr -d '+ ')
 
+    # 4. Map codes to Nerd Font Icons
     case "$code" in
         113) icon="󰖙" ;; # Sunny
         116) icon="󰖕" ;; # Partly Cloudy
         119|122) icon="󰖐" ;; # Cloudy
         143|248|260) icon="󰖑" ;; # Fog
-        176|263|266|293|296|302|305|308) icon="󰖗" ;; # Rain
+        176|263|266|293|296|299|302|305|308) icon="󰖗" ;; # Rain
         200|386|389|392|395) icon="󰙾" ;; # Storm
         179|182|185|227|230|323|326|329|332|335|338) icon="󰼶" ;; # Snow
-        *) icon="󰖐" ;;
+        *) icon="󰖐" ;; # Default Cloud
     esac
+
     echo "${icon} ${temp}"
 }
 
