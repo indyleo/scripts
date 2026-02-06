@@ -17,6 +17,12 @@ function date_time() {
     date +"󰥔  %I:%M %p |   %A %B %d %Y"
 }
 
+function uptime_info() {
+    local up
+    up=$(uptime -p | sed 's/up //; s/ hours\?/h/; s/ minutes\?/m/; s/ days\?/d/')
+    echo "󱎫 ${up}"
+}
+
 function cpu_load() {
     local usage temp
     local cpu1 cpu2 idle1 idle2 total1 total2
@@ -178,13 +184,13 @@ function is_media() {
     [[ -f "/tmp/recpid" ]] && rec=1
     [[ -f "/tmp/streampid" ]] && stream=1
     if [[ $rec -eq 1 && $stream -eq 1 ]]; then
-        icon=" 󰑊"; msg="Recording & Streaming"
+        icon="󰑊"; msg="Recording & Streaming"
     elif [[ $rec -eq 1 ]]; then
-        icon=" 󰑊"; msg="Recording"
+        icon="󰑊"; msg="Recording"
     elif [[ $stream -eq 1 ]]; then
-        icon=" 󰑊"; msg="Streaming"
+        icon="󰑊"; msg="Streaming"
     else
-        icon=" "; msg="Idle"
+        icon=""; msg="Idle"
     fi
     echo "${icon} ${msg}"
 }
@@ -267,16 +273,34 @@ function mmicrophone() {
 
 function bbrightness() {
     local brightness_raw max_brightness brightness icon backlight_dir
+
+    # Fix: Handle multiple backlight controllers by picking the first one found
     backlight_dir=$(find /sys/class/backlight/ -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)
+
     if [[ -z "$backlight_dir" ]]; then
-        echo "󰛨 N/A"; return
+        echo "󰛨 N/A"
+        return
     fi
+
     brightness_raw=$(cat "$backlight_dir/brightness" 2>/dev/null || echo "0")
     max_brightness=$(cat "$backlight_dir/max_brightness" 2>/dev/null || echo "100")
-    brightness=$(( (brightness_raw * 100 + max_brightness / 2) / max_brightness ))
+
+    [[ -z "$brightness_raw" || -z "$max_brightness" || "$max_brightness" -eq 0 ]] && brightness=0 || \
+        brightness=$(( (brightness_raw * 100 + max_brightness / 2) / max_brightness ))
+
     if   [[ "$brightness" -ge 100 ]]; then icon="󰛨"
+    elif [[ "$brightness" -ge 90 ]];  then icon="󱩖"
+    elif [[ "$brightness" -ge 80 ]];  then icon="󱩖"
+    elif [[ "$brightness" -ge 70 ]];  then icon="󱩕"
+    elif [[ "$brightness" -ge 60 ]];  then icon="󱩔"
     elif [[ "$brightness" -ge 50 ]];  then icon="󱩓"
-    else                                icon="󱩎"; fi
+    elif [[ "$brightness" -ge 40 ]];  then icon="󱩒"
+    elif [[ "$brightness" -ge 30 ]];  then icon="󱩑"
+    elif [[ "$brightness" -ge 20 ]];  then icon="󱩐"
+    elif [[ "$brightness" -ge 10 ]];  then icon="󱩏"
+    else                                icon="󱩎"
+    fi
+
     echo "${icon} ${brightness}%"
 }
 
@@ -328,56 +352,112 @@ function kkernel() {
     echo "󰌽 $(uname -r 2>/dev/null || echo "Unknown")"
 }
 
+function updates() {
+    if command -v checkupdates &> /dev/null; then
+        local count
+        count=$(checkupdates 2>/dev/null | wc -l)
+        [[ "$count" -gt 0 ]] && echo "󰚰 ${count}"
+    fi
+}
+
+function weather() {
+    local icon code temp
+    code=$(curl -4 -sL --max-time 3 "wttr.in?format=%k" 2>/dev/null || echo "")
+    temp=$(curl -4 -sL --max-time 3 "wttr.in?format=%t" 2>/dev/null || echo "")
+
+    [[ -z "$temp" ]] && return
+    temp=$(echo "$temp" | tr -d '+ ')
+
+    case "$code" in
+        113) icon="󰖙" ;; # Sunny
+        116) icon="󰖕" ;; # Partly Cloudy
+        119|122) icon="󰖐" ;; # Cloudy
+        143|248|260) icon="󰖑" ;; # Fog
+        176|263|266|293|296|302|305|308) icon="󰖗" ;; # Rain
+        200|386|389|392|395) icon="󰙾" ;; # Storm
+        179|182|185|227|230|323|326|329|332|335|338) icon="󰼶" ;; # Snow
+        *) icon="󰖐" ;;
+    esac
+    echo "${icon} ${temp}"
+}
+
+function network_ips() {
+    local priv_ip pub_ip
+    priv_ip=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7}' | head -n1 || echo "N/A")
+    pub_ip=$(curl -4 -s --max-time 2 ifconfig.me 2>/dev/null || echo "Offline")
+    echo "󰩟 ${priv_ip} | 󰩠 ${pub_ip}"
+}
+
 function all_stats() {
-    echo "$(is_media) | $(disk_usage) | $(memory_usage) | $(cpu_load) | $(bbrightness) | $(mmicrophone) | $(vvolume) | $(bbattery) | $(ggpu) | $(kkernel) | $(eethernet) | $(wifi_status) | $(tail_status) | $(date_time)"
+    local u=$(updates)
+    local w=$(weather)
+    [[ -n "$u" ]] && echo -n "$u | "
+    [[ -n "$w" ]] && echo -n "$w | "
+    echo "$(is_media) | $(cpu_load) | $(ggpu) | $(memory_usage) | $(disk_usage) | $(vvolume) | $(bbattery) | $(network_ips) | $(wifi_status) | $(date_time)"
 }
 
 function help_menu() {
     cat <<EOF
-    Usage: $(basename "$0") [OPTION]
+Usage: $(basename "$0") [OPTION]
 
-    Display system statistics for bars.
+A modular system information script for status bars (Polybar, Waybar, etc.)
 
-    Options:
-    -h, --help      Show this help message
-    cpu             Display CPU load
-    mem             Display memory usage
-    disk            Display disk usage
-    ethernet        Display Ethernet status
-    wifi            Display WiFi status
-    tail            Display Tailscale status
-    date            Display date
-    time            Display time
-    date_time       Display date and time
-    ismedia         Display recording/streaming status
-    battery         Display battery status
-    volume          Display volume
-    microphone      Display microphone status
-    brightness      Display brightness
-    gpu             Display GPU info
-    kernel          Display kernel version
-    all             Display all stats
+Monitoring Options:
+    cpu            CPU load percentage and temperature
+    gpu            NVIDIA or Intel iGPU usage and temp
+    mem            RAM usage (Percentage and GB used/total)
+    disk           Root partition usage and remaining space
+    battery        Battery level, status, and time remaining
+    brightness     Backlight intensity percentage
+    volume         Audio output level and mute status
+    mic            Microphone input level and mute status
+
+Network Options:
+    wifi           SSID and signal strength
+    eth            Ethernet connection status
+    tail           Tailscale VPN connectivity
+    ips            Internal and External IP addresses
+
+System Options:
+    uptime         System uptime (formatted)
+    kernel         Running Linux kernel version
+    updates        Pending Arch Linux package updates
+    weather        Current temperature and conditions (wttr.in)
+    media          Active recording or streaming status
+    all            Concatenated string of all major stats
+
+Time & Date:
+    date           Current day and date
+    time           Current time (12-hour format)
+    date_time      Combined date and time string
+
+Help:
+    -h, --help     Show this menu
 EOF
 }
 
 case "$opt" in
-    cpu)        cpu_load ;;
-    mem)        memory_usage ;;
-    disk)       disk_usage ;;
-    ethernet)   eethernet ;;
-    wifi)       wifi_status ;;
-    tail)       tail_status ;;
-    date)       ddate ;;
-    time)       ttime ;;
-    date_time)  date_time ;;
-    ismedia)    is_media ;;
-    battery)    bbattery ;;
-    volume)     vvolume ;;
-    microphone) mmicrophone ;;
+    cpu) cpu_load ;;
+    mem) memory_usage ;;
+    disk) disk_usage ;;
+    gpu) ggpu ;;
+    battery) bbattery ;;
+    volume) vvolume ;;
+    mic|microphone) mmicrophone ;;
     brightness) bbrightness ;;
-    gpu)        ggpu ;;
-    kernel)     kkernel ;;
-    all)        all_stats ;;
+    wifi) wifi_status ;;
+    eth|ethernet) eethernet ;;
+    tail) tail_status ;;
+    media|ismedia) is_media ;;
+    ips) network_ips ;;
+    uptime) uptime_info ;;
+    kernel) kkernel ;;
+    updates) updates ;;
+    weather) weather ;;
+    date) ddate ;;
+    time) ttime ;;
+    date_time) date_time ;;
+    all) all_stats ;;
     --help|-h|"") help_menu ;;
     *)
         echo "Error: Unknown argument '${opt}'." >&2
