@@ -281,21 +281,60 @@ function bbrightness() {
 }
 
 function ggpu() {
-    local dgpu_info usage="" temp="" gpu_type=""
+    local usage="" temp="" gpu_type=""
+
+    # 1. Try NVIDIA first
     if command -v nvidia-smi &> /dev/null; then
-        dgpu_info=$(nvidia-smi --query-gpu=utilization.gpu,temperature.gpu --format=csv,noheader,nounits 2>/dev/null | head -n 1 || echo "")
-        if [[ "$dgpu_info" != *"failed"* && -n "$dgpu_info" ]]; then
-            usage=$(echo "$dgpu_info" | awk -F', ' '{print $1}' | tr -d ' ')
-            temp=$(echo "$dgpu_info" | awk -F', ' '{print $2}' | tr -d ' ')
-            gpu_type="dGPU"
+        local dgpu_info
+        dgpu_info=$(nvidia-smi --query-gpu=utilization.gpu,temperature.gpu --format=csv,noheader,nounits 2>/dev/null | head -n 1)
+        if [[ -n "$dgpu_info" && "$dgpu_info" != *"failed"* ]]; then
+            usage=$(echo "$dgpu_info" | awk -F', ' '{print $1}')
+            temp=$(echo "$dgpu_info" | awk -F', ' '{print $2}')
+            echo "󰢮 ${usage}% (${temp}°C)"
+            return
         fi
     fi
-    if [[ -z "$gpu_type" ]] && lspci 2>/dev/null | grep -iq 'vga.*intel'; then
-        gpu_type="iGPU"
+
+    # 2. Try AMD iGPU/dGPU via sysfs
+    # Check for the standard 'gpu_busy_percent' file
+    if [[ -f /sys/class/drm/card0/device/gpu_busy_percent ]]; then
+        usage=$(cat /sys/class/drm/card0/device/gpu_busy_percent 2>/dev/null)
+        # AMD temperature is often in hwmon
+        for hwmon in /sys/class/drm/card0/device/hwmon/hwmon*/temp1_input; do
+            if [[ -f "$hwmon" ]]; then
+                temp=$(awk '{print int($1/1000)}' "$hwmon")
+                break
+            fi
+        done
+        [[ -n "$usage" ]] && { echo "󰢮 ${usage}% (${temp:-?}°C)"; return; }
     fi
-    if [[ -z "$gpu_type" ]]; then echo "󰢮 No GPU detected"
-    elif [[ -n "$usage" && -n "$temp" ]]; then echo "󰢮 ${usage}% (${temp}°C)"
-    else echo "󰢮 ${gpu_type}"; fi
+
+    # 3. Try Intel iGPU via Frequency (Proxy for Load)
+    # Intel doesn't have a 'busy_percent' file without debugfs (root)
+    # So we calculate the ratio of current frequency vs max frequency
+    if [[ -f /sys/class/drm/card0/gt_cur_freq_mhz ]]; then
+        local cur max
+        cur=$(cat /sys/class/drm/card0/gt_cur_freq_mhz 2>/dev/null)
+        max=$(cat /sys/class/drm/card0/gt_max_freq_mhz 2>/dev/null)
+        if [[ -n "$cur" && -n "$max" && "$max" -gt 0 ]]; then
+            usage=$(( cur * 100 / max ))
+            echo "󰢮 ${usage}% (${cur}MHz)"
+            return
+        fi
+    fi
+
+    # 4. Final Fallback: Just detect the brand if stats fail
+    if lspci 2>/dev/null | grep -iq 'vga.*intel'; then
+        gpu_type="Intel"
+    elif lspci 2>/dev/null | grep -iq 'vga.*amd'; then
+        gpu_type="AMD"
+    fi
+
+    if [[ -n "$gpu_type" ]]; then
+        echo "󰢮 ${gpu_type}"
+    else
+        echo "󰢮 N/A"
+    fi
 }
 
 function kkernel() {
