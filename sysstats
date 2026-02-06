@@ -281,9 +281,9 @@ function bbrightness() {
 }
 
 function ggpu() {
-    local usage="" temp=""
+    local usage="" temp="" card_path="/sys/class/drm/card1"
 
-    # 1. Check for NVIDIA first
+    # 1. Check for NVIDIA first (useful if card1 is actually the dGPU)
     if command -v nvidia-smi &> /dev/null; then
         local dgpu_info
         dgpu_info=$(nvidia-smi --query-gpu=utilization.gpu,temperature.gpu --format=csv,noheader,nounits 2>/dev/null | head -n 1)
@@ -295,21 +295,12 @@ function ggpu() {
         fi
     fi
 
-    # 2. Intel iGPU Logic (Handles the "Error 9" issue)
-    # We use card0 or card1 depending on which one is the Intel chip
-    local intel_path=""
-    for card in /sys/class/drm/card[0-1]; do
-        if [[ -f "$card/gt_cur_freq_mhz" ]]; then
-            intel_path="$card"
-            break
-        fi
-    done
-
-    if [[ -n "$intel_path" ]]; then
+    # 2. Intel iGPU Logic specifically for card1
+    if [[ -f "$card_path/gt_cur_freq_mhz" ]]; then
         local cur max
-        # Using 'read' instead of 'cat' is sometimes safer for sysfs descriptors
-        read -r cur < "$intel_path/gt_cur_freq_mhz" 2>/dev/null || cur=""
-        read -r max < "$intel_path/gt_max_freq_mhz" 2>/dev/null || max=""
+        # Using || true or || cur="" ensures 'set -e' doesn't kill the script if read fails
+        cur=$(cat "$card_path/gt_cur_freq_mhz" 2>/dev/null) || cur=""
+        max=$(cat "$card_path/gt_max_freq_mhz" 2>/dev/null) || max=""
 
         if [[ -n "$cur" && -n "$max" && "$max" -gt 0 ]]; then
             usage=$(( cur * 100 / max ))
@@ -318,12 +309,17 @@ function ggpu() {
         fi
     fi
 
-    # 3. Fallback: Check if Intel exists but frequency files are restricted
-    if lspci 2>/dev/null | grep -iq 'vga.*intel'; then
-        echo "󰢮 Intel iGPU"
-    else
-        echo "󰢮 No GPU"
+    # 3. Fallback: Check for AMD on card1 (different file name)
+    if [[ -f "$card_path/device/gpu_busy_percent" ]]; then
+        usage=$(cat "$card_path/device/gpu_busy_percent" 2>/dev/null) || usage=""
+        if [[ -n "$usage" ]]; then
+            echo "󰢮 ${usage}%"
+            return
+        fi
     fi
+
+    # 4. Final Fallback if files exist but are unreadable
+    echo "󰢮 iGPU"
 }
 
 function kkernel() {
