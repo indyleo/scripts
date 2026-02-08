@@ -166,16 +166,6 @@ def copy_to_clipboard(text):
         return False
 
 
-def send_notification(icon):
-    """Send desktop notification"""
-    try:
-        subprocess.run(
-            ["notify-send", "Copied to clipboard!", f"Icon: {icon}"], check=False
-        )
-    except (FileNotFoundError, subprocess.SubprocessError):
-        pass  # Notification is optional
-
-
 def main():
     """Main function"""
     parser = argparse.ArgumentParser(
@@ -205,7 +195,6 @@ def main():
 
     if selected_icon:
         if copy_to_clipboard(selected_icon):
-            send_notification(selected_icon)
             print(selected_icon)  # Also print to stdout
         else:
             sys.exit(1)
