@@ -221,7 +221,7 @@ function bbattery() {
             elif [[ $percent -ge 30 ]]; then icon="󰂇"
             elif [[ $percent -ge 20 ]]; then icon="󰂆"
             elif [[ $percent -ge 10 ]]; then icon="󰢜"
-            else icon="󰢟"; fi ;;
+        else icon="󰢟"; fi ;;
         Discharging)
             if [[ $percent -ge 100 ]]; then icon="󰁹"
             elif [[ $percent -ge 90 ]]; then icon="󰂂"
@@ -233,7 +233,7 @@ function bbattery() {
             elif [[ $percent -ge 30 ]]; then icon="󰁼"
             elif [[ $percent -ge 20 ]]; then icon="󰁻"
             elif [[ $percent -ge 10 ]]; then icon="󰁺"
-            else icon="󰂎"; fi ;;
+        else icon="󰂎"; fi ;;
         Full) icon="󰂄" ;;
         *) icon="󰂑" ;;
     esac
@@ -252,7 +252,7 @@ function vvolume() {
     elif [[ "$vol" -eq 100 ]]; then icon="󰶬"; msg="${vol}%"
     elif [[ "$vol" -ge 75 ]]; then icon="󰕾"; msg="${vol}%"
     elif [[ "$vol" -ge 25 ]]; then icon="󰖀"; msg="${vol}%"
-    else icon="󰕿"; msg="${vol}%"; fi
+else icon="󰕿"; msg="${vol}%"; fi
     echo "${icon} ${msg}"
 }
 

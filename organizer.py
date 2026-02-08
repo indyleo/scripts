@@ -2,6 +2,7 @@
 """
 Download Organizer: Auto-organize downloads by file type.
 """
+
 import argparse
 import json
 import logging

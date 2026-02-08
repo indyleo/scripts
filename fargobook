@@ -80,7 +80,7 @@ fi
 # Show rofi with search option as first item
 selected=$(
     (echo "🔍 Search Wiki..." && cat "$CACHE_FILE") | \
-    rofi -dmenu -i -p "Fargo's Wiki:" \
+        rofi -dmenu -i -p "Fargo's Wiki:" \
         -matching fuzzy
 )
 

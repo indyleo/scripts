@@ -413,8 +413,7 @@ def update_nvim(channel: str = "stable") -> None:
 # === HELP MENU ===
 def help_menu() -> None:
     """Display help information"""
-    print(
-        """Usage: bob.py [command] [args]
+    print("""Usage: bob.py [command] [args]
 
 Commands:
   install [stable|nightly|version]  Install and verify a version (no args shows list)
@@ -424,8 +423,7 @@ Commands:
   check                             Show the active Neovim version
   list                              List installed and available versions
   help                              Show this help message
-"""
-    )
+""")
 
 
 # === MAIN ===
