@@ -229,6 +229,7 @@ class ClipboardManager:
 
     def add_clip(self, clip: Clip) -> None:
         """Adds a clip to history unless it is already pinned."""
+        self.reload()
         is_pinned = any(
             p.type == clip.type
             and (p.content == clip.content if p.type == "text" else p.path == clip.path)

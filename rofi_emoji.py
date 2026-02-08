@@ -3,6 +3,7 @@
 Emoji Picker
 Picks an emoji and copies it to the clipboard
 """
+
 import subprocess
 import sys
 
@@ -1886,26 +1887,31 @@ EMOJILIST = [
 # Build the menu text
 MENUINPUT = "\n".join(f"{e} {d}" for e, d in EMOJILIST)
 
-# Call dmenu
+# Call Rofi
 try:
-    result = subprocess.run(
-        ["rofi", "-dmenu", "-l", "10", "-p", "What Emoji?"],
+    process = subprocess.run(
+        ["rofi", "-dmenu", "-l", "10", "-p", "Emoji"],
         input=MENUINPUT,
         text=True,
         capture_output=True,
         check=True,
-    ).stdout.strip()
+    )
+    result = process.stdout.strip()
 except subprocess.CalledProcessError:
+    # User pressed Esc or closed the menu
     sys.exit(0)
 
-if not result:
-    sys.exit(0)
+if result:
+    # Split by the first space only to get the emoji
+    # This protects multi-part emojis from being corrupted
+    emoji = result.split(" ", 1)[0]
 
-# Extract the first column (the emoji)
-emoji = result.split()[0]
+    # Copy to clipboard using wl-copy
+    try:
+        subprocess.run(["wl-copy"], input=emoji, text=True, check=True)
 
-# Copy to clipboard
-subprocess.run(["xclip", "-selection", "clipboard"], input=emoji, text=True, check=True)
+        # Optional: Send a small notification so you know it worked
+        # subprocess.run(["notify-send", f"Copied {emoji}"], check=False)
 
-# Notify
-subprocess.run(["notify-send", "Copied to clipboard!", f"Emoji: {emoji}"], check=False)
+    except FileNotFoundError:
+        print("Error: 'wl-clipboard' is not installed. Please install it.")
