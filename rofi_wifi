@@ -1,45 +1,118 @@
 #!/usr/bin/env bash
+# rofi_wifi — WiFi manager using rofi + nmcli
 
-# Dependencies: rofi, nmcli, notify-send
+DIVIDER="──────────────────────"
+TOGGLE_ON="󰤨  Disable WiFi"
+TOGGLE_OFF="󰤭  Enable WiFi"
 
-# 1. Get the list of networks
-# Using -g (get) to avoid header rows and complex awk formatting
-# SSID:SIGNAL:SECURITY
-msg="Scanning for Wi-Fi..."
-notify-send -t 1000 "Wi-Fi" "$msg"
+# Force single column regardless of your rofi config
+COLS='listview { columns: 1; }'
 
-networks=$(nmcli -t -f SSID,SIGNAL,SECURITY dev wifi list | \
-    awk -F: '!seen[$1]++ && $1 != "" {printf "%s | %s%% | %s\n", $1, $2, $3}')
+# Check if WiFi is enabled
+wifi_status=$(nmcli radio wifi)
 
-[ -z "$networks" ] && notify-send "Wi-Fi" "No networks found" && exit 1
-
-# 2. Pick network - We use 'last field' logic or custom delimiters to keep spaces
-selection=$(echo "$networks" | rofi -dmenu -i -l 10 -p "Wi-Fi:")
-[ -z "$selection" ] && exit 1
-
-# Extract fields based on our custom delimiter " | "
-chosen=$(echo "$selection" | awk -F ' | ' '{print $1}')
-security=$(echo "$selection" | awk -F ' | ' '{print $3}')
-
-# 3. Check if already connected
-active_con=$(nmcli -t -f NAME con show --active)
-if echo "$active_con" | grep -Fxq "$chosen"; then
-    notify-send "Wi-Fi" "Already connected to $chosen"
-    exit 0
+if [[ "$wifi_status" == "disabled" ]]; then
+	choice=$(echo -e "$TOGGLE_OFF\n$DIVIDER" | rofi -dmenu -p "WiFi (disabled):" \
+		-theme-str 'window {width: 400px;}' \
+		-theme-str "$COLS")
+	if [[ "$choice" == "$TOGGLE_OFF" ]]; then
+		nmcli radio wifi on
+	fi
+	exit 0
 fi
 
-# 4. Connect logic
-if [[ "$security" == "--" || -z "$security" ]]; then
-    success_msg=$(nmcli dev wifi connect "$chosen" 2>&1)
-else
-    password=$(rofi -dmenu -password -p "Password for $chosen:")
-    [ -z "$password" ] && exit 1
-    success_msg=$(nmcli dev wifi connect "$chosen" password "$password" 2>&1)
-fi
+# Get currently connected SSID
+connected_ssid=$(nmcli -t -f active,ssid dev wifi | awk -F: '/^yes/{print $2}')
 
-# 5. Final Notification
-if [ $? -eq 0 ]; then
-    notify-send "Wi-Fi" "Connected to $chosen"
-else
-    notify-send "Wi-Fi" "Failed: $success_msg"
-fi
+# Scan & list networks:
+# 1. Drop header
+# 2. Use awk to parse fields properly — nmcli output is fixed-width so we extract
+#    IN-USE (col1), then rebuild the rest, trimming all padding
+# 3. Deduplicate by SSID (field 2 in nmcli's output)
+networks=$(nmcli --fields IN-USE,SSID,SECURITY,BARS device wifi list 2>/dev/null \
+	| tail -n +2 \
+	| awk '{
+		in_use = substr($0, 1, 1)  # * or space
+		rest = substr($0, 2)       # everything after IN-USE column
+		gsub(/^[[:space:]]+/, "", rest)  # strip leading whitespace from rest
+		# Extract SSID (first word of rest) for dedup key
+		ssid = rest
+		sub(/[[:space:]].*/, "", ssid)
+		if (seen[ssid]++) next
+			if (in_use == "*")
+				print "▶ " rest
+			else
+				print rest
+			}')
+
+# Build menu
+menu=$(echo -e "$TOGGLE_ON\n$DIVIDER\n$networks\n$DIVIDER\n󰖰  Disconnect\n󰐥  Manual / Hidden SSID")
+
+choice=$(echo "$menu" | rofi -dmenu -p "WiFi:" \
+	-theme-str 'window {width: 500px;}' \
+	-theme-str 'listview {lines: 12;}' \
+	-theme-str "$COLS" \
+	-i)
+
+[[ -z "$choice" ]] && exit 0
+
+case "$choice" in
+	"$TOGGLE_ON")
+		nmcli radio wifi off
+		notify-send "WiFi" "WiFi disabled" --icon=network-wireless-offline
+		;;
+
+	"󰖰  Disconnect")
+		nmcli device disconnect wlan0 2>/dev/null \
+			|| nmcli device disconnect $(nmcli -t -f DEVICE,TYPE device | awk -F: '$2=="wifi"{print $1;exit}')
+		notify-send "WiFi" "Disconnected" --icon=network-wireless-offline
+		;;
+
+	"󰐥  Manual / Hidden SSID")
+		ssid=$(rofi -dmenu -p "SSID:" \
+			-theme-str 'window {width: 400px;}' \
+			-theme-str "$COLS" <<< "")
+		[[ -z "$ssid" ]] && exit 0
+		password=$(rofi -dmenu -p "Password:" -password \
+			-theme-str 'window {width: 400px;}' \
+			-theme-str "$COLS" <<< "")
+		nmcli device wifi connect "$ssid" password "$password" \
+			&& notify-send "WiFi" "Connected to $ssid" --icon=network-wireless \
+			|| notify-send "WiFi" "Failed to connect to $ssid" --icon=network-wireless-offline
+		;;
+
+	"$DIVIDER"|"") exit 0 ;;
+
+	*)
+		ssid=$(echo "$choice" | sed 's/^▶ //' | awk '{print $1}')
+
+				# Already connected to this network
+				if [[ "$ssid" == "$connected_ssid" ]]; then
+					notify-send "WiFi" "Already connected to $ssid" --icon=network-wireless
+					exit 0
+				fi
+
+				known=$(nmcli connection show | awk '{print $1}' | grep -Fx "$ssid")
+
+				if [[ -n "$known" ]]; then
+					nmcli connection up "$ssid" \
+						&& notify-send "WiFi" "Connected to $ssid" --icon=network-wireless \
+						|| notify-send "WiFi" "Failed to connect to $ssid" --icon=network-wireless-offline
+				else
+					security=$(echo "$choice" | awk '{print $3}')
+					if [[ "$security" == "--" ]]; then
+						nmcli device wifi connect "$ssid" \
+							&& notify-send "WiFi" "Connected to $ssid" --icon=network-wireless \
+							|| notify-send "WiFi" "Failed" --icon=network-wireless-offline
+					else
+						password=$(rofi -dmenu -p "Password ($ssid):" -password \
+							-theme-str 'window {width: 400px;}' \
+							-theme-str "$COLS" <<< "")
+						[[ -z "$password" ]] && exit 0
+						nmcli device wifi connect "$ssid" password "$password" \
+							&& notify-send "WiFi" "Connected to $ssid" --icon=network-wireless \
+							|| notify-send "WiFi" "Failed to connect to $ssid" --icon=network-wireless-offline
+					fi
+				fi
+				;;
+		esac
