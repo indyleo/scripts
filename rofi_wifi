@@ -25,25 +25,34 @@ fi
 connected_ssid=$(nmcli -t -f active,ssid dev wifi | awk -F: '/^yes/{print $2}')
 
 # Scan & list networks:
-# 1. Drop header
-# 2. Use awk to parse fields properly — nmcli output is fixed-width so we extract
-#    IN-USE (col1), then rebuild the rest, trimming all padding
-# 3. Deduplicate by SSID (field 2 in nmcli's output)
+# Two-pass awk — first pass collects all lines and notes which SSIDs are active,
+# second pass prints deduped lines, using the active flag to prepend ▶ correctly.
 networks=$(nmcli --fields IN-USE,SSID,SECURITY,BARS device wifi list 2>/dev/null \
 	| tail -n +2 \
 	| awk '{
-		in_use = substr($0, 1, 1)  # * or space
-		rest = substr($0, 2)       # everything after IN-USE column
-		gsub(/^[[:space:]]+/, "", rest)  # strip leading whitespace from rest
-		# Extract SSID (first word of rest) for dedup key
+		in_use = substr($0, 1, 1)
+		rest = substr($0, 2)
+		gsub(/^[[:space:]]+/, "", rest)
 		ssid = rest
 		sub(/[[:space:]].*/, "", ssid)
-		if (seen[ssid]++) next
-			if (in_use == "*")
-				print "▶ " rest
+
+		if (in_use == "*") active[ssid] = 1
+			if (!seen[ssid]++) {
+				lines[ssid] = rest
+				order[NR] = ssid
+				count++
+			}
+	}
+END {
+	for (i = 1; i <= NR; i++) {
+		ssid = order[i]
+		if (ssid == "") continue
+			if (active[ssid])
+				print "▶ " lines[ssid]
 			else
-				print rest
-			}')
+				print lines[ssid]
+			}
+	}')
 
 # Build menu
 menu=$(echo -e "$TOGGLE_ON\n$DIVIDER\n$networks\n$DIVIDER\n󰖰  Disconnect\n󰐥  Manual / Hidden SSID")
