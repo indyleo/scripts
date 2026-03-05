@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
 # =====================================
 # CONFIG & PATHS
 # =====================================
 WALLPAPERS_DIR="$HOME/Pictures/Wallpapers"
 LOG_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/desktopctl.log"
 TIMEXWALR_PID_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/timexwalr.pid"
-
 # =====================================
 # COLORS & LOGGING
 # =====================================
@@ -16,17 +14,23 @@ GREEN="\033[1;32m"
 YELLOW="\033[1;33m"
 BLUE="\033[1;34m"
 RESET="\033[0m"
-
 log() {
     local level="$1"
     local msg="$2"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $msg" >> "$LOG_FILE"
 }
-
+# =====================================
+# MONITOR DETECTION (HYPRLAND)
+# =====================================
+get_monitors() {
+    # Returns a list of active monitor names via hyprctl + jq
+    hyprctl monitors -j 2>/dev/null \
+        | jq -r '.[].name' \
+        || echo ""
+}
 # =====================================
 # WALLPAPER LOGIC (WAYLAND + SWWW)
 # =====================================
-
 init_swww() {
     if ! pgrep -x "swww-daemon" > /dev/null; then
         echo -e "${YELLOW}Starting swww-daemon...${RESET}"
@@ -34,55 +38,88 @@ init_swww() {
         sleep 0.7
     fi
 }
-
-wallpaper_set() {
+# Set a wallpaper on a specific monitor (or all if empty)
+# Usage: wallpaper_set_monitor <dir> [monitor_name]
+wallpaper_set_monitor() {
     local DIR="$1"
-    init_swww
+    local MONITOR="${2:-}"
 
     if [[ ! -d "$DIR" ]]; then
         echo -e "${RED}Error: Directory does not exist: $DIR${RESET}"
         return 1
     fi
 
-    # 1. Pick random image
+    # Pick random image
     local IMG
     IMG=$(find "$DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" -o -iname "*.gif" \) | shuf -n 1)
-
     if [[ -z "$IMG" ]]; then
         echo -e "${RED}No images found in $DIR${RESET}"
         return 1
     fi
 
-    # 2. Pick random transition
+    # Pick random transition
     local TRANSITIONS=(grow fade wipe left right top bottom outer wave center)
     local TT="${TRANSITIONS[RANDOM % ${#TRANSITIONS[@]}]}"
 
-    # 3. Build command
+    # Build command
     local CMD=(swww img "$IMG"
         --transition-type "$TT"
         --transition-duration 1.3
         --transition-fps 60
     )
 
-    # 4. Add random coordinates for radial/growth transitions
+    # Add random coordinates for radial/growth transitions
     if [[ "$TT" =~ ^(grow|center|outer)$ ]]; then
         local POS_X="0.$(printf "%02d" $((RANDOM%80+10)))"
         local POS_Y="0.$(printf "%02d" $((RANDOM%80+10)))"
         CMD+=(--transition-pos "$POS_X,$POS_Y")
     fi
 
-    # Execute
+    # Target a specific monitor if given
+    if [[ -n "$MONITOR" ]]; then
+        CMD+=(--outputs "$MONITOR")
+    fi
+
     "${CMD[@]}"
-    echo -e "${GREEN}Wallpaper set: $(basename "$IMG") (Transition: $TT)${RESET}"
-    log "INFO" "Wallpaper set to $IMG with transition $TT"
+
+    local target="${MONITOR:-all monitors}"
+    echo -e "${GREEN}[$target] Wallpaper set: $(basename "$IMG") (Transition: $TT)${RESET}"
+    log "INFO" "[$target] Wallpaper set to $IMG with transition $TT"
+}
+
+# Set a different wallpaper on every detected monitor.
+# Each monitor can optionally have its own subdirectory.
+# If <dir>/<monitor_name>/ exists, images are pulled from there;
+# otherwise falls back to the base <dir>.
+wallpaper_set() {
+    local BASE_DIR="$1"
+    init_swww
+
+    # Get monitor list
+    local MONITORS
+    mapfile -t MONITORS < <(get_monitors)
+
+    if [[ ${#MONITORS[@]} -eq 0 ]]; then
+        echo -e "${YELLOW}No monitors detected via hyprctl, setting wallpaper globally.${RESET}"
+        wallpaper_set_monitor "$BASE_DIR"
+        return
+    fi
+
+    for MONITOR in "${MONITORS[@]}"; do
+        # Per-monitor subdirectory support: ~/Pictures/Wallpapers/DP-1, etc.
+        local MON_DIR="$BASE_DIR/$MONITOR"
+        if [[ -d "$MON_DIR" ]]; then
+            wallpaper_set_monitor "$MON_DIR" "$MONITOR"
+        else
+            wallpaper_set_monitor "$BASE_DIR" "$MONITOR"
+        fi
+    done
 }
 
 start_timexwalr() {
     local DIR="$1"
     local INTERVAL="${2:-900}"
-
     stop_timexwalr || true
-
     (
         while true; do
             wallpaper_set "$DIR" || true
@@ -91,7 +128,8 @@ start_timexwalr() {
     ) &
     local PID=$!
     echo "$PID" > "$TIMEXWALR_PID_FILE"
-    echo -e "${GREEN}Wallpaper daemon started on directory '$DIR' (PID $PID)${RESET}"
+    echo -e "${GREEN}Wallpaper daemon started on directory '$DIR' (PID $PID, interval ${INTERVAL}s)${RESET}"
+    log "INFO" "Daemon started PID=$PID dir=$DIR interval=${INTERVAL}s"
 }
 
 stop_timexwalr() {
@@ -100,6 +138,7 @@ stop_timexwalr() {
         PID=$(cat "$TIMEXWALR_PID_FILE")
         if kill "$PID" 2>/dev/null; then
             echo -e "${YELLOW}Wallpaper daemon stopped.${RESET}"
+            log "INFO" "Daemon PID=$PID stopped."
         else
             echo -e "${RED}Daemon process $PID not found, removing lock file.${RESET}"
         fi
@@ -109,22 +148,62 @@ stop_timexwalr() {
     fi
 }
 
+# Set wallpaper on a single named monitor only
+wallpaper_set_one() {
+    local MONITOR="$1"
+    local DIR="${2:-$WALLPAPERS_DIR}"
+    init_swww
+
+    local MON_DIR="$DIR/$MONITOR"
+    if [[ -d "$MON_DIR" ]]; then
+        wallpaper_set_monitor "$MON_DIR" "$MONITOR"
+    else
+        wallpaper_set_monitor "$DIR" "$MONITOR"
+    fi
+}
+
+# List detected monitors
+list_monitors() {
+    echo -e "${BLUE}Detected monitors:${RESET}"
+    local MONITORS
+    mapfile -t MONITORS < <(get_monitors)
+    if [[ ${#MONITORS[@]} -eq 0 ]]; then
+        echo -e "${RED}  None found (is Hyprland running?)${RESET}"
+    else
+        for M in "${MONITORS[@]}"; do
+            echo -e "  ${GREEN}${M}${RESET}"
+        done
+    fi
+}
+
 # =====================================
 # CLI MENU
 # =====================================
-
 show_help() {
     cat <<EOF
 Usage: desktopctl COMMAND [ARGS]
 
 Commands:
-  random <dir>            Set a random wallpaper immediately from <dir>
-  time <dir> [seconds]    Start wallpaper cycle daemon (Default: 900s)
-  stop                    Stop the wallpaper cycle daemon
+  random [dir]                Set a different random wallpaper on each monitor from [dir]
+  time [dir] [seconds]        Start wallpaper cycle daemon (default: 900s)
+  stop                        Stop the wallpaper cycle daemon
+  monitor <name> [dir]        Set wallpaper on a single monitor by name
+  monitors                    List all detected monitors
+
+Per-monitor directories:
+  Create subdirectories named after your monitors inside your wallpaper dir
+  to use different image pools per screen. For example:
+    ~/Pictures/Wallpapers/
+      ├── DP-1/        ← images for monitor DP-1
+      ├── HDMI-A-1/    ← images for monitor HDMI-A-1
+      └── *.jpg        ← fallback for monitors without a subdir
 
 Examples:
+  desktopctl random
   desktopctl random ~/Pictures/Wallpapers
   desktopctl time ~/Pictures/Wallpapers/Anime 300
+  desktopctl monitor DP-1 ~/Pictures/Wallpapers
+  desktopctl monitors
 EOF
 }
 
@@ -143,6 +222,13 @@ case "$COMMAND" in
     stop|time-stop)
         stop_timexwalr
         ;;
+    monitor)
+        [[ -z "${1:-}" ]] && { echo -e "${RED}Usage: desktopctl monitor <name> [dir]${RESET}"; exit 1; }
+        wallpaper_set_one "$1" "${2:-$WALLPAPERS_DIR}"
+        ;;
+    monitors)
+        list_monitors
+        ;;
     -h|--help)
         show_help
         ;;
@@ -151,3 +237,4 @@ case "$COMMAND" in
         show_help
         ;;
 esac
+
