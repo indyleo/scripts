@@ -31,10 +31,10 @@ get_monitors() {
 # =====================================
 # WALLPAPER LOGIC (WAYLAND + SWWW)
 # =====================================
-init_swww() {
-    if ! pgrep -x "swww-daemon" > /dev/null; then
-        echo -e "${YELLOW}Starting swww-daemon...${RESET}"
-        swww-daemon & disown
+init_awww() {
+    if ! pgrep -x "awww-daemon" > /dev/null; then
+        echo -e "${YELLOW}Starting awww-daemon...${RESET}"
+        awww-daemon & disown
         sleep 0.7
     fi
 }
@@ -62,7 +62,7 @@ wallpaper_set_monitor() {
     local TT="${TRANSITIONS[RANDOM % ${#TRANSITIONS[@]}]}"
 
     # Build command
-    local CMD=(swww img "$IMG"
+    local CMD=(awww img "$IMG"
         --transition-type "$TT"
         --transition-duration 1.3
         --transition-fps 60
@@ -93,7 +93,7 @@ wallpaper_set_monitor() {
 # otherwise falls back to the base <dir>.
 wallpaper_set() {
     local BASE_DIR="$1"
-    init_swww
+    init_awww
 
     # Get monitor list
     local MONITORS
@@ -152,7 +152,7 @@ stop_timexwalr() {
 wallpaper_set_one() {
     local MONITOR="$1"
     local DIR="${2:-$WALLPAPERS_DIR}"
-    init_swww
+    init_awww
 
     local MON_DIR="$DIR/$MONITOR"
     if [[ -d "$MON_DIR" ]]; then
