@@ -17,6 +17,13 @@ STREAM_KEY="$TWITCH_TOKEN"
 SERVER="ingest.global-contribute"
 # NVENC uses h264_nvenc. We use 'p' (pixel format) and 'preset' via -p (codec-param)
 VIDEO_CODEC="h264_nvenc"
+OUTPUT="$(wf-recorder -L | awk '{print $3}' | rofi -dmenu -p "Select display:")"
+
+# Check if a display is selected
+if [[ -z "$OUTPUT" ]]; then
+    echo "No display selected."
+    exit 1
+fi
 
 # --- Functions ---
 
@@ -29,6 +36,7 @@ function record() {
     # -c: h264_nvenc for NVIDIA
     # -p: sets encoder-specific options
     wf-recorder \
+        -o "$OUTPUT" \
         -a \
         -r "$FPS_REC" \
         -c "$VIDEO_CODEC" \
@@ -59,6 +67,7 @@ function start_stream() {
     # Streaming to Twitch usually requires a specific FLV muxer and CBR
     # We use -m flv and output to the RTMP URL
     wf-recorder \
+        -o "$OUTPUT" \
         -a \
         -r "$FPS_STREAM" \
         -c "$VIDEO_CODEC" \
