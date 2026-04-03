@@ -54,7 +54,6 @@ function record() {
 
     echo $! > /tmp/recpid
     echo "$OUTPUT" > "/tmp/recpid.monitor"
-    notify-send "🎙 Recording started" "Saving to $outputfile"
 }
 
 function end_record() {
@@ -87,14 +86,12 @@ function start_stream() {
 
     echo $! > /tmp/streampid
     echo "$OUTPUT" > "/tmp/streampid.monitor"
-    notify-send "📡 Twitch stream started"
 }
 
 function stop_stream() {
     kill -SIGINT "$(cat /tmp/streampid)"
     rm -f /tmp/streampid
     rm -f /tmp/streampid.monitor
-    notify-send "Twitch stream stopped"
 }
 
 function toggle_stream() {
