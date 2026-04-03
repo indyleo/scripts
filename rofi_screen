@@ -27,15 +27,11 @@ fi
 [[ -z "$OUTPUT" ]] && exit 1
 
 # --- Functions ---
-
 function record() {
     now="$(date '+%a__%b%d__%H_%M_%S')"
     outputfile="$HOME/Videos/recording_${now}.mkv"
 
     # wf-recorder handles audio and video in one process
-    # -a: default audio device
-    # -c: h264_nvenc for NVIDIA
-    # -p: sets encoder-specific options
     wf-recorder \
         -o "$OUTPUT" \
         -a \
@@ -51,7 +47,6 @@ function record() {
 }
 
 function end_record() {
-    # SIGINT (2) is cleaner for wf-recorder to finish the file properly
     kill -SIGINT "$(cat /tmp/recpid)"
     rm -f /tmp/recpid
     rm -f /tmp/recpid.monitor
@@ -68,7 +63,6 @@ function toggle_record() {
 
 function start_stream() {
     # Streaming to Twitch usually requires a specific FLV muxer and CBR
-    # We use -m flv and output to the RTMP URL
     wf-recorder \
         -o "$OUTPUT" \
         -a \
