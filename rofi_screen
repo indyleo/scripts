@@ -14,19 +14,24 @@ FPS_REC=60
 FPS_STREAM=30
 STREAM_KEY="$TWITCH_TOKEN"
 SERVER="ingest.global-contribute"
-if ffmpeg -encoders | grep -q h264_nvenc; then
+
+# --- Improved Encoder Detection ---
+if [ -e /dev/nvidiactl ]; then
+    # Nvidia detected
     VIDEO_CODEC="h264_nvenc"
     ENCODER_OPTS=(-p preset=p4 -p tune=hq)
-elif ffmpeg -encoders | grep -q h264_vaapi; then
+elif [ -e /dev/dri/renderD128 ]; then
+    # Intel or AMD (VAAPI) detected
     VIDEO_CODEC="h264_vaapi"
-    ENCODER_OPTS=(-p vaapi_device=/dev/dri/renderD128)
-elif ffmpeg -encoders | grep -q h264_qsv; then
-    VIDEO_CODEC="h264_qsv"
-    ENCODER_OPTS=()
+    # Note: we pass the device to wf-recorder's -d flag later
+    ENCODER_OPTS=(-d /dev/dri/renderD128)
 else
+    # Fallback to Software (CPU)
     VIDEO_CODEC="libx264"
-    ENCODER_OPTS=()
+    ENCODER_OPTS=(-p preset=ultrafast)
 fi
+
+# --- Display Selection ---
 mapfile -t outputs < <(wf-recorder -L | awk '{print $3}')
 if [[ ${#outputs[@]} -eq 0 ]]; then
     echo "No displays found."
@@ -49,7 +54,7 @@ function record() {
         -a \
         -r "$FPS_REC" \
         -c "$VIDEO_CODEC" \
-        -p "${ENCODER_OPTS[@]}" \
+        "${ENCODER_OPTS[@]}" \
         -f "$outputfile" &
 
     echo $! > /tmp/recpid
@@ -60,7 +65,6 @@ function end_record() {
     kill -SIGINT "$(cat /tmp/recpid)"
     rm -f /tmp/recpid
     rm -f /tmp/recpid.monitor
-    notify-send "Recording saved"
 }
 
 function toggle_record() {
@@ -78,7 +82,7 @@ function start_stream() {
         -a \
         -r "$FPS_STREAM" \
         -c "$VIDEO_CODEC" \
-        -p preset=p4 \
+        "${ENCODER_OPTS[@]}" \
         -p rc=cbr \
         -p bitrate=4500K \
         -m flv \
