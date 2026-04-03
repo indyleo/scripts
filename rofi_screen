@@ -1,8 +1,7 @@
 #!/bin/env bash
-# Screen Recording & Streaming Manager (Wayland + NVENC Edition)
+# Screen Recording & Streaming Manager (Wayland)
 
 # --- Ensure dependencies ---
-# slurp is used for geometry selection if needed, though we default to full screen
 for cmd in wf-recorder rofi notify-send ffmpeg; do
     if ! command -v $cmd &> /dev/null; then
         echo "Error: $cmd not found. Please install it first."
@@ -15,7 +14,6 @@ FPS_REC=60
 FPS_STREAM=30
 STREAM_KEY="$TWITCH_TOKEN"
 SERVER="ingest.global-contribute"
-# NVENC uses h264_nvenc. We use 'p' (pixel format) and 'preset' via -p (codec-param)
 VIDEO_CODEC="h264_nvenc"
 mapfile -t outputs < <(wf-recorder -L | awk '{print $3}')
 if [[ ${#outputs[@]} -eq 0 ]]; then
