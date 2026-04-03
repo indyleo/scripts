@@ -17,13 +17,16 @@ STREAM_KEY="$TWITCH_TOKEN"
 SERVER="ingest.global-contribute"
 # NVENC uses h264_nvenc. We use 'p' (pixel format) and 'preset' via -p (codec-param)
 VIDEO_CODEC="h264_nvenc"
-OUTPUT="$(wf-recorder -L | awk '{print $3}' | rofi -dmenu -p "Select display:")"
-
-# Check if a display is selected
-if [[ -z "$OUTPUT" ]]; then
-    echo "No display selected."
+mapfile -t outputs < <(wf-recorder -L | awk '{print $3}')
+if [[ ${#outputs[@]} -eq 0 ]]; then
+    echo "No displays found."
     exit 1
+elif [[ ${#outputs[@]} -eq 1 ]]; then
+    OUTPUT="${outputs[0]}"
+else
+    OUTPUT="$(printf '%s\n' "${outputs[@]}" | rofi -dmenu -p "Select display:")"
 fi
+[[ -z "$OUTPUT" ]] && exit 1
 
 # --- Functions ---
 
