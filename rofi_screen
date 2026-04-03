@@ -45,6 +45,7 @@ function record() {
         -f "$outputfile" &
 
     echo $! > /tmp/recpid
+    echo "$OUTPUT" > "/tmp/recpid.monitor"
     notify-send "🎙 Recording started" "Saving to $outputfile"
 }
 
@@ -52,6 +53,7 @@ function end_record() {
     # SIGINT (2) is cleaner for wf-recorder to finish the file properly
     kill -SIGINT "$(cat /tmp/recpid)"
     rm -f /tmp/recpid
+    rm -f /tmp/recpid.monitor
     notify-send "Recording saved"
 }
 
@@ -78,12 +80,14 @@ function start_stream() {
         -f "rtmp://$SERVER.live-video.net/app/$STREAM_KEY" &
 
     echo $! > /tmp/streampid
+    echo "$OUTPUT" > "/tmp/streampid.monitor"
     notify-send "📡 Twitch stream started"
 }
 
 function stop_stream() {
     kill -SIGINT "$(cat /tmp/streampid)"
     rm -f /tmp/streampid
+    rm -f /tmp/streampid.monitor
     notify-send "Twitch stream stopped"
 }
 

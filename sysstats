@@ -180,17 +180,23 @@ function tail_status() {
 }
 
 function is_media() {
-    local rec=0 stream=0 icon msg
+    local rec=0 stream=0 icon msg rec_mon stream_mon
     [[ -f "/tmp/recpid" ]] && rec=1
     [[ -f "/tmp/streampid" ]] && stream=1
+    [[ -f "/tmp/recpid.monitor" ]] && rec_mon="$(cat /tmp/recpid.monitor)"
+    [[ -f "/tmp/streampid.monitor" ]] && stream_mon="$(cat /tmp/streampid.monitor)"
     if [[ $rec -eq 1 && $stream -eq 1 ]]; then
-        icon="󰑊"; msg="Recording & Streaming"
+        icon="󰑊"
+        msg="Rec (${rec_mon:-NA}) | Stream (${stream_mon:-NA})"
     elif [[ $rec -eq 1 ]]; then
-        icon="󰑊"; msg="Recording"
+        icon="󰑊"
+        msg="Recording (${rec_mon:-NA})"
     elif [[ $stream -eq 1 ]]; then
-        icon="󰑊"; msg="Streaming"
+        icon="󰑊"
+        msg="Streaming (${stream_mon:-NA})"
     else
-        icon=""; msg="Idle"
+        icon=""
+        msg="Idle"
     fi
     echo "${icon} ${msg}"
 }
