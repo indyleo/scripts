@@ -19,12 +19,11 @@ SERVER="ingest.global-contribute"
 if [ -e /dev/nvidiactl ]; then
     VIDEO_CODEC="h264_nvenc"
     ENCODER_OPTS=(-p preset=p4 -p tune=hq)
-elif [ -e /dev/dri/renderD128 ]; then
-    VIDEO_CODEC="h264_vaapi"
-    ENCODER_OPTS=(-d /dev/dri/renderD128)
+    PIX_FMT="yuv420p"
 else
     VIDEO_CODEC="libx264"
     ENCODER_OPTS=(-p preset=ultrafast)
+    PIX_FMT="yuv420p"
 fi
 
 # --- Display Selection ---
@@ -50,6 +49,7 @@ function record() {
         -a \
         -r "$FPS_REC" \
         -c "$VIDEO_CODEC" \
+        -x "$PIX_FMT" \
         "${ENCODER_OPTS[@]}" \
         -f "$outputfile" &
 
@@ -78,6 +78,7 @@ function start_stream() {
         -a \
         -r "$FPS_STREAM" \
         -c "$VIDEO_CODEC" \
+        -x "$PIX_FMT" \
         "${ENCODER_OPTS[@]}" \
         -p rc=cbr \
         -p bitrate=4500K \
