@@ -17,16 +17,12 @@ SERVER="ingest.global-contribute"
 
 # --- Improved Encoder Detection ---
 if [ -e /dev/nvidiactl ]; then
-    # Nvidia detected
     VIDEO_CODEC="h264_nvenc"
     ENCODER_OPTS=(-p preset=p4 -p tune=hq)
 elif [ -e /dev/dri/renderD128 ]; then
-    # Intel or AMD (VAAPI) detected
     VIDEO_CODEC="h264_vaapi"
-    # Note: we pass the device to wf-recorder's -d flag later
     ENCODER_OPTS=(-d /dev/dri/renderD128)
 else
-    # Fallback to Software (CPU)
     VIDEO_CODEC="libx264"
     ENCODER_OPTS=(-p preset=ultrafast)
 fi
