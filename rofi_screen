@@ -14,7 +14,19 @@ FPS_REC=60
 FPS_STREAM=30
 STREAM_KEY="$TWITCH_TOKEN"
 SERVER="ingest.global-contribute"
-VIDEO_CODEC="h264_nvenc"
+if ffmpeg -encoders | grep -q h264_nvenc; then
+    VIDEO_CODEC="h264_nvenc"
+    ENCODER_OPTS=(-p preset=p4 -p tune=hq)
+elif ffmpeg -encoders | grep -q h264_vaapi; then
+    VIDEO_CODEC="h264_vaapi"
+    ENCODER_OPTS=(-p vaapi_device=/dev/dri/renderD128)
+elif ffmpeg -encoders | grep -q h264_qsv; then
+    VIDEO_CODEC="h264_qsv"
+    ENCODER_OPTS=()
+else
+    VIDEO_CODEC="libx264"
+    ENCODER_OPTS=()
+fi
 mapfile -t outputs < <(wf-recorder -L | awk '{print $3}')
 if [[ ${#outputs[@]} -eq 0 ]]; then
     echo "No displays found."
@@ -37,8 +49,7 @@ function record() {
         -a \
         -r "$FPS_REC" \
         -c "$VIDEO_CODEC" \
-        -p preset=p4 \
-        -p tune=hq \
+        -p "${ENCODER_OPTS[@]}" \
         -f "$outputfile" &
 
     echo $! > /tmp/recpid
