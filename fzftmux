@@ -115,7 +115,7 @@ function create_tmux_session() {
 }
 
 function main() {
-    local search_mode="project"
+    local search_mode="git"
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
