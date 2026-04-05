@@ -85,15 +85,10 @@ function create_tmux_session() {
     local project_path="$1"
     local session_name
 
-    # Extract folder name for session name
     session_name=$(basename "$project_path")
-
-    # Replace dots and special chars with underscores for valid tmux session name
     session_name=$(echo "$session_name" | tr '.' '_' | tr ' ' '_')
 
-    # Check if session already exists
     if tmux has-session -t "$session_name" 2>/dev/null; then
-        echo "Session '$session_name' already exists. Attaching..."
         if [[ -z "$TMUX" ]]; then
             tmux attach-session -t "$session_name"
         else
@@ -102,17 +97,16 @@ function create_tmux_session() {
         return 0
     fi
 
-    # Create new session with first neovim window (detached)
-    tmux new-session -d -s "$session_name" -c "$project_path" -n "nvim"
-    tmux send-keys -t "$session_name:1" "nvim" C-m
+    # 1. Create the session and run nvim IMMEDIATELY as the process
+    # Syntax: tmux new-session -d -s [name] -c [dir] -n [window_name] "[command]"
+    tmux new-session -d -s "$session_name" -c "$project_path" -n "nvim" "nvim -c :Lf"
 
-    # Create shell window
+    # 2. Create the second window (this will still be a normal shell)
     tmux new-window -t "$session_name:2" -n "shell" -c "$project_path"
 
-    # Select the first window
+    # 3. Ensure the nvim window is focused
     tmux select-window -t "$session_name:1"
 
-    # Attach to the session
     if [[ -z "$TMUX" ]]; then
         tmux attach-session -t "$session_name"
     else
