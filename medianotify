@@ -42,7 +42,6 @@ function check_dependencies() {
     command -v mediactl &>/dev/null || die "mediactl not found in PATH"
     command -v playerctl &>/dev/null || die "playerctl not found in PATH"
     command -v notify-send &>/dev/null || die "notify-send not found"
-    # bc is no longer required
 }
 
 function init_state_dir() {
@@ -54,7 +53,6 @@ function init_state_dir() {
 }
 
 function get_current_time_ms() {
-    # Returns current time in milliseconds
     date +%s%3N
 }
 
@@ -80,7 +78,7 @@ function load_state() {
     if [[ -f "$STATE_FILE" ]]; then
         cat "$STATE_FILE"
     else
-        echo "|||||"
+        echo $'\t\t\t\t\t'
     fi
 }
 
@@ -99,8 +97,8 @@ function should_notify() {
     local old_status old_title old_artist
     local new_type new_status new_title new_artist
 
-    IFS='|' read -r _ _ old_status old_title old_artist _ <<< "$old_state"
-    IFS='|' read -r new_type _ new_status new_title new_artist _ <<< "$new_state"
+    IFS=$'\t' read -r _ _ old_status old_title old_artist _ <<< "$old_state"
+    IFS=$'\t' read -r new_type _ new_status new_title new_artist _ <<< "$new_state"
 
     # ONLY notify when something is Playing
     [[ "$new_status" != "Playing" ]] && return 1
@@ -136,7 +134,7 @@ function send_notification() {
     local art_url="$3"
 
     local new_type new_status new_title new_artist new_album
-    IFS='|' read -r new_type _ new_status new_title new_artist new_album <<< "$new_state"
+    IFS=$'\t' read -r new_type _ new_status new_title new_artist new_album <<< "$new_state"
 
     local source_icon
     case "$new_type" in
@@ -186,16 +184,16 @@ function handle_event() {
 
     # Get current state from mediactl
     local current_state
-    current_state=$(mediactl status 2>/dev/null || echo "idle||Idle|||")
+    current_state=$(mediactl status 2>/dev/null || echo $'idle\t\tIdle\t\t\t')
 
     local type player status title artist album art_url
-    IFS='|' read -r type player status title artist album art_url <<< "$current_state"
+    IFS=$'\t' read -r type player status title artist album art_url <<< "$current_state"
 
     if [[ -z "$type" ]]; then
         return
     fi
 
-    local state_key="$type|$player|$status|$title|$artist|$album"
+    local state_key="$type"$'\t'"$player"$'\t'"$status"$'\t'"$title"$'\t'"$artist"$'\t'"$album"
     local last_state
     last_state=$(load_state)
 

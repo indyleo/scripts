@@ -224,7 +224,8 @@ function get_player_metadata() {
     album=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" metadata album 2>/dev/null || echo "")
     art_url=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" metadata mpris:artUrl 2>/dev/null || echo "")
 
-    echo "$status|$title|$artist|$album|$art_url"
+    # echo "$status|$title|$artist|$album|$art_url"
+    echo "$status"$'\t'"$title"$'\t'"$artist"$'\t'"$album"$'\t'"$art_url"
 }
 
 function get_state() {
@@ -239,7 +240,8 @@ function get_state() {
     fi
 
     metadata=$(get_player_metadata "$player")
-    echo "$type|$player|$metadata"
+    # echo "$type|$player|$metadata"
+    echo "$type"$'\t'"$player"$'\t'"$metadata"
 }
 
 function get_status_icon() {
