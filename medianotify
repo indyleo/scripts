@@ -125,6 +125,40 @@ function should_notify() {
 }
 
 # ============================================================================
+# Fetching Artwork
+# ===========================================================================
+
+function fetch_art() {
+    local art_url="$1"
+    [[ -z "$art_url" ]] && return 1
+
+    if [[ "$art_url" == file://* ]]; then
+        local path="${art_url#file://}"
+        [[ -f "$path" ]] && echo "$path" && return 0
+        return 1
+    fi
+
+    if [[ "$art_url" == http://* || "$art_url" == https://* ]]; then
+        # Use URL hash as cache key so we don't re-download the same art
+        local cache_key
+        cache_key=$(echo "$art_url" | md5sum | cut -d' ' -f1)
+        local cache_path="$STATE_DIR/art_${cache_key}.jpg"
+
+        if [[ ! -f "$cache_path" ]]; then
+            curl -fsSL --max-time 5 -o "$cache_path" "$art_url" 2>/dev/null || {
+                rm -f "$cache_path"
+                return 1
+            }
+        fi
+
+        echo "$cache_path"
+        return 0
+    fi
+
+    return 1
+}
+
+# ============================================================================
 # NOTIFICATION FORMATTING
 # ============================================================================
 
@@ -160,9 +194,10 @@ function send_notification() {
         -h string:x-canonical-private-synchronous:medianotify
     )
 
-    if [[ -n "$art_url" ]]; then
-        local art_path="${art_url#file://}"
-        [[ -f "$art_path" ]] && notify_cmd+=(-i "$art_path")
+    # Resolve art to a local path (downloads if remote)
+    local art_path
+    if art_path=$(fetch_art "$art_url"); then
+        notify_cmd+=(-i "$art_path")
     fi
 
     notify_cmd+=("$notif_title" "$notif_body")
@@ -290,6 +325,7 @@ function cleanup() {
     kill_writers
     pkill -P $$ 2>/dev/null || true
     rm -f "$EVENT_PIPE" "$STATE_DIR/events" 2>/dev/null
+    rm -f "$STATE_DIR"/art_*.jpg 2>/dev/null
     exec 3>&- # Close FD
     exit 0
 }
