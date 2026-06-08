@@ -24,7 +24,7 @@ function uptime_info() {
 }
 
 function cpu_load() {
-    local usage temp
+    local usage="" temp=""
     local cpu1 cpu2 idle1 idle2 total1 total2
 
     read -r cpu1 <<< "$(grep '^cpu ' /proc/stat)"
