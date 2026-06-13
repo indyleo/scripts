@@ -17,9 +17,9 @@ fi
 
 # --- Dependency check ---
 if [ "$IS_WAYLAND" -eq 1 ]; then
-    deps=(wf-recorder notify-send ffmpeg)
+    deps=(wf-recorder notify-send ffmpeg pactl)
 else
-    deps=(ffmpeg notify-send)
+    deps=(ffmpeg notify-send pactl xrandr)
 fi
 
 for cmd in "${deps[@]}"; do
@@ -34,6 +34,16 @@ FPS_REC=60
 FPS_STREAM=30
 STREAM_KEY="${TWITCH_TOKEN:-}"
 SERVER="ingest.global-contribute"
+
+# --- Audio Source Detection (The Desktop Audio Fix) ---
+# This grabs your current default output speaker/headphone and targets its monitor.
+# This forces both tools to skip the microphone entirely.
+DEFAULT_SINK=$(pactl get-default-sink 2>/dev/null)
+if [ -z "$DEFAULT_SINK" ]; then
+    # Fallback for older configurations
+    DEFAULT_SINK=$(pactl info 2>/dev/null | awk -F': ' '/Default Sink/ {print $2}')
+fi
+AUDIO_SOURCE="${DEFAULT_SINK}.monitor"
 
 # --- Encoder detection ---
 if [ -e /dev/nvidiactl ]; then
@@ -73,10 +83,10 @@ else
     fi
     [[ -z "$OUTPUT" ]] && exit 1
 
-    # Resolve the geometry for ffmpeg's x11grab
+    # Resolve the geometry for ffmpeg's x11grab safely
     X11_GEOM=$(xrandr | awk -v out="$OUTPUT" '$1==out{match($0,/[0-9]+x[0-9]+\+[0-9]+\+[0-9]+/); print substr($0,RSTART,RLENGTH)}')
     X11_SIZE=$(echo "$X11_GEOM" | cut -d'+' -f1)
-    X11_OFFSET=$(echo "$X11_GEOM" | grep -oP '\+\d+\+\d+' | tr -d '+' | tr '+' ',')
+    X11_OFFSET=$(echo "$X11_GEOM" | grep -oP '\+\d+\+\d+' | tr -d '+' | head -n 1)
 fi
 
 # --- Record functions ---
@@ -85,10 +95,13 @@ function record() {
     now="$(date '+%a__%b%d__%H_%M_%S')"
     local outputfile="$HOME/Videos/recording_${now}.mkv"
 
+    mkdir -p "$HOME/Videos"
+
     if [ "$IS_WAYLAND" -eq 1 ]; then
+        # Explicitly passing the desktop output monitor string here
         wf-recorder \
             -o "$OUTPUT" \
-            -a \
+            -a "$AUDIO_SOURCE" \
             -r "$FPS_REC" \
             -c "$VIDEO_CODEC" \
             -x "$PIX_FMT" \
@@ -97,10 +110,10 @@ function record() {
         echo $! > /tmp/recpid
         echo "$OUTPUT" > /tmp/recpid.monitor
     else
-        # x11grab via ffmpeg; pulse for audio (change to alsa if needed)
+        # Swapping '-i default' for the specific desktop monitor source string
         ffmpeg -y \
-            -f x11grab -framerate "$FPS_REC" -video_size "$X11_SIZE" -i "$DISPLAY+${X11_OFFSET//,/,}" \
-            -f pulse -i default \
+            -f x11grab -framerate "$FPS_REC" -video_size "$X11_SIZE" -i "$DISPLAY+${X11_OFFSET}" \
+            -f pulse -i "$AUDIO_SOURCE" \
             -pix_fmt "$PIX_FMT" \
             "${X11_VAARGS[@]}" \
             "$outputfile" &
@@ -111,7 +124,7 @@ function record() {
 }
 
 function end_record() {
-    kill -SIGINT "$(cat /tmp/recpid)"
+    kill -SIGINT "$(cat /tmp/recpid)" 2>/dev/null
     rm -f /tmp/recpid /tmp/recpid.monitor
     notify-send "Recording" "Stopped"
 }
@@ -125,10 +138,15 @@ function toggle_record() {
 }
 
 function start_stream() {
+    if [ -z "$STREAM_KEY" ]; then
+        notify-send "Stream Error" "TWITCH_TOKEN is not set!"
+        exit 1
+    fi
+
     if [ "$IS_WAYLAND" -eq 1 ]; then
         wf-recorder \
             -o "$OUTPUT" \
-            -a \
+            -a "$AUDIO_SOURCE" \
             -r "$FPS_STREAM" \
             -c "$VIDEO_CODEC" \
             -x "$PIX_FMT" \
@@ -141,8 +159,8 @@ function start_stream() {
         echo "$OUTPUT" > /tmp/streampid.monitor
     else
         ffmpeg -y \
-            -f x11grab -framerate "$FPS_STREAM" -video_size "$X11_SIZE" -i "$DISPLAY+${X11_OFFSET//,/,}" \
-            -f pulse -i default \
+            -f x11grab -framerate "$FPS_STREAM" -video_size "$X11_SIZE" -i "$DISPLAY+${X11_OFFSET}" \
+            -f pulse -i "$AUDIO_SOURCE" \
             -pix_fmt "$PIX_FMT" \
             "${X11_VAARGS[@]}" \
             -b:v 4500k -minrate 4500k -maxrate 4500k -bufsize 9000k \
@@ -154,7 +172,7 @@ function start_stream() {
 }
 
 function stop_stream() {
-    kill -SIGINT "$(cat /tmp/streampid)"
+    kill -SIGINT "$(cat /tmp/streampid)" 2>/dev/null
     rm -f /tmp/streampid /tmp/streampid.monitor
     notify-send "Stream" "Stopped"
 }
