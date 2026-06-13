@@ -25,7 +25,7 @@ if [ -n "$WAYLAND_DISPLAY" ]; then
             -theme-str 'listview { columns: 1; }'
     }
 else
-    MENU()       { dmenu -i -p "$1"; }
+    MENU()       { dmenu -p "$1"; }
     PROMPT()     { dmenu -p "$1"; }
     PROMPT_PASS() { dmenu -P -p "$1"; }
 fi

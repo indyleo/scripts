@@ -3,9 +3,9 @@
 
 # --- Display server detection ---
 if [ -n "$WAYLAND_DISPLAY" ]; then
-    MENU() { rofi -dmenu -i -p "$1"; }
+    MENU() { rofi -dmenu -p "$1"; }
 else
-    MENU() { dmenu -i -p "$1"; }
+    MENU() { dmenu -p "$1"; }
 fi
 
 WIKIS=(

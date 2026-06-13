@@ -2,11 +2,11 @@
 
 # --- Display server detection ---
 if [ -n "$WAYLAND_DISPLAY" ]; then
-    MENU() { rofi -dmenu -i -p "$1"; }
+    MENU() { rofi -dmenu -p "$1"; }
     LOCK_CMD="hyprlock"
     LOGOUT_CMD="loginctl terminate-user $USER"
 else
-    MENU() { dmenu -i -p "$1"; }
+    MENU() { dmenu -p "$1"; }
     LOCK_CMD="slock"
     LOGOUT_CMD="pkill -15 xinit"
 fi
