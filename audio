@@ -1,0 +1,14 @@
+#!/bin/env bash
+
+set -euo pipefail
+
+# --- Display server detection ---
+if [ -n "$WAYLAND_DISPLAY" ]; then
+    MENU() { rofi -dmenu -l 5 -p "$1"; }
+else
+    MENU() { dmenu -l 5 -p "$1"; }
+fi
+
+choice=$(pactl list short sources | awk '{print $2}' | MENU "Input:")
+
+pactl set-default-sink "$choice" && notify-send "Audio switched!" || exit 0

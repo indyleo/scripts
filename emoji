@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""
+Emoji Picker
+Picks an emoji and copies it to the clipboard.
+Auto-detects X11 (xsel/xclip) or Wayland (wl-copy/wl-clipboard).
+"""
+
+import os
+import subprocess
+import sys
+
+# --- Display server detection ---
+IS_WAYLAND = bool(os.environ.get("WAYLAND_DISPLAY"))
+
+EMOJILIST = [
+    ["😀", "grinning face"]
+
+# Build the menu text
+MENUINPUT = "\n".join(f"{e} {d}" for e, d in EMOJILIST)
+
+# --- Menu command ---
+if IS_WAYLAND:
+    menu_cmd = ["rofi", "-dmenu", "-l", "10", "-p", "Emoji"]
+else:
+    menu_cmd = ["dmenu", "-l", "10", "-p", "Emoji"]
+
+try:
+    process = subprocess.run(
+        menu_cmd,
+        input=MENUINPUT,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    result = process.stdout.strip()
+except subprocess.CalledProcessError:
+    sys.exit(0)
+
+if result:
+    emoji = result.split(" ", 1)[0]
+
+    # --- Copy to clipboard ---
+    try:
+        if IS_WAYLAND:
+            subprocess.run(["wl-copy"], input=emoji, text=True, check=True)
+        else:
+            # Try xsel first, fall back to xclip
+            xsel_ok = subprocess.run(
+                ["which", "xsel"], capture_output=True, check=False
+            ).returncode == 0
+            if xsel_ok:
+                subprocess.run(
+                    ["xsel", "--clipboard", "--input"],
+                    input=emoji, text=True, check=True,
+                )
+            else:
+                subprocess.run(
+                    ["xclip", "-selection", "clipboard"],
+                    input=emoji, text=True, check=True,
+                )
+    except FileNotFoundError as e:
+        print(f"Error: clipboard tool not found: {e}", file=sys.stderr)
+        sys.exit(1)

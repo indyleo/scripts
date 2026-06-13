@@ -1,0 +1,176 @@
+#!/bin/env bash
+# Screen Recording & Streaming Manager (X11/Wayland)
+
+# --- Display server detection ---
+if [ -n "$WAYLAND_DISPLAY" ]; then
+    IS_WAYLAND=1
+else
+    IS_WAYLAND=0
+fi
+
+# --- Menu helper ---
+if [ "$IS_WAYLAND" -eq 1 ]; then
+    MENU() { rofi -dmenu -p "$1"; }
+else
+    MENU() { dmenu -p "$1"; }
+fi
+
+# --- Dependency check ---
+if [ "$IS_WAYLAND" -eq 1 ]; then
+    deps=(wf-recorder notify-send ffmpeg)
+else
+    deps=(ffmpeg notify-send)
+fi
+
+for cmd in "${deps[@]}"; do
+    if ! command -v "$cmd" &>/dev/null; then
+        echo "Error: $cmd not found. Please install it first."
+        exit 1
+    fi
+done
+
+# --- Variables ---
+FPS_REC=60
+FPS_STREAM=30
+STREAM_KEY="${TWITCH_TOKEN:-}"
+SERVER="ingest.global-contribute"
+
+# --- Encoder detection ---
+if [ -e /dev/nvidiactl ]; then
+    VIDEO_CODEC="h264_nvenc"
+    X11_VAARGS=(-c:v h264_nvenc -preset p4 -tune hq)
+    WF_ENCODER_OPTS=(-p preset=p4 -p tune=hq)
+    PIX_FMT="yuv420p"
+else
+    VIDEO_CODEC="libx264"
+    X11_VAARGS=(-c:v libx264 -preset ultrafast)
+    WF_ENCODER_OPTS=(-p preset=ultrafast)
+    PIX_FMT="yuv420p"
+fi
+
+# --- Display selection ---
+if [ "$IS_WAYLAND" -eq 1 ]; then
+    mapfile -t outputs < <(wf-recorder -L | awk '{print $3}')
+    if [[ ${#outputs[@]} -eq 0 ]]; then
+        echo "No displays found."
+        exit 1
+    elif [[ ${#outputs[@]} -eq 1 ]]; then
+        OUTPUT="${outputs[0]}"
+    else
+        OUTPUT="$(printf '%s\n' "${outputs[@]}" | MENU "Select display:")"
+    fi
+    [[ -z "$OUTPUT" ]] && exit 1
+else
+    # X11: get connected outputs via xrandr
+    mapfile -t outputs < <(xrandr | awk '/ connected/{print $1}')
+    if [[ ${#outputs[@]} -eq 0 ]]; then
+        echo "No displays found."
+        exit 1
+    elif [[ ${#outputs[@]} -eq 1 ]]; then
+        OUTPUT="${outputs[0]}"
+    else
+        OUTPUT="$(printf '%s\n' "${outputs[@]}" | MENU "Select display:")"
+    fi
+    [[ -z "$OUTPUT" ]] && exit 1
+
+    # Resolve the geometry for ffmpeg's x11grab
+    X11_GEOM=$(xrandr | awk -v out="$OUTPUT" '$1==out{match($0,/[0-9]+x[0-9]+\+[0-9]+\+[0-9]+/); print substr($0,RSTART,RLENGTH)}')
+    X11_SIZE=$(echo "$X11_GEOM" | cut -d'+' -f1)
+    X11_OFFSET=$(echo "$X11_GEOM" | grep -oP '\+\d+\+\d+' | tr -d '+' | tr '+' ',')
+fi
+
+# --- Record functions ---
+function record() {
+    local now
+    now="$(date '+%a__%b%d__%H_%M_%S')"
+    local outputfile="$HOME/Videos/recording_${now}.mkv"
+
+    if [ "$IS_WAYLAND" -eq 1 ]; then
+        wf-recorder \
+            -o "$OUTPUT" \
+            -a \
+            -r "$FPS_REC" \
+            -c "$VIDEO_CODEC" \
+            -x "$PIX_FMT" \
+            "${WF_ENCODER_OPTS[@]}" \
+            -f "$outputfile" &
+        echo $! > /tmp/recpid
+        echo "$OUTPUT" > /tmp/recpid.monitor
+    else
+        # x11grab via ffmpeg; pulse for audio (change to alsa if needed)
+        ffmpeg -y \
+            -f x11grab -framerate "$FPS_REC" -video_size "$X11_SIZE" -i "$DISPLAY+${X11_OFFSET//,/,}" \
+            -f pulse -i default \
+            -pix_fmt "$PIX_FMT" \
+            "${X11_VAARGS[@]}" \
+            "$outputfile" &
+        echo $! > /tmp/recpid
+        echo "$OUTPUT" > /tmp/recpid.monitor
+    fi
+    notify-send "Recording" "Started on $OUTPUT"
+}
+
+function end_record() {
+    kill -SIGINT "$(cat /tmp/recpid)"
+    rm -f /tmp/recpid /tmp/recpid.monitor
+    notify-send "Recording" "Stopped"
+}
+
+function toggle_record() {
+    if [[ -f /tmp/recpid ]]; then
+        end_record
+    else
+        record
+    fi
+}
+
+function start_stream() {
+    if [ "$IS_WAYLAND" -eq 1 ]; then
+        wf-recorder \
+            -o "$OUTPUT" \
+            -a \
+            -r "$FPS_STREAM" \
+            -c "$VIDEO_CODEC" \
+            -x "$PIX_FMT" \
+            "${WF_ENCODER_OPTS[@]}" \
+            -p rc=cbr \
+            -p bitrate=4500K \
+            -m flv \
+            -f "rtmp://$SERVER.live-video.net/app/$STREAM_KEY" &
+        echo $! > /tmp/streampid
+        echo "$OUTPUT" > /tmp/streampid.monitor
+    else
+        ffmpeg -y \
+            -f x11grab -framerate "$FPS_STREAM" -video_size "$X11_SIZE" -i "$DISPLAY+${X11_OFFSET//,/,}" \
+            -f pulse -i default \
+            -pix_fmt "$PIX_FMT" \
+            "${X11_VAARGS[@]}" \
+            -b:v 4500k -minrate 4500k -maxrate 4500k -bufsize 9000k \
+            -f flv "rtmp://$SERVER.live-video.net/app/$STREAM_KEY" &
+        echo $! > /tmp/streampid
+        echo "$OUTPUT" > /tmp/streampid.monitor
+    fi
+    notify-send "Stream" "Started on $OUTPUT"
+}
+
+function stop_stream() {
+    kill -SIGINT "$(cat /tmp/streampid)"
+    rm -f /tmp/streampid /tmp/streampid.monitor
+    notify-send "Stream" "Stopped"
+}
+
+function toggle_stream() {
+    if [[ -f /tmp/streampid ]]; then
+        stop_stream
+    else
+        start_stream
+    fi
+}
+
+# --- Main Menu ---
+choice=$(printf " Record Toggle\n Stream Toggle" | MENU "Select action:")
+case "$choice" in
+    " Record Toggle") toggle_record ;;
+    " Stream Toggle") toggle_stream ;;
+    *) exit 1 ;;
+esac

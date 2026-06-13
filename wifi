@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# rofi_wifi — WiFi manager using rofi/dmenu + nmcli
+
+DIVIDER="──────────────────────"
+TOGGLE_ON="󰤨  Disable WiFi"
+TOGGLE_OFF="󰤭  Enable WiFi"
+
+# --- Display server detection ---
+if [ -n "$WAYLAND_DISPLAY" ]; then
+    MENU() {
+        rofi -dmenu -p "$1" \
+            -theme-str 'window {width: 500px;}' \
+            -theme-str 'listview {lines: 12;}' \
+            -theme-str 'listview { columns: 1; }' \
+            -i
+    }
+    PROMPT() {
+        rofi -dmenu -p "$1" \
+            -theme-str 'window {width: 400px;}' \
+            -theme-str 'listview { columns: 1; }'
+    }
+    PROMPT_PASS() {
+        rofi -dmenu -p "$1" -password \
+            -theme-str 'window {width: 400px;}' \
+            -theme-str 'listview { columns: 1; }'
+    }
+else
+    MENU()       { dmenu -i -p "$1"; }
+    PROMPT()     { dmenu -p "$1"; }
+    PROMPT_PASS() { dmenu -P -p "$1"; }
+fi
+
+wifi_status=$(nmcli radio wifi)
+
+if [[ "$wifi_status" == "disabled" ]]; then
+    choice=$(echo -e "$TOGGLE_OFF\n$DIVIDER" | MENU "WiFi (disabled):")
+    if [[ "$choice" == "$TOGGLE_OFF" ]]; then
+        nmcli radio wifi on
+    fi
+    exit 0
+fi
+
+connected_ssid=$(nmcli -t -f active,ssid dev wifi | awk -F: '/^yes/{print $2}')
+
+networks=$(nmcli --fields IN-USE,SSID,SECURITY,BARS device wifi list 2>/dev/null \
+    | tail -n +2 \
+    | awk '{
+        in_use = substr($0, 1, 1)
+        rest = substr($0, 2)
+        gsub(/^[[:space:]]+/, "", rest)
+        ssid = rest
+        sub(/[[:space:]].*/, "", ssid)
+
+        if (in_use == "*") active[ssid] = 1
+        if (!seen[ssid]++) {
+            lines[ssid] = rest
+            order[NR] = ssid
+            count++
+        }
+    }
+END {
+    for (i = 1; i <= NR; i++) {
+        ssid = order[i]
+        if (ssid == "") continue
+        if (active[ssid])
+            print "▶ " lines[ssid]
+        else
+            print lines[ssid]
+    }
+}')
+
+menu=$(echo -e "$TOGGLE_ON\n$DIVIDER\n$networks\n$DIVIDER\n󰖰  Disconnect\n󰐥  Manual / Hidden SSID")
+
+choice=$(echo "$menu" | MENU "WiFi:")
+
+[[ -z "$choice" ]] && exit 0
+
+case "$choice" in
+    "$TOGGLE_ON")
+        nmcli radio wifi off
+        notify-send "WiFi" "WiFi disabled" --icon=network-wireless-offline
+        ;;
+
+    "󰖰  Disconnect")
+        nmcli device disconnect wlan0 2>/dev/null \
+            || nmcli device disconnect $(nmcli -t -f DEVICE,TYPE device | awk -F: '$2=="wifi"{print $1;exit}')
+        notify-send "WiFi" "Disconnected" --icon=network-wireless-offline
+        ;;
+
+    "󰐥  Manual / Hidden SSID")
+        ssid=$(echo "" | PROMPT "SSID:")
+        [[ -z "$ssid" ]] && exit 0
+        password=$(echo "" | PROMPT_PASS "Password:")
+        nmcli device wifi connect "$ssid" password "$password" \
+            && notify-send "WiFi" "Connected to $ssid" --icon=network-wireless \
+            || notify-send "WiFi" "Failed to connect to $ssid" --icon=network-wireless-offline
+        ;;
+
+    "$DIVIDER"|"") exit 0 ;;
+
+    *)
+        ssid=$(echo "$choice" | sed 's/^▶ //' | awk '{print $1}')
+
+        if [[ "$ssid" == "$connected_ssid" ]]; then
+            notify-send "WiFi" "Already connected to $ssid" --icon=network-wireless
+            exit 0
+        fi
+
+        known=$(nmcli connection show | awk '{print $1}' | grep -Fx "$ssid")
+
+        if [[ -n "$known" ]]; then
+            nmcli connection up "$ssid" \
+                && notify-send "WiFi" "Connected to $ssid" --icon=network-wireless \
+                || notify-send "WiFi" "Failed to connect to $ssid" --icon=network-wireless-offline
+        else
+            security=$(echo "$choice" | awk '{print $3}')
+            if [[ "$security" == "--" ]]; then
+                nmcli device wifi connect "$ssid" \
+                    && notify-send "WiFi" "Connected to $ssid" --icon=network-wireless \
+                    || notify-send "WiFi" "Failed" --icon=network-wireless-offline
+            else
+                password=$(echo "" | PROMPT_PASS "Password ($ssid):")
+                [[ -z "$password" ]] && exit 0
+                nmcli device wifi connect "$ssid" password "$password" \
+                    && notify-send "WiFi" "Connected to $ssid" --icon=network-wireless \
+                    || notify-send "WiFi" "Failed to connect to $ssid" --icon=network-wireless-offline
+            fi
+        fi
+        ;;
+esac

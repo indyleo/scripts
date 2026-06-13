@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+
+# --- Display server detection ---
+if [ -n "$WAYLAND_DISPLAY" ]; then
+    MENU() { rofi -dmenu -i -p "$1"; }
+    LOCK_CMD="hyprlock"
+    LOGOUT_CMD="loginctl terminate-user $USER"
+else
+    MENU() { dmenu -i -p "$1"; }
+    LOCK_CMD="slock"
+    LOGOUT_CMD="pkill -15 xinit"
+fi
+
+# === Icons (Requires a Nerd Font installed) ===
+LOCK=" Lock"
+LOGOUT="󰍃 Logout"
+REBOOT=" Reboot"
+SHUTDOWN=" Shutdown"
+
+options="$LOCK\n$LOGOUT\n$REBOOT\n$SHUTDOWN"
+
+choice=$(echo -e "$options" | MENU "Power Menu")
+
+case "$choice" in
+    "$LOCK")
+        $LOCK_CMD
+        ;;
+    "$LOGOUT")
+        $LOGOUT_CMD
+        ;;
+    "$REBOOT")
+        systemctl reboot
+        ;;
+    "$SHUTDOWN")
+        systemctl poweroff
+        ;;
+    *)
+        exit 1
+        ;;
+esac

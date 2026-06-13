@@ -1,0 +1,128 @@
+#!/bin/env bash
+# Screenshot tool — Wayland (grim/slurp/wl-copy) or X11 (ImageMagick/xdotool/xsel)
+
+SAVE_DIR="${HOME}/Pictures/Screenshots"
+mkdir -p "$SAVE_DIR"
+timestamp=$(date +"%Y-%m-%d_%H-%M-%S")
+filename="${SAVE_DIR}/${timestamp}.png"
+
+# --- Display server detection ---
+if [ -n "$WAYLAND_DISPLAY" ]; then
+    IS_WAYLAND=1
+else
+    IS_WAYLAND=0
+fi
+
+# --- Dependency check ---
+if [ "$IS_WAYLAND" -eq 1 ]; then
+    deps=(grim slurp wl-copy notify-send magick jq hyprctl)
+else
+    deps=(import xdotool xrandr xsel notify-send magick)
+fi
+
+missing=()
+for cmd in "${deps[@]}"; do
+    command -v "$cmd" &>/dev/null || missing+=("$cmd")
+done
+
+if (( ${#missing[@]} )); then
+    echo "Missing dependencies. Please install: ${missing[*]}"
+    exit 1
+fi
+
+# --- Clipboard helper ---
+function copy_to_clip() {
+    if [ "$IS_WAYLAND" -eq 1 ]; then
+        wl-copy < "$1"
+    else
+        xsel --clipboard --input < "$1"
+    fi
+}
+
+function finalize() {
+    if [ -f "$1" ]; then
+        copy_to_clip "$1"
+        notify-send "Screenshot Captured" "Saved to: $(basename "$1")" -i "$1"
+    fi
+}
+
+# --- Capture functions ---
+function selection() {
+    if [ "$IS_WAYLAND" -eq 1 ]; then
+        grim -g "$(slurp -b '#00000044' -c '#ffffff' -s '#ffffff11')" "$filename"
+    else
+        # import from ImageMagick handles interactive selection on X11
+        import "$filename"
+    fi
+    finalize "$filename"
+}
+
+function full() {
+    if [ "$IS_WAYLAND" -eq 1 ]; then
+        grim "$filename"
+    else
+        import -window root "$filename"
+    fi
+    finalize "$filename"
+}
+
+function window() {
+    if [ "$IS_WAYLAND" -eq 1 ]; then
+        window_geom=$(hyprctl activewindow -j | jq -r '"\(.at[0]),\(.at[1]) \(.size[0])x\(.size[1])"')
+        if [ "$window_geom" == "0,0 0x0" ]; then
+            notify-send "Error" "No active window detected."
+            exit 1
+        fi
+        grim -g "$window_geom" "$filename"
+    else
+        # Get active window geometry via xdotool
+        win_id=$(xdotool getactivewindow)
+        geom=$(xdotool getwindowgeometry --shell "$win_id")
+        eval "$geom"
+        import -window "$win_id" "$filename"
+    fi
+    finalize "$filename"
+}
+
+function screen() {
+    if [ "$IS_WAYLAND" -eq 1 ]; then
+        monitor_name=$(hyprctl monitors -j | jq -r '.[] | select(.focused == true) | .name')
+        grim -o "$monitor_name" "$filename"
+    else
+        # Capture the primary/first connected monitor via xrandr + ImageMagick
+        monitor_geom=$(xrandr | awk '/\*/ {print; exit}' | grep -oP '\d+x\d+\+\d+\+\d+' | head -1)
+        if [ -z "$monitor_geom" ]; then
+            # Fallback: grab the whole root
+            import -window root "$filename"
+        else
+            import -window root -crop "$monitor_geom" +repage "$filename"
+        fi
+    fi
+    finalize "$filename"
+}
+
+function colorpicker() {
+    if [ "$IS_WAYLAND" -eq 1 ]; then
+        color=$(grim -g "$(slurp -p)" -t ppm - | magick - -format '%[pixel:p{0,0}]' txt:- | grep -E -o '#[0-9A-Fa-f]{6}')
+        if [ -n "$color" ]; then
+            echo "$color" | wl-copy
+            notify-send "Color Picked" "$color copied to clipboard."
+        fi
+    else
+        color=$(import -window root -resize 1x1\! -format '%[pixel:p{0,0}]' info:- 2>/dev/null \
+            || magick xwd: -resize 1x1\! -format '#%[hex:p{0,0}]' info:-)
+        if [ -n "$color" ]; then
+            echo "$color" | xsel --clipboard --input
+            notify-send "Color Picked" "$color copied to clipboard."
+        fi
+    fi
+}
+
+case "$1" in
+    --select|-s)      selection ;;
+    --window|-w)      window ;;
+    --full|-f)        full ;;
+    --screen|-sc)     screen ;;
+    --colorpicker|-c) colorpicker ;;
+    *) echo "Usage: $0 {--select|--window|--full|--screen|--colorpicker}" ;;
+esac
