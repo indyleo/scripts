@@ -12,10 +12,10 @@ else
 fi
 
 # === Icons (Requires a Nerd Font installed) ===
-LOCK=" Lock"
+LOCK=" Lock"
 LOGOUT="󰍃 Logout"
-REBOOT=" Reboot"
-SHUTDOWN=" Shutdown"
+REBOOT=" Reboot"
+SHUTDOWN=" Shutdown"
 
 options="$LOCK\n$LOGOUT\n$REBOOT\n$SHUTDOWN"
 

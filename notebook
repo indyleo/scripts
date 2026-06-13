@@ -42,9 +42,9 @@ function new_note() {
 }
 
 function notebook() {
-    choice=$(echo -e "📘 New Note\n$(getfiles)" | MENU "Choose note or create new: ")
+    choice=$(echo -e " New Note\n$(getfiles)" | MENU "Choose note or create new: ")
     case "$choice" in
-        "📘 New Note")
+        " New Note")
             new_note
             ;;
         *.md)
