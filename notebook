@@ -26,11 +26,21 @@ if [[ ! -d "$notes_dir" ]]; then
 fi
 
 function fbopen() {
-    if [[ -n "$TERMINAL" ]]; then
-        $TERMINAL -e "$SHELL" -c "${EDITOR:-nvim} $1"
-    else
+    local file="$1"
+
+    if [[ -z "$TERMINAL" ]]; then
         echo "TERMINAL is not set"
         exit 1
+    fi
+
+    if [[ "$TERMINAL" == "wezterm" ]]; then
+        wezterm start -- "$SHELL" -c "${EDITOR:-nvim} \"$file\""
+
+    elif [[ "$TERMINAL" == "st" ]]; then
+        st -e "$SHELL" -c "${EDITOR:-nvim} \"$file\""
+
+    else
+        $TERMINAL -e "$SHELL" -c "${EDITOR:-nvim} \"$file\""
     fi
 }
 
