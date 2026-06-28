@@ -31,10 +31,23 @@ fi
 # Run command and report
 function run_cmd() {
     if "$@"; then
-        echo "✅ Success: $*"
+        echo "󰡕  Success: $*"
     else
-        echo "❌ Failed: $*" >&2
+        echo "  Failed: $*" >&2
         exit 1
+    fi
+}
+
+# Send a -RTMIN+N signal to dwmblocks
+function dwmblocks_signal() {
+    local signal="$1"
+    if [[ -z "$signal" ]]; then
+        echo "Usage: dwmblocks_signal SIGNAL" >&2
+        exit 1
+    fi
+    if [[ pgrep -x "dwmblocks" ]]; then
+        run_cmd pkill -RTMIN+"$signal" dwmblocks
+        echo "✅ Success: Sent signal $signal to dwmblocks"
     fi
 }
 
@@ -63,11 +76,15 @@ function adjust_volume() {
         # Check limit for sink to prevent distortion (>100%)
         if [[ "$limit" == "1.0" ]]; then
             run_cmd wpctl set-volume "$target" "${step}+" --limit 1.0
+            dwmblocks_signal 24
+
         else
             run_cmd wpctl set-volume "$target" "${step}+"
+            dwmblocks_signal 24
         fi
     else
         run_cmd wpctl set-volume "$target" "${step}-"
+        dwmblocks_signal 24
     fi
 
     # Notify
@@ -80,6 +97,7 @@ function adjust_volume() {
 function toggle_mute() {
     local target="$1"
     run_cmd wpctl set-mute "$target" toggle
+    dwmblocks_signal 24
 
     local status
     status=$(wpctl get-volume "$target" | grep -q "MUTED" && echo "Muted" || echo "Unmuted")
@@ -93,6 +111,7 @@ function toggle_mute() {
 function adjust_brightness() {
     local direction="$1" # "+" or "-"
     run_cmd brightnessctl set "${amount}%${direction}"
+    dwmblocks_signal 25
 
     # Get new percentage safely
     local current_max current_val percent

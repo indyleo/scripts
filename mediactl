@@ -302,7 +302,7 @@ function cmd_title() {
     local cutpoint="${1:-50}"
     local state title
     state=$(get_state "$SOURCE")
-    IFS='|' read -r _ _ _ title _ _ _ <<< "$state"
+    IFS=$'\t' read -r _ _ _ title _ _ _ <<< "$state"
     format_title "$title" "$cutpoint"
 }
 function cmd_state() {
@@ -316,7 +316,7 @@ function cmd_state_title() {
     local cutpoint="${1:-50}"
     local state type status title icon
     state=$(get_state "$SOURCE")
-    IFS='|' read -r type _ status title _ <<< "$state"
+    IFS=$'\t' read -r type _ status title _ <<< "$state"
     [[ "$type" == "idle" ]] && { echo "$ICON_IDLE Idle"; return; }
     icon=$(get_status_icon "$status")
     title=$(format_title "$title" "$cutpoint")

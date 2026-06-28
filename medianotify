@@ -70,6 +70,18 @@ function should_debounce() {
     return 1  # Don't debounce
 }
 
+function dwmblocks_signal() {
+    local signal="$1"
+    if [[ -z "$signal" ]]; then
+        echo "Usage: dwmblocks_signal SIGNAL" >&2
+        exit 1
+    fi
+    if pgrep -x "dwmblocks" >/dev/null; then
+        pkill -RTMIN+"$signal" dwmblocks
+        echo "󰡕  Success: Sent signal $signal to dwmblocks"
+    fi
+}
+
 # ============================================================================
 # STATE MANAGEMENT
 # ============================================================================
@@ -231,6 +243,10 @@ function handle_event() {
     local state_key="$type"$'\t'"$player"$'\t'"$status"$'\t'"$title"$'\t'"$artist"$'\t'"$album"
     local last_state
     last_state=$(load_state)
+
+    if [[ "$state_key" != "$last_state" ]]; then
+        dwmblocks_signal 23
+    fi
 
     if should_notify "$last_state" "$state_key"; then
         send_notification "$last_state" "$state_key" "$art_url"
