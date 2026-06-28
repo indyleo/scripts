@@ -3,7 +3,7 @@
 set -euo pipefail
 
 # --- Display server detection ---
-if [ -n "$WAYLAND_DISPLAY" ]; then
+if [ -n "${WAYLAND_DISPLAY:-}" ]; then
     MENU() { rofi -dmenu -l 5 -p "$1"; }
     PROMPT() { rofi -dmenu -p "$1"; }
 else

@@ -82,14 +82,18 @@ def check_dependencies():
         clip_tools = [("wl-copy", None)]
         clip_err = "wl-copy not found. Please install wl-clipboard."
     else:
-        # X11: use rofi or dmenu
-        finders = ["rofi", "dmenu"]
+        finders = ["dmenu", "rofi"]
         clip_tools = [("xsel", None), ("xclip", None)]
         clip_err = "Neither xsel nor xclip found. Please install one."
 
     selected_finder = None
     for finder in finders:
-        if subprocess.run(["which", finder], capture_output=True, check=False).returncode == 0:
+        if (
+            subprocess.run(
+                ["which", finder], capture_output=True, check=False
+            ).returncode
+            == 0
+        ):
             selected_finder = finder
             break
 
@@ -98,7 +102,8 @@ def check_dependencies():
         sys.exit(1)
 
     has_clip = any(
-        subprocess.run(["which", tool], capture_output=True, check=False).returncode == 0
+        subprocess.run(["which", tool], capture_output=True, check=False).returncode
+        == 0
         for tool, _ in clip_tools
     )
     if not has_clip:
@@ -156,18 +161,31 @@ def copy_to_clipboard(text):
     """Copy text to clipboard (wl-copy on Wayland, xsel/xclip on X11)"""
     try:
         if IS_WAYLAND:
-            subprocess.run(["wl-copy"], input=text, text=True, encoding="utf-8", check=True)
+            subprocess.run(
+                ["wl-copy"], input=text, text=True, encoding="utf-8", check=True
+            )
         else:
-            xsel_ok = subprocess.run(["which", "xsel"], capture_output=True, check=False).returncode == 0
+            xsel_ok = (
+                subprocess.run(
+                    ["which", "xsel"], capture_output=True, check=False
+                ).returncode
+                == 0
+            )
             if xsel_ok:
                 subprocess.run(
                     ["xsel", "--clipboard", "--input"],
-                    input=text, text=True, encoding="utf-8", check=True,
+                    input=text,
+                    text=True,
+                    encoding="utf-8",
+                    check=True,
                 )
             else:
                 subprocess.run(
                     ["xclip", "-selection", "clipboard"],
-                    input=text, text=True, encoding="utf-8", check=True,
+                    input=text,
+                    text=True,
+                    encoding="utf-8",
+                    check=True,
                 )
         return True
     except subprocess.CalledProcessError as e:

@@ -22,6 +22,7 @@ from typing import List, Optional, Tuple
 
 try:
     import PIL.Image  # pylint: disable=unused-import
+
     HAS_PIL = True
 except ImportError:
     HAS_PIL = False
@@ -39,7 +40,7 @@ PREVIEW_MAX = 80
 if IS_WAYLAND:
     ROFI_COMMAND = ["rofi", "-dmenu", "-i", "-p", "Clipboard", "-no-custom"]
 else:
-    ROFI_COMMAND = ["dmenu", "-i", "-p", "Clipboard"]
+    ROFI_COMMAND = ["dmenu", "-p", "Clipboard"]
 
 HOME = Path.home()
 CLIP_DIR = HOME / ".cache" / "wayclip"
@@ -65,6 +66,7 @@ class Clip:
 
 
 # --- Clipboard helpers ---
+
 
 def run_command(
     cmd: List[str],
@@ -113,14 +115,17 @@ def copy_to_clipboard_x11(clip: Clip) -> None:
                     stdin=subprocess.PIPE,
                 ).communicate(img_data)
             else:
-                print("Error: xclip required for image clipboard on X11.", file=sys.stderr)
+                print(
+                    "Error: xclip required for image clipboard on X11.", file=sys.stderr
+                )
 
 
 def copy_to_clipboard_wayland(clip: Clip) -> None:
     """Restore an item to the Wayland clipboard via wl-copy."""
     subprocess.run(
         ["pkill", "-u", str(os.getuid()), "-x", "wl-copy"],
-        stderr=subprocess.DEVNULL, check=False,
+        stderr=subprocess.DEVNULL,
+        check=False,
     )
     try:
         if clip.type == "text" and clip.content:
@@ -208,6 +213,7 @@ def get_clipboard_content() -> Optional[Clip]:
 
 # --- Manager ---
 
+
 class ClipboardManager:
     def __init__(self) -> None:
         self.history: List[Clip] = []
@@ -278,10 +284,15 @@ class ClipboardManager:
         if is_pinned:
             return
         self.history = [
-            h for h in self.history
+            h
+            for h in self.history
             if not (
                 h.type == clip.type
-                and (h.content == clip.content if h.type == "text" else h.path == clip.path)
+                and (
+                    h.content == clip.content
+                    if h.type == "text"
+                    else h.path == clip.path
+                )
             )
         ]
         self.history.insert(0, clip)
@@ -300,10 +311,15 @@ class ClipboardManager:
             self.history.insert(0, removed)
         else:
             self.history = [
-                h for h in self.history
+                h
+                for h in self.history
                 if not (
                     h.type == clip.type
-                    and (h.content == clip.content if h.type == "text" else h.path == clip.path)
+                    and (
+                        h.content == clip.content
+                        if h.type == "text"
+                        else h.path == clip.path
+                    )
                 )
             ]
             self.pinned.insert(0, clip)
@@ -333,7 +349,11 @@ class ClipboardManager:
             return
 
         menu_str = "\n".join(m[0] for m in menu_items)
-        selection_idx = self._run_menu(menu_str, "-format", "i") if IS_WAYLAND else self._run_menu(menu_str)
+        selection_idx = (
+            self._run_menu(menu_str, "-format", "i")
+            if IS_WAYLAND
+            else self._run_menu(menu_str)
+        )
 
         if selection_idx is None:
             return
@@ -375,8 +395,11 @@ class ClipboardManager:
         pin_label = "Unpin Item" if is_pinned else "Pin Item"
         options = [" Paste (Copy to Clipboard)", f" {pin_label}"]
 
-        cmd = (["rofi", "-dmenu", "-p", "Action", "-i"] if IS_WAYLAND
-               else ["dmenu", "-p", "Action"])
+        cmd = (
+            ["rofi", "-dmenu", "-p", "Action", "-i"]
+            if IS_WAYLAND
+            else ["dmenu", "-p", "Action"]
+        )
         sel_str = run_command(cmd, input_data="\n".join(options).encode(), timeout=None)
 
         if not sel_str:
@@ -396,6 +419,7 @@ class ClipboardManager:
 
 
 # --- Daemon & main ---
+
 
 def daemon_loop(manager: ClipboardManager) -> None:
     mode = "Wayland" if IS_WAYLAND else "X11"

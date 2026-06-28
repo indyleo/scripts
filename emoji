@@ -76,7 +76,7 @@ def check_dependencies():
         clip_tools = [("wl-copy", None)]
         clip_err = "wl-copy not found. Please install wl-clipboard."
     else:
-        finders = ["rofi", "dmenu"]
+        finders = ["dmenu", "rofi"]
         clip_tools = [("xsel", None), ("xclip", None)]
         clip_err = "Neither xsel nor xclip found. Please install one."
 

@@ -35,7 +35,7 @@ function copy_to_clip() {
     if [ "$IS_WAYLAND" -eq 1 ]; then
         wl-copy < "$1"
     else
-        xsel --clipboard --input < "$1"
+        xclip -selection clipboard -t image/png < "$1"
     fi
 }
 
