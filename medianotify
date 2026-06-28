@@ -174,6 +174,16 @@ function fetch_art() {
 # NOTIFICATION FORMATTING
 # ============================================================================
 
+function is_bogus_chromium_path() {
+    # Chromium (and some other browsers) sometimes report their own internal
+    # lock/IPC socket files (/tmp/.org.chromium.Chromium.XXXXXX) as MPRIS
+    # album/art metadata when the page doesn't expose real Media Session info.
+    # Treat those as junk.
+    local val="$1"
+    [[ "$val" =~ /tmp/\.org\.(chromium|mozilla|vivaldi) ]] && return 0
+    return 1
+}
+
 function send_notification() {
     local old_state="$1"
     local new_state="$2"
@@ -187,6 +197,20 @@ function send_notification() {
         browser) source_icon="🌐" ;;
         song)    source_icon="🎵" ;;
         *)       source_icon="" ;;
+    esac
+
+    # Chromium leaks its internal artwork temp path into the *album text*
+    # field (xesam:album) instead of (or in addition to) artUrl. The file
+    # itself is real, valid art though - so if album looks like that path
+    # and art_url is empty/unusable, use the album value as the art source.
+    if [[ "$new_type" == "browser" ]] && is_bogus_chromium_path "$new_album"; then
+        [[ -z "$art_url" ]] && art_url="$new_album"
+        new_album=""
+    fi
+
+    # Some sites report a literal placeholder instead of leaving it blank.
+    case "$new_album" in
+        "Unknown"|"Unknown Album"|"[Unknown Album]") new_album="" ;;
     esac
 
     local notif_title="$source_icon Now Playing"
@@ -206,7 +230,8 @@ function send_notification() {
         -h string:x-canonical-private-synchronous:medianotify
     )
 
-    # Resolve art to a local path (downloads if remote)
+    # Resolve art to a local path (downloads if remote). We keep this even
+    # for the Chromium temp-path case since that file is real artwork.
     local art_path
     if art_path=$(fetch_art "$art_url"); then
         notify_cmd+=(-i "$art_path")
