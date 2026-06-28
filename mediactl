@@ -235,12 +235,11 @@ function get_state() {
     IFS='|' read -r type player status <<< "$active_info"
 
     if [[ "$type" == "idle" ]]; then
-        echo "idle||Idle|||"
+        echo "idle"$'\t\t'"Idle"$'\t\t\t\t'
         return
     fi
 
     metadata=$(get_player_metadata "$player")
-    # echo "$type|$player|$metadata"
     echo "$type"$'\t'"$player"$'\t'"$metadata"
 }
 
