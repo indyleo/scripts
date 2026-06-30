@@ -45,7 +45,7 @@ function dwmblocks_signal() {
         echo "Usage: dwmblocks_signal SIGNAL" >&2
         exit 1
     fi
-    if [[ pgrep -x "dwmblocks" ]]; then
+    if pgrep -x "dwmblocks" >/dev/null; then
         run_cmd pkill -RTMIN+"$signal" dwmblocks
         echo "✅ Success: Sent signal $signal to dwmblocks"
     fi
