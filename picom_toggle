@@ -1,0 +1,9 @@
+#!/bin/env bash
+
+set -euo pipefail
+
+if pgrep -x picom >/dev/null; then
+    killall picom
+else
+    setsid -f picom >/dev/null 2>&1
+fi
