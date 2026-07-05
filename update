@@ -133,7 +133,7 @@ function update_pipx() {
 function update_neovim() {
     if command -v nvim &>/dev/null; then
         echo -e "\n💡 Updating Neovim plugins..."
-        nvim --headless "+Lazy! sync" +qa
+        nvim --headless "+PackUpdateForce" +qa
     fi
 }
 
