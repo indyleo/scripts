@@ -49,6 +49,21 @@ DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 REQUIRED_TOOLS = {"spotify": "spotdl", "yt": "yt-dlp"}
 
+# Prefer mp4/m4a first (fast merge, no re-encode, broad compatibility),
+# fall back to whatever's best overall if mp4/m4a isn't available.
+QUALITY_PRESETS = {
+    "best": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo*+bestaudio/best",
+    "4k": "bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/"
+    "bestvideo[height<=2160]+bestaudio/best[height<=2160]",
+    "1080p": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/"
+    "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+    "720p": "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/"
+    "bestvideo[height<=720]+bestaudio/best[height<=720]",
+    "480p": "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/"
+    "bestvideo[height<=480]+bestaudio/best[height<=480]",
+    "worst": "worstvideo*+worstaudio/worst",
+}
+
 logger = logging.getLogger(PROG_NAME)
 
 # ────────────────────────────── Exceptions ──────────────────────────────
@@ -107,9 +122,25 @@ class Config:
             raw = json.load(f)
         cfg = cls()
         for k, v in raw.items():
-            if hasattr(cfg, k):
-                val = Path(v) if isinstance(getattr(cfg, k), Path) else v
-                setattr(cfg, k, val)
+            if not hasattr(cfg, k):
+                continue
+            current = getattr(cfg, k)
+            try:
+                if isinstance(current, Path):
+                    val = Path(v)
+                elif isinstance(current, bool):
+                    val = bool(v)
+                elif isinstance(current, int):
+                    val = int(v)
+                elif isinstance(current, str):
+                    val = str(v)
+                else:
+                    val = v
+            except (TypeError, ValueError) as exc:
+                raise ConfigError(
+                    f"Invalid value for '{k}' in {CONFIG_FILE}: {v!r}"
+                ) from exc
+            setattr(cfg, k, val)
         return cfg
 
     def save(self) -> None:
@@ -167,6 +198,28 @@ class MediaDownloader:
             f.write(identifier + "\n")
         self.archive.add(identifier)
 
+    def _record_metadata(self, task: "DownloadTask") -> None:
+        """Append a completed-download record to the metadata DB."""
+        record = DownloadMetadata(
+            url=task.url,
+            identifier=task.url,
+            task_type=task.task_type,
+            download_time=time.strftime(DATE_FORMAT),
+            output_dir=str(task.output_dir),
+            files=[],
+        )
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        history: List[Dict[str, Any]] = []
+        if METADATA_DB.exists():
+            try:
+                with open(METADATA_DB, "r", encoding="utf-8") as f:
+                    history = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                logger.warning("Could not read %s, starting fresh", METADATA_DB)
+        history.append(record.__dict__)
+        with open(METADATA_DB, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2)
+
     @staticmethod
     def _ensure_tool(name: str) -> None:
         """Verify required tool is installed."""
@@ -179,6 +232,9 @@ class MediaDownloader:
             max_retries = self.config.max_retries
 
         for attempt in range(max_retries):
+            if self.stop_event.is_set():
+                raise RuntimeError("Cancelled (stop requested)")
+
             try:
                 if self.verbose:
                     logger.info("Running: %s", " ".join(cmd))
@@ -186,6 +242,8 @@ class MediaDownloader:
                 subprocess.run(cmd, check=True)
                 return
             except subprocess.CalledProcessError:
+                if self.stop_event.is_set():
+                    raise RuntimeError("Cancelled (stop requested)") from None
                 if attempt < max_retries - 1:
                     logger.warning(
                         "Download failed (attempt %d/%d), retrying in %ds...",
@@ -285,7 +343,13 @@ class MediaDownloader:
             ]
         )
 
+        quality = task.options.get("quality", "best")
+
         if audio_only:
+            if quality != "best":
+                logger.warning(
+                    "--quality %r has no effect with --audio-only; ignoring", quality
+                )
             cmd.extend(
                 [
                     "-x",
@@ -297,11 +361,13 @@ class MediaDownloader:
                 ]
             )
         else:
-            # Flexible video format selection
+            # Resolve preset name to a yt-dlp format string, or pass through
+            # a raw format string the user supplied directly.
+            fmt = QUALITY_PRESETS.get(quality, quality)
             cmd.extend(
                 [
                     "-f",
-                    "bestvideo*+bestaudio/best",
+                    fmt,
                     "--merge-output-format",
                     "mp4",
                 ]
@@ -333,6 +399,14 @@ class MediaDownloader:
 
         logger.info("Processing %d task(s) with %d worker(s)", len(tasks), workers)
 
+        if workers > 1 and any(t.task_type == "spotify" for t in tasks):
+            logger.warning(
+                "Running multiple spotdl processes in parallel (--workers %d) can "
+                "trigger Spotify/YouTube rate limiting; consider -w 1 for spotify "
+                "batches if you see failures.",
+                workers,
+            )
+
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {}
             for task in tasks:
@@ -355,7 +429,10 @@ class MediaDownloader:
                 try:
                     future.result()
                     completed += 1
-                    logger.info("Completed: %s", futures[future].url)
+                    task = futures[future]
+                    logger.info("Completed: %s", task.url)
+                    if not self.dry_run:
+                        self._record_metadata(task)
                 except Exception as exc:  # pylint: disable=broad-exception-caught
                     failed += 1
                     logger.error("Failed: %s - %s", futures[future].url, exc)
@@ -401,6 +478,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--playlist",
         action="store_true",
         help="Download entire playlist",
+    )
+    yt_parser.add_argument(
+        "-q",
+        "--quality",
+        default="best",
+        help=(
+            "Video quality: "
+            + ", ".join(QUALITY_PRESETS)
+            + ", or a raw yt-dlp format string (default: best)"
+        ),
+    )
+    yt_parser.add_argument(
+        "--list-formats",
+        action="store_true",
+        help="List available formats for each URL and exit (no download)",
     )
     yt_parser.add_argument(
         "-n", "--dry-run", action="store_true", help="Show what would be done"
@@ -478,6 +570,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.error("No URLs provided")
         return 1
 
+    if args.command == "yt" and getattr(args, "list_formats", False):
+        MediaDownloader._ensure_tool(REQUIRED_TOOLS["yt"])
+        for url in urls:
+            print(f"\n=== {url} ===")
+            subprocess.run(["yt-dlp", "-F", url], check=False)
+        return 0
+
     # Build tasks
     tasks: List[DownloadTask] = []
     for url in urls:
@@ -485,6 +584,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.command == "yt":
             opts["audio_only"] = args.audio_only
             opts["playlist"] = args.playlist
+            opts["quality"] = args.quality
 
         is_music = args.command == "spotify" or (
             args.command == "yt" and args.audio_only
