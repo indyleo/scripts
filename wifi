@@ -2,8 +2,8 @@
 # rofi_wifi — WiFi manager using rofi/dmenu + nmcli
 
 DIVIDER="──────────────────────"
-TOGGLE_ON="󰤨  Disable WiFi"
-TOGGLE_OFF="󰤭  Enable WiFi"
+TOGGLE_ON="󰤭  Disable WiFi"
+TOGGLE_OFF="󰤨  Enable WiFi"
 DISCONNECT_ITEM="󰖰  Disconnect"
 MANUAL_ITEM="󰐥  Manual / Hidden SSID"
 
