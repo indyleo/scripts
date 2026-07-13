@@ -4,6 +4,8 @@
 DIVIDER="──────────────────────"
 TOGGLE_ON="󰤨  Disable WiFi"
 TOGGLE_OFF="󰤭  Enable WiFi"
+DISCONNECT_ITEM="󰖰  Disconnect"
+MANUAL_ITEM="󰐥  Manual / Hidden SSID"
 
 # --- Display server detection ---
 if [ -n "$WAYLAND_DISPLAY" ]; then
@@ -25,10 +27,15 @@ if [ -n "$WAYLAND_DISPLAY" ]; then
             -theme-str 'listview { columns: 1; }'
     }
 else
-    MENU()       { dmenu -p "$1"; }
-    PROMPT()     { dmenu -p "$1"; }
+    MENU()        { dmenu -p "$1"; }
+    PROMPT()      { dmenu -p "$1"; }
     PROMPT_PASS() { dmenu -P -p "$1"; }
 fi
+
+# Resolve the wifi device once, used for disconnect/status actions
+wifi_dev() {
+    nmcli -t -f DEVICE,TYPE device | awk -F: '$2=="wifi"{print $1; exit}'
+}
 
 wifi_status=$(nmcli radio wifi)
 
@@ -42,34 +49,46 @@ fi
 
 connected_ssid=$(nmcli -t -f active,ssid dev wifi | awk -F: '/^yes/{print $2}')
 
-networks=$(nmcli --fields IN-USE,SSID,SECURITY,BARS device wifi list 2>/dev/null \
-    | tail -n +2 \
-    | awk '{
-        in_use = substr($0, 1, 1)
-        rest = substr($0, 2)
-        gsub(/^[[:space:]]+/, "", rest)
-        ssid = rest
-        sub(/[[:space:]].*/, "", ssid)
+# Saved (known) wifi connection profile names, one per line, full names (spaces intact)
+declare -A is_saved=()
+while IFS= read -r name; do
+    [[ -n "$name" ]] && is_saved["$name"]=1
+done < <(nmcli -t -f NAME,TYPE connection show | awk -F: '$NF=="802-11-wireless"{NF--; print}' OFS=:)
 
-        if (in_use == "*") active[ssid] = 1
-        if (!seen[ssid]++) {
-            lines[ssid] = rest
-            order[NR] = ssid
-            count++
-        }
-    }
-END {
-    for (i = 1; i <= NR; i++) {
-        ssid = order[i]
-        if (ssid == "") continue
-        if (active[ssid])
-            print "▶ " lines[ssid]
-        else
-            print lines[ssid]
-    }
-}')
+# Parse live scan results with -t (colon-delimited, handles spaces in SSIDs)
+declare -A signal_of=() security_of=() inuse_of=() seen=()
+order=()
+while IFS=: read -r inuse ssid security signal; do
+    [[ -z "$ssid" ]] && continue
+    [[ "$inuse" == "*" ]] && inuse_of["$ssid"]=1
+    if [[ -z "${signal_of[$ssid]:-}" || "${signal:-0}" -gt "${signal_of[$ssid]}" ]]; then
+        signal_of["$ssid"]="$signal"
+        security_of["$ssid"]="$security"
+    fi
+    if [[ -z "${seen[$ssid]:-}" ]]; then
+        order+=("$ssid")
+        seen["$ssid"]=1
+    fi
+done < <(nmcli -t -f IN-USE,SSID,SECURITY,SIGNAL device wifi list 2>/dev/null)
 
-menu=$(echo -e "$TOGGLE_ON\n$DIVIDER\n$networks\n$DIVIDER\n󰖰  Disconnect\n󰐥  Manual / Hidden SSID")
+# Build display lines + a line->ssid lookup so we never re-parse text for the ssid
+declare -A ssid_by_line=()
+display_lines=()
+for ssid in "${order[@]}"; do
+    sec="${security_of[$ssid]}"
+    [[ -z "$sec" || "$sec" == "--" ]] && sec_label="open" || sec_label="$sec"
+    prefix="  "
+    [[ -n "${inuse_of[$ssid]:-}" ]] && prefix="▶ "
+    saved_tag=""
+    [[ -n "${is_saved[$ssid]:-}" ]] && saved_tag=" 󰆓"
+    line=$(printf "%s%-30s %5s%%  %s%s" "$prefix" "$ssid" "${signal_of[$ssid]:-0}" "$sec_label" "$saved_tag")
+    display_lines+=("$line")
+    ssid_by_line["$line"]="$ssid"
+done
+
+networks=$(printf '%s\n' "${display_lines[@]}")
+
+menu=$(echo -e "$TOGGLE_ON\n$DIVIDER\n$networks\n$DIVIDER\n$DISCONNECT_ITEM\n$MANUAL_ITEM")
 
 choice=$(echo "$menu" | MENU "WiFi:")
 
@@ -81,13 +100,13 @@ case "$choice" in
         notify-send "WiFi" "WiFi disabled" --icon=network-wireless-offline
         ;;
 
-    "󰖰  Disconnect")
-        nmcli device disconnect wlan0 2>/dev/null \
-            || nmcli device disconnect $(nmcli -t -f DEVICE,TYPE device | awk -F: '$2=="wifi"{print $1;exit}')
+    "$DISCONNECT_ITEM")
+        dev=$(wifi_dev)
+        nmcli device disconnect "$dev" 2>/dev/null
         notify-send "WiFi" "Disconnected" --icon=network-wireless-offline
         ;;
 
-    "󰐥  Manual / Hidden SSID")
+    "$MANUAL_ITEM")
         ssid=$(echo "" | PROMPT "SSID:")
         [[ -z "$ssid" ]] && exit 0
         password=$(echo "" | PROMPT_PASS "Password:")
@@ -99,22 +118,40 @@ case "$choice" in
     "$DIVIDER"|"") exit 0 ;;
 
     *)
-        ssid=$(echo "$choice" | sed 's/^▶ //' | awk '{print $1}')
+        ssid="${ssid_by_line[$choice]:-}"
 
-        if [[ "$ssid" == "$connected_ssid" ]]; then
-            notify-send "WiFi" "Already connected to $ssid" --icon=network-wireless
+        # Fallback: manual/unrecognized selection, best-effort strip of the ▶ marker
+        if [[ -z "$ssid" ]]; then
+            ssid=$(echo "$choice" | sed 's/^▶ //' | sed 's/^ *//' | sed -E 's/ {2,}.*//')
+        fi
+
+        # Selecting the network you're already on disconnects it (toggle behavior)
+        if [[ -n "$connected_ssid" && "$ssid" == "$connected_ssid" ]]; then
+            dev=$(wifi_dev)
+            nmcli device disconnect "$dev" 2>/dev/null
+            notify-send "WiFi" "Disconnected from $ssid" --icon=network-wireless-offline
             exit 0
         fi
 
-        known=$(nmcli connection show | awk '{print $1}' | grep -Fx "$ssid")
-
-        if [[ -n "$known" ]]; then
-            nmcli connection up "$ssid" \
-                && notify-send "WiFi" "Connected to $ssid" --icon=network-wireless \
-                || notify-send "WiFi" "Failed to connect to $ssid" --icon=network-wireless-offline
+        # Selecting a saved network connects instantly, no password prompt
+        if [[ -n "${is_saved[$ssid]:-}" ]]; then
+            dev=$(wifi_dev)
+            err=$(nmcli connection up "$ssid" ifname "$dev" 2>&1)
+            rc=$?
+            if [[ $rc -ne 0 && "$err" == *"interface name"* ]]; then
+                # Stale connection.interface-name binding on the saved profile — clear it and retry once
+                nmcli connection modify "$ssid" connection.interface-name "" 2>/dev/null
+                err=$(nmcli connection up "$ssid" ifname "$dev" 2>&1)
+                rc=$?
+            fi
+            if [[ $rc -eq 0 ]]; then
+                notify-send "WiFi" "Connected to $ssid" --icon=network-wireless
+            else
+                notify-send "WiFi" "Failed to connect to $ssid" --icon=network-wireless-offline
+            fi
         else
-            security=$(echo "$choice" | awk '{print $3}')
-            if [[ "$security" == "--" ]]; then
+            security="${security_of[$ssid]}"
+            if [[ -z "$security" || "$security" == "--" ]]; then
                 nmcli device wifi connect "$ssid" \
                     && notify-send "WiFi" "Connected to $ssid" --icon=network-wireless \
                     || notify-send "WiFi" "Failed" --icon=network-wireless-offline
