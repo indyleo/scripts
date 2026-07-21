@@ -16,7 +16,7 @@ readonly NOTIFICATION_TIMEOUT=5000
 readonly NOTIFICATION_APP="Media Player"
 
 # Debounce settings (milliseconds)
-readonly DEBOUNCE_TIME_MS=300
+readonly DEBOUNCE_TIME_MS=120
 declare -g LAST_EVENT_TIME_MS=0
 
 # Track notification history (store timestamps in seconds)
@@ -80,6 +80,7 @@ function dwmblocks_signal() {
         pkill -RTMIN+"$signal" dwmblocks
         echo "󰡕  Success: Sent signal $signal to dwmblocks"
     fi
+    return 0
 }
 
 # ============================================================================
@@ -100,6 +101,30 @@ function save_state() {
 
 function get_track_key() {
     echo "${1}::${2}"
+}
+
+# Cache the last known-good art_url per track (title::artist) on disk, since
+# firefox-mpris intermittently omits mpris:artUrl from its metadata even
+# while the same track keeps playing - if we've seen it once, reuse it.
+# Uses files (not an associative array) so the background retry subshell
+# in retry_notify_with_art can share updates with the main process.
+function art_cache_path() {
+    local key="$1" hash
+    hash=$(echo -n "$key" | md5sum | cut -d' ' -f1)
+    echo "$STATE_DIR/artcache_${hash}"
+}
+
+function art_cache_get() {
+    local path
+    path=$(art_cache_path "$1")
+    [[ -f "$path" ]] && cat "$path"
+    return 0
+}
+
+function art_cache_set() {
+    local path
+    path=$(art_cache_path "$1")
+    echo "$2" > "$path" 2>/dev/null || true
 }
 
 function should_notify() {
@@ -146,8 +171,21 @@ function fetch_art() {
 
     if [[ "$art_url" == file://* ]]; then
         local path="${art_url#file://}"
-        [[ -f "$path" ]] && echo "$path" && return 0
-        return 1
+        [[ -f "$path" ]] || return 1
+
+        # Some MPRIS bridges (e.g. firefox-mpris) treat this as a live,
+        # frequently-rotated thumbnail file - it can be replaced or deleted
+        # moments after we read the metadata, even if it existed when we
+        # checked. Snapshot it into our own cache immediately so notify-send
+        # has a stable file to load, decoupled from the source's rotation.
+        local cache_key ext cache_path
+        cache_key=$(echo "$path" | md5sum | cut -d' ' -f1)
+        ext="${path##*.}"
+        cache_path="$STATE_DIR/art_local_${cache_key}.${ext}"
+
+        cp -f "$path" "$cache_path" 2>/dev/null || return 1
+        echo "$cache_path"
+        return 0
     fi
 
     if [[ "$art_url" == http://* || "$art_url" == https://* ]]; then
@@ -184,6 +222,19 @@ function is_bogus_chromium_path() {
     return 1
 }
 
+function looks_like_art_path() {
+    # Some MPRIS bridges (e.g. firefox-mpris) leak the actual artwork
+    # location into xesam:album instead of populating mpris:artUrl at all.
+    # Recognize a bare file:// URL or an absolute path ending in a common
+    # image extension so we can recover it as art instead of showing it
+    # as literal album text.
+    local val="$1"
+    [[ -z "$val" ]] && return 1
+    [[ "$val" == file://* ]] && return 0
+    [[ "$val" =~ ^/.*\.(png|jpe?g|gif|bmp|webp)$ ]] && return 0
+    return 1
+}
+
 function send_notification() {
     local old_state="$1"
     local new_state="$2"
@@ -199,11 +250,13 @@ function send_notification() {
         *)       source_icon="" ;;
     esac
 
-    # Chromium leaks its internal artwork temp path into the *album text*
-    # field (xesam:album) instead of (or in addition to) artUrl. The file
-    # itself is real, valid art though - so if album looks like that path
-    # and art_url is empty/unusable, use the album value as the art source.
-    if [[ "$new_type" == "browser" ]] && is_bogus_chromium_path "$new_album"; then
+    # Some browsers/MPRIS bridges leak the real artwork location into the
+    # *album text* field (xesam:album) instead of (or in addition to)
+    # artUrl - either as a Chromium internal temp-socket path, or (e.g.
+    # firefox-mpris) as a plain file:// URL / image path. The file itself
+    # is real, valid art though - so if album looks like one of those and
+    # art_url is empty/unusable, use the album value as the art source.
+    if [[ "$new_type" == "browser" ]] && { is_bogus_chromium_path "$new_album" || looks_like_art_path "$new_album"; }; then
         [[ -z "$art_url" ]] && art_url="$new_album"
         new_album=""
     fi
@@ -234,18 +287,77 @@ function send_notification() {
     # for the Chromium temp-path case since that file is real artwork.
     local art_path
     if art_path=$(fetch_art "$art_url"); then
+        log "DEBUG: art resolved -> '$art_path' (exists=$([[ -f "$art_path" ]] && echo yes || echo NO))"
         notify_cmd+=(-i "$art_path")
+    else
+        log "DEBUG: fetch_art failed for art_url='$art_url'"
     fi
 
     notify_cmd+=("$notif_title" "$notif_body")
 
-    "${notify_cmd[@]}" 2>/dev/null || log "Failed to send notification"
+    local notify_err
+    if ! notify_err=$("${notify_cmd[@]}" 2>&1); then
+        log "Failed to send notification: $notify_err"
+    fi
     log "Notification sent: $new_title"
 }
 
 # ============================================================================
 # EVENT HANDLING
 # ============================================================================
+
+function retry_notify_with_art() {
+    local target_key="$1"
+    local prev_state="$2"
+    local tries=0
+
+    while [[ $tries -lt 24 ]]; do
+        sleep 0.5
+        local cur
+        cur=$(mediactl status 2>/dev/null) || return
+        [[ -z "$cur" ]] && return
+
+        local type player status title artist album art_url
+        IFS=$'\t' read -r type player status title artist album art_url <<< "$cur"
+        local cur_key="$type"$'\t'"$player"$'\t'"$status"$'\t'"$title"$'\t'"$artist"$'\t'"$album"
+
+        # Bail if the track changed underneath us - don't show late art
+        # for a track that's no longer playing.
+        [[ "$cur_key" != "$target_key" ]] && { log "DEBUG: retry_notify_with_art bailing, track changed"; return; }
+
+        if [[ -n "$art_url" ]]; then
+            log "DEBUG: art_url appeared on retry $((tries+1)), re-sending notification"
+            art_cache_set "$(get_track_key "$title" "$artist")" "$art_url"
+            send_notification "$prev_state" "$cur_key" "$art_url"
+            return
+        fi
+        tries=$((tries+1))
+    done
+    log "DEBUG: gave up waiting for art_url after $tries retries"
+}
+
+function capture_art_from_line() {
+    # Runs on every raw metadata-watcher line, unconditionally (no
+    # debounce). firefox-mpris only includes mpris:artUrl in ONE of
+    # several rapid-fire metadata dumps per track load - re-querying
+    # afterward (via mediactl) almost always lands on a dump that lacks
+    # it. Reading it straight out of the event line that has it is the
+    # only reliable way to catch it.
+    local line="$1"
+    local p title artist album art_url
+    IFS=$'\t' read -r p title artist album art_url <<< "$line"
+
+    # Also recover art leaked into the album field (Chromium/firefox-mpris quirk)
+    if [[ -z "$art_url" ]] && { is_bogus_chromium_path "$album" || looks_like_art_path "$album"; }; then
+        art_url="$album"
+    fi
+
+    if [[ -n "$art_url" && -n "$title" ]]; then
+        log "DEBUG: captured art_url directly from event stream for '$title'"
+        art_cache_set "$(get_track_key "$title" "$artist")" "$art_url"
+    fi
+    return 0
+}
 
 function handle_event() {
     # Note: This function now runs in the MAIN process scope
@@ -273,8 +385,26 @@ function handle_event() {
         dwmblocks_signal 23
     fi
 
+    local cache_key
+    cache_key=$(get_track_key "$title" "$artist")
+
+    if [[ -n "$art_url" ]]; then
+        art_cache_set "$cache_key" "$art_url"
+    else
+        local cached_art
+        cached_art=$(art_cache_get "$cache_key")
+        if [[ -n "$cached_art" ]]; then
+            log "DEBUG: art_url empty, using cached art for '$title'"
+            art_url="$cached_art"
+        fi
+    fi
+
     if should_notify "$last_state" "$state_key"; then
         send_notification "$last_state" "$state_key" "$art_url"
+        if [[ -z "$art_url" ]]; then
+            retry_notify_with_art "$state_key" "$last_state" &
+            disown
+        fi
     fi
 
     save_state "$state_key"
@@ -303,7 +433,7 @@ function spawn_writers() {
 
         # We redirect output to the Named Pipe
         # We assume the Main Loop is already reading from it
-        playerctl -a -F metadata > "$EVENT_PIPE" 2>/dev/null &
+        playerctl -a -F metadata --format $'{{playerName}}\t{{title}}\t{{artist}}\t{{album}}\t{{mpris:artUrl}}' > "$EVENT_PIPE" 2>/dev/null &
         MONITOR_PIDS+=($!)
 
         playerctl -a -F status > "$EVENT_PIPE" 2>/dev/null &
@@ -348,7 +478,7 @@ function main_loop() {
             # Trigger an immediate check
             handle_event
         else
-            # Standard playerctl output or empty line
+            capture_art_from_line "$line"
             handle_event
         fi
     done
@@ -366,7 +496,7 @@ function cleanup() {
     kill_writers
     pkill -P $$ 2>/dev/null || true
     rm -f "$EVENT_PIPE" "$STATE_DIR/events" 2>/dev/null
-    rm -f "$STATE_DIR"/art_*.jpg 2>/dev/null
+    rm -f "$STATE_DIR"/art_*.jpg "$STATE_DIR"/art_local_*.* "$STATE_DIR"/artcache_* 2>/dev/null
     exec 3>&- # Close FD
     exit 0
 }

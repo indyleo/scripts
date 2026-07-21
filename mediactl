@@ -217,14 +217,22 @@ function get_player_metadata() {
     local player="$1"
     [[ "$player" == "idle" ]] && { echo "Idle||||"; return 0; }
 
-    local status title artist album art_url
+    local status combined title artist album art_url
     status=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" status 2>/dev/null || echo "Stopped")
-    title=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" metadata title 2>/dev/null || echo "Unknown")
-    artist=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" metadata artist 2>/dev/null || echo "Unknown")
-    album=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" metadata album 2>/dev/null || echo "")
-    art_url=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" metadata mpris:artUrl 2>/dev/null || echo "")
 
-    # echo "$status|$title|$artist|$album|$art_url"
+    # Single combined query instead of 4 separate playerctl calls. Each
+    # separate call is its own D-Bus round trip, and some MPRIS bridges
+    # (e.g. firefox-mpris) only report mpris:artUrl for a brief window
+    # right after a track loads - by the time a later, separate call for
+    # just artUrl runs, it may have already gone. One query = one
+    # consistent snapshot of all fields at the same instant.
+    combined=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" metadata \
+        --format $'{{title}}\t{{artist}}\t{{album}}\t{{mpris:artUrl}}' 2>/dev/null) || combined=""
+
+    IFS=$'\t' read -r title artist album art_url <<< "$combined"
+    [[ -z "$title" ]] && title="Unknown"
+    [[ -z "$artist" ]] && artist="Unknown"
+
     echo "$status"$'\t'"$title"$'\t'"$artist"$'\t'"$album"$'\t'"$art_url"
 }
 
