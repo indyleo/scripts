@@ -5,6 +5,87 @@ set -euo pipefail
 
 opt="${1:-}"
 
+# ============================================================================
+# CLICKABLE BLOCKS (dwmblocks-async)
+# ============================================================================
+# Confirmed against your actual config.h BLOCKS() list:
+#   X("", "mediactl state-title 35", 0, 23)  <- handled in mediactl, not here
+#   X("", "sysstats volume",        0, 24)  <- ACTIVE below
+#   X("", "sysstats brightness",    0, 25)  <- ACTIVE below
+#   X("", "sysstats battery",      15, 0)   <- signal 0 = dwm ignores clicks
+#   X("", "sysstats date_time",    30, 0)   <- signal 0 = dwm ignores clicks
+#
+# On click, dwm sends SIGRTMIN+<signal> to dwmblocks with the button number
+# (1=left 2=middle 3=right 4=scroll-up 5=scroll-down) as the signal payload.
+# dwmblocks-async then re-runs that block's exact command with $BLOCK_BUTTON
+# set to that number. Blocks on signal 0 (battery, date_time) never receive
+# this - dwm's sigstatusbar() bails out early for signal 0 - so they can't
+# be made clickable without giving them a real signal number in BLOCKS().
+#
+# `mic` and `wifi` below aren't in your current BLOCKS() list, so this code
+# path is currently dead - it only runs if you later add a block that calls
+# `sysstats mic` or `sysstats wifi`. Kept here so it's a one-line change
+# (just add the BLOCKS() entry) rather than having to write this later.
+#
+# IMPORTANT: this script runs under `set -euo pipefail`. Every action below
+# MUST end in `|| true` (or similar), otherwise a non-zero exit from sysctl
+# kills the *entire* sysstats process before it ever prints the block's
+# actual text - which looks exactly like "clicking does nothing", when in
+# fact the whole script just silently died. Errors are logged to
+# $CLICK_LOG so you can see what actually failed.
+#
+# NAMING COLLISION WARNING: `sysctl` is also the name of the Linux kernel
+# parameter tool (procps), almost always present at /usr/sbin/sysctl or
+# /sbin/sysctl. If that directory appears in PATH before wherever your
+# custom sysctl script lives, a bare `sysctl vol --inc` call here will
+# silently run the WRONG binary and fail - with no "command not found" to
+# warn you. Run `which -a sysctl` to check the order. To eliminate this
+# risk entirely, hardcode the absolute path to your script below, e.g.:
+#   SYSCTL="$HOME/.local/bin/sysctl"
+SYSCTL="sysctl"
+CLICK_LOG="${XDG_RUNTIME_DIR:-/tmp}/sysstats-click.log"
+
+function handle_block_click() {
+    [[ -z "${BLOCK_BUTTON:-}" ]] && return 0
+    if ! command -v "$SYSCTL" >/dev/null 2>&1; then
+        echo "$(date '+%F %T') sysstats: '$SYSCTL' not found on PATH" >> "$CLICK_LOG"
+        return 0
+    fi
+
+    case "$opt" in
+        volume)     # ACTIVE - wired to signal 24 in BLOCKS()
+            case "$BLOCK_BUTTON" in
+                1) "$SYSCTL" vol --toggle >>"$CLICK_LOG" 2>&1 || true ;;   # left:  mute toggle
+                3) setsid -f pavucontrol  >>"$CLICK_LOG" 2>&1 || true ;;   # right: open mixer
+                4) "$SYSCTL" vol --inc    >>"$CLICK_LOG" 2>&1 || true ;;   # scroll up:   +5%
+                5) "$SYSCTL" vol --dec    >>"$CLICK_LOG" 2>&1 || true ;;   # scroll down: -5%
+            esac
+            ;;
+        brightness) # ACTIVE - wired to signal 25 in BLOCKS()
+            case "$BLOCK_BUTTON" in
+                4) "$SYSCTL" bri --inc >>"$CLICK_LOG" 2>&1 || true ;;      # scroll up:   +5%
+                5) "$SYSCTL" bri --dec >>"$CLICK_LOG" 2>&1 || true ;;      # scroll down: -5%
+            esac
+            ;;
+        mic|microphone) # inactive - no BLOCKS() entry calls `sysstats mic` yet
+            case "$BLOCK_BUTTON" in
+                1) "$SYSCTL" mic --toggle >>"$CLICK_LOG" 2>&1 || true ;;
+                4) "$SYSCTL" mic --inc    >>"$CLICK_LOG" 2>&1 || true ;;
+                5) "$SYSCTL" mic --dec    >>"$CLICK_LOG" 2>&1 || true ;;
+            esac
+            ;;
+        wifi) # inactive - no BLOCKS() entry calls `sysstats wifi` yet
+            case "$BLOCK_BUTTON" in
+                1) "$SYSCTL" wifi --toggle >>"$CLICK_LOG" 2>&1 || true ;;
+            esac
+            ;;
+    esac
+
+    return 0
+}
+
+handle_block_click
+
 function ttime() {
     date +"󰥔  %I:%M %p"
 }

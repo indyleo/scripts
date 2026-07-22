@@ -335,6 +335,34 @@ function cmd_next()       { send_control next; }
 function cmd_previous()   { send_control previous; }
 
 # ============================================================================
+# CLICKABLE BLOCKS (dwmblocks-async)
+# ============================================================================
+# Confirmed against your config.h: X("", "mediactl state-title 35", 0, 23)
+# This block runs on signal 23. On click, dwm sends SIGRTMIN+23 to dwmblocks
+# with the button number as payload; dwmblocks-async re-runs this exact
+# command line with $BLOCK_BUTTON set to that number (1=left 2=middle
+# 3=right 4=scroll-up 5=scroll-down). We only act on it for the info
+# commands (status/title/state/state-title) since that's all this block
+# ever invokes - "35" above just becomes the title cutpoint arg to state-title.
+
+readonly CLICK_LOG="${XDG_RUNTIME_DIR:-/tmp}/mediactl-click.log"
+
+function handle_block_button() {
+    [[ -z "${BLOCK_BUTTON:-}" ]] && return 0
+
+    case "$BLOCK_BUTTON" in
+        1) cmd_play_pause >>"$CLICK_LOG" 2>&1 || true ;;  # left click:   play/pause
+        4) cmd_previous   >>"$CLICK_LOG" 2>&1 || true ;;  # scroll up:    previous
+        5) cmd_next       >>"$CLICK_LOG" 2>&1 || true ;;  # scroll down:  next
+        # 2 (middle) and 3 (right) are left free for you to bind, e.g.:
+        # 3) setsid -f "${TERMINAL:-xterm}" -e playerctl -p "$(cmd... )" >/dev/null 2>&1 ;;
+    esac
+
+    # Give the player a brief moment to update state before we report it.
+    sleep 0.1
+}
+
+# ============================================================================
 # MAIN
 # ============================================================================
 
@@ -382,10 +410,10 @@ function main() {
     shift || true
 
     case "$command" in
-        status)            cmd_status ;;
-        title)             cmd_title "$@" ;;
-        state)             cmd_state ;;
-        state-title)       cmd_state_title "$@" ;;
+        status)            handle_block_button; cmd_status ;;
+        title)              handle_block_button; cmd_title "$@" ;;
+        state)              handle_block_button; cmd_state ;;
+        state-title)        handle_block_button; cmd_state_title "$@" ;;
         play-pause)        cmd_play_pause ;;
         next)              cmd_next ;;
         previous)          cmd_previous ;;
