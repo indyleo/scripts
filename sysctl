@@ -121,6 +121,22 @@ function adjust_brightness() {
 
 }
 
+# Dim/undim toggle: no state file needed, just flips based on current level.
+# Above 50% -> dim to 10%. At or below 50% -> restore to full.
+function toggle_brightness() {
+    local current_max current_val percent
+    current_val=$(brightnessctl get)
+    current_max=$(brightnessctl max)
+    percent=$(( current_val * 100 / current_max ))
+
+    if [[ $percent -gt 50 ]]; then
+        run_cmd brightnessctl set "10%"
+    else
+        run_cmd brightnessctl set "100%"
+    fi
+    dwmblocks_signal 25
+}
+
 # --- Network/Radio Logic ---
 
 function wifi_toggle() {
@@ -189,8 +205,9 @@ case "$subsys" in
         case "$action" in
             --inc|-i) adjust_brightness "+" ;;
             --dec|-d) adjust_brightness "-" ;;
+            --toggle) toggle_brightness ;;
             --help|-h) global_help ;;
-            *) echo "Invalid brightness action. Use --inc or --dec." >&2; exit 1 ;;
+            *) echo "Invalid brightness action. Use --inc, --dec, or --toggle." >&2; exit 1 ;;
         esac
         ;;
     vol|volume)

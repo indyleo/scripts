@@ -45,6 +45,12 @@ opt="${1:-}"
 SYSCTL="sysctl"
 CLICK_LOG="${XDG_RUNTIME_DIR:-/tmp}/sysstats-click.log"
 
+# dwm's FIFO IPC (ipc.c / fifocmds[]) - confirmed protocol: a line of
+# "<cmd> <int-arg>\n" written to this path. Used below to pop open the
+# wiremixsc scratchpad (config.h: spcmd4 = wiremix TUI mixer, scratchpad
+# index 3) instead of depending on a GUI mixer like pavucontrol.
+DWM_FIFO="/tmp/dwm.fifo"
+
 function handle_block_click() {
     [[ -z "${BLOCK_BUTTON:-}" ]] && return 0
     if ! command -v "$SYSCTL" >/dev/null 2>&1; then
@@ -56,27 +62,28 @@ function handle_block_click() {
         volume)     # ACTIVE - wired to signal 24 in BLOCKS()
             case "$BLOCK_BUTTON" in
                 1) "$SYSCTL" vol --toggle >>"$CLICK_LOG" 2>&1 || true ;;   # left:  mute toggle
-                3) setsid -f pavucontrol  >>"$CLICK_LOG" 2>&1 || true ;;   # right: open mixer
+                3) echo "togglescratch 3" > "$DWM_FIFO" 2>>"$CLICK_LOG" || true ;;  # right: wiremix mixer scratchpad
                 4) "$SYSCTL" vol --inc    >>"$CLICK_LOG" 2>&1 || true ;;   # scroll up:   +5%
                 5) "$SYSCTL" vol --dec    >>"$CLICK_LOG" 2>&1 || true ;;   # scroll down: -5%
             esac
             ;;
         brightness) # ACTIVE - wired to signal 25 in BLOCKS()
             case "$BLOCK_BUTTON" in
-                4) "$SYSCTL" bri --inc >>"$CLICK_LOG" 2>&1 || true ;;      # scroll up:   +5%
-                5) "$SYSCTL" bri --dec >>"$CLICK_LOG" 2>&1 || true ;;      # scroll down: -5%
+                1) "$SYSCTL" bri --toggle >>"$CLICK_LOG" 2>&1 || true ;;   # left:  dim/undim toggle (10% <-> 100%)
+                4) "$SYSCTL" bri --inc    >>"$CLICK_LOG" 2>&1 || true ;;   # scroll up:   +5%
+                5) "$SYSCTL" bri --dec    >>"$CLICK_LOG" 2>&1 || true ;;   # scroll down: -5%
             esac
             ;;
         mic|microphone) # inactive - no BLOCKS() entry calls `sysstats mic` yet
             case "$BLOCK_BUTTON" in
-                1) "$SYSCTL" mic --toggle >>"$CLICK_LOG" 2>&1 || true ;;
-                4) "$SYSCTL" mic --inc    >>"$CLICK_LOG" 2>&1 || true ;;
-                5) "$SYSCTL" mic --dec    >>"$CLICK_LOG" 2>&1 || true ;;
+                1) "$SYSCTL" mic --toggle >>"$CLICK_LOG" 2>&1 || true ;;   # left:  mute toggle
+                4) "$SYSCTL" mic --inc    >>"$CLICK_LOG" 2>&1 || true ;;   # scroll up:   +5%
+                5) "$SYSCTL" mic --dec    >>"$CLICK_LOG" 2>&1 || true ;;   # scroll down: -5%
             esac
             ;;
         wifi) # inactive - no BLOCKS() entry calls `sysstats wifi` yet
             case "$BLOCK_BUTTON" in
-                1) "$SYSCTL" wifi --toggle >>"$CLICK_LOG" 2>&1 || true ;;
+                1) "$SYSCTL" wifi --toggle >>"$CLICK_LOG" 2>&1 || true ;;  # left:  wifi on/off
             esac
             ;;
     esac
