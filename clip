@@ -392,8 +392,8 @@ class ClipboardManager:
             and (p.content == clip.content if p.type == "text" else p.path == clip.path)
             for p in self.pinned
         )
-        pin_label = "Unpin Item" if is_pinned else "Pin Item"
-        options = [" Paste (Copy to Clipboard)", f" {pin_label}"]
+        pin_label = " Unpin Item" if is_pinned else " Pin Item"
+        options = [" Paste (Copy to Clipboard)", f" {pin_label}"]
 
         cmd = (
             ["rofi", "-dmenu", "-p", "Action", "-i"]
