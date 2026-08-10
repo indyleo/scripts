@@ -243,7 +243,7 @@ function get_state() {
     IFS='|' read -r type player status <<< "$active_info"
 
     if [[ "$type" == "idle" ]]; then
-        echo "idle"$'\t\t'"Idle"$'\t\t\t\t'
+        echo "idle"$'\t\t'"Idle"$'\t'"Idle"$'\t\t\t'
         return
     fi
 
@@ -315,7 +315,7 @@ function cmd_title() {
 function cmd_state() {
     local state type status
     state=$(get_state "$SOURCE")
-    IFS='|' read -r type _ status _ <<< "$state"
+    IFS=$'\t' read -r type _ status _ <<< "$state"
     [[ "$type" == "idle" ]] && { echo "$ICON_IDLE"; return; }
     get_status_icon "$status"
 }
@@ -378,7 +378,7 @@ OPTIONS:
     -s, --source <browser|song>    Force command to a specific player type.
 
 INFORMATION COMMANDS:
-    status                         Get raw pipe-separated player state.
+    status                         Get raw tab-separated player state.
     state                          Show only the status icon (Playing/Paused).
     title [limit]                  Show current title (default limit 50 chars).
     state-title [limit]            Show icon and title together.
