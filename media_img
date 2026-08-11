@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# media_img
+# Resolves mediactl's art_url to a local (tmpfs) file path for hyprlock's
+# image reload_cmd. Only re-fetches when the art_url actually changes.
+
+set -euo pipefail
+
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/dev/shm}"
+CACHE="$RUNTIME_DIR/hyprlock-art.png"
+LAST_URL_FILE="$RUNTIME_DIR/hyprlock-art.url"
+
+url=$(/home/indy/.local/scripts/mediactl status | cut -f7)
+
+[[ -z "$url" ]] && exit 0
+
+last_url=""
+[[ -f "$LAST_URL_FILE" ]] && last_url=$(cat "$LAST_URL_FILE")
+
+# Nothing changed - don't re-fetch, just report the existing cache
+if [[ "$url" == "$last_url" && -f "$CACHE" ]]; then
+    echo "$CACHE"
+    exit 0
+fi
+
+if [[ "$url" == file://* ]]; then
+    path="${url#file://}"
+    [[ -f "$path" ]] && cp -f "$path" "$CACHE" && echo "$url" > "$LAST_URL_FILE"
+elif [[ "$url" == http* ]]; then
+    if curl -fsSL "$url" -o "$CACHE.tmp" 2>/dev/null; then
+        mv "$CACHE.tmp" "$CACHE"
+        echo "$url" > "$LAST_URL_FILE"
+    fi
+fi
+
+[[ -f "$CACHE" ]] && echo "$CACHE"
