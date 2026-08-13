@@ -221,8 +221,8 @@ case "$subsys" in
         ;;
     mic)
         case "$action" in
-            --inc|-i) adjust_volume "@DEFAULT_AUDIO_SOURCE@" "inc" "no-limit" ;;
-            --dec|-d) adjust_volume "@DEFAULT_AUDIO_SOURCE@" "dec" "no-limit" ;;
+            --inc|-i) adjust_volume "@DEFAULT_AUDIO_SOURCE@" "inc" "1.0" ;;
+            --dec|-d) adjust_volume "@DEFAULT_AUDIO_SOURCE@" "dec" "1.0" ;;
             --toggle) toggle_mute "@DEFAULT_AUDIO_SOURCE@" ;;
             *) echo "Invalid mic action." >&2; exit 1 ;;
         esac
