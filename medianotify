@@ -15,6 +15,13 @@ readonly EVENT_PIPE="$STATE_DIR/event_pipe"
 readonly NOTIFICATION_TIMEOUT=5000
 readonly NOTIFICATION_APP="Media Player"
 
+# Set NOTIFY_ENABLED=0 (env var, e.g. in autostart.sh) to stop sending
+# desktop notifications (notify-send) entirely -- useful if the dwm media
+# OSD (mediaosd.c) is meant to replace them rather than sit alongside
+# them. State tracking, the dwmblocks signal, and the dwm fifo push that
+# triggers the OSD all keep working regardless of this setting.
+readonly NOTIFY_ENABLED="${NOTIFY_ENABLED:-1}"
+
 # dwm's fifo (config.h: fifopath). Pushing "mediaosd 0" here pops open
 # the dwm media OSD (mediaosd.c) immediately on a real state change,
 # same trigger point as the dwmblocks signal below.
@@ -46,7 +53,9 @@ function die() {
 function check_dependencies() {
     command -v mediactl &>/dev/null || die "mediactl not found in PATH"
     command -v playerctl &>/dev/null || die "playerctl not found in PATH"
-    command -v notify-send &>/dev/null || die "notify-send not found"
+    if [[ "$NOTIFY_ENABLED" == "1" ]]; then
+        command -v notify-send &>/dev/null || die "notify-send not found"
+    fi
 }
 
 function init_state_dir() {
@@ -405,7 +414,7 @@ function handle_event() {
         fi
     fi
 
-    if should_notify "$last_state" "$state_key"; then
+    if [[ "$NOTIFY_ENABLED" == "1" ]] && should_notify "$last_state" "$state_key"; then
         send_notification "$last_state" "$state_key" "$art_url"
         if [[ -z "$art_url" ]]; then
             retry_notify_with_art "$state_key" "$last_state" &
