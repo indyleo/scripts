@@ -41,7 +41,7 @@ readonly CACHE_LIFETIME=1  # seconds
 
 # Custom Icons (Nerd Fonts recommended)
 readonly ICON_BROWSER="󰖟"
-readonly ICON_SONG=""
+readonly ICON_SONG="󰎈"
 readonly ICON_PLAYING=" "
 readonly ICON_PAUSED=" "
 readonly ICON_STOPPED=" "
@@ -236,19 +236,33 @@ function get_player_metadata() {
     echo "$status"$'\t'"$title"$'\t'"$artist"$'\t'"$album"$'\t'"$art_url"
 }
 
+function get_progress_raw() {
+    local player="$1"
+    local pct
+    pct=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" metadata --format '{{ position * 100 / mpris:length }}' 2>/dev/null)
+    if [[ -n "$pct" ]]; then
+        echo "$pct" | awk '{printf "%d", $1}'
+    else
+        echo "0"
+    fi
+}
+
 function get_state() {
     local filter="${1:-}"
-    local active_info type player status metadata
+    local active_info type player status title artist album art_url progress
     active_info=$(get_active_player "$filter")
     IFS='|' read -r type player status <<< "$active_info"
 
     if [[ "$type" == "idle" ]]; then
-        echo "idle"$'\t\t'"Idle"$'\t'"Idle"$'\t\t\t'
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "idle" "" "Idle" "Idle" "" "" "" "0"
         return
     fi
 
+    local metadata
     metadata=$(get_player_metadata "$player")
-    echo "$type"$'\t'"$player"$'\t'"$metadata"
+    IFS=$'\t' read -r status title artist album art_url <<< "$metadata"
+    progress=$(get_progress_raw "$player")
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$type" "$player" "$status" "$title" "$artist" "$album" "$art_url" "$progress"
 }
 
 function get_status_icon() {
@@ -309,13 +323,13 @@ function cmd_title() {
     local cutpoint="${1:-50}"
     local state title
     state=$(get_state "$SOURCE")
-    IFS=$'\t' read -r _ _ _ title _ _ _ <<< "$state"
+    IFS=$'\t' read -r _ _ _ title _ _ _ _ <<< "$state"
     format_title "$title" "$cutpoint"
 }
 function cmd_state() {
     local state type status
     state=$(get_state "$SOURCE")
-    IFS=$'\t' read -r type _ status _ <<< "$state"
+    IFS=$'\t' read -r type _ status _ _ _ _ _ <<< "$state"
     [[ "$type" == "idle" ]] && { echo "$ICON_IDLE"; return; }
     get_status_icon "$status"
 }
@@ -323,7 +337,7 @@ function cmd_state_title() {
     local cutpoint="${1:-50}"
     local state type status title icon
     state=$(get_state "$SOURCE")
-    IFS=$'\t' read -r type _ status title _ <<< "$state"
+    IFS=$'\t' read -r type _ status title _ _ _ _ _ <<< "$state"
     [[ "$type" == "idle" ]] && { echo "$ICON_IDLE Idle"; return; }
     icon=$(get_status_icon "$status")
     title=$(format_title "$title" "$cutpoint")
@@ -333,20 +347,6 @@ function cmd_state_title() {
 function cmd_play_pause() { send_control play-pause; }
 function cmd_next()       { send_control next; }
 function cmd_previous()   { send_control previous; }
-
-function cmd_progress_raw() {
-    local pct
-    # Calculate percentage: (position / length) * 100
-    # 2>/dev/null hides errors if no player is active or if it's a live stream with no length
-    pct=$(playerctl metadata --format '{{ position * 100 / mpris:length }}' 2>/dev/null)
-
-    if [[ -n "$pct" ]]; then
-        # Convert float to integer for the OSD
-        echo "$pct" | awk '{printf "%d", $1}'
-    else
-        echo "0"
-    fi
-}
 
 function cmd_progress_text() {
     # Get human-readable MM:SS string from playerctl
@@ -359,9 +359,15 @@ function cmd_progress_text() {
         return
     fi
 
-    # Reuse our raw percentage function to calculate the bar
-    local pct
-    pct=$(cmd_progress_raw)
+    # Get progress percentage for the active player
+    local active_info type player pct
+    active_info=$(get_active_player "$SOURCE")
+    IFS='|' read -r type player _ <<< "$active_info"
+    if [[ "$type" == "idle" ]]; then
+        pct=0
+    else
+        pct=$(get_progress_raw "$player")
+    fi
 
     # Draw a 10-character wide text progress bar
     local width=10
@@ -374,8 +380,6 @@ function cmd_progress_text() {
 
     echo "[$bar] $time_str"
 }
-
-
 
 # ============================================================================
 # CLICKABLE BLOCKS (dwmblocks-async)
@@ -425,8 +429,7 @@ INFORMATION COMMANDS:
     state                          Show only the status icon (Playing/Paused).
     title [limit]                  Show current title (default limit 50 chars).
     state-title [limit]            Show icon and title together.
-		progress                       Show playback progress.
-		progress_raw                   Show playback progress as raw percentage.
+    progress                       Show playback progress.
 
 CONTROL COMMANDS:
     play-pause                     Toggle playback.
@@ -464,7 +467,6 @@ function main() {
         previous)          cmd_previous ;;
         skip|forward)      cmd_skip "$@" ;;  # Forward/Skip
         back|rewind)       cmd_back "$@" ;;  # Back/Rewind
-        progress_raw)       cmd_progress_raw ;;
         progress)           cmd_progress_text ;;
         help|--help|-h)    show_help ;;
         *)                 die "Unknown command: $command" ;;
