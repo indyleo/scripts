@@ -18,13 +18,12 @@ readonly NOTIFICATION_APP="Media Player"
 # Set NOTIFY_ENABLED=0 (env var, e.g. in autostart.sh) to stop sending
 # desktop notifications (notify-send) entirely -- useful if the dwm media
 # OSD (mediaosd.c) is meant to replace them rather than sit alongside
-# them. State tracking, the dwmblocks signal, and the dwm fifo push that
+# them. State tracking, and the dwm fifo push that
 # triggers the OSD all keep working regardless of this setting.
 readonly NOTIFY_ENABLED="${NOTIFY_ENABLED:-1}"
 
 # dwm's fifo (config.h: fifopath). Pushing "mediaosd 0" here pops open
-# the dwm media OSD (mediaosd.c) immediately on a real state change,
-# same trigger point as the dwmblocks signal below.
+# the dwm media OSD (mediaosd.c) immediately on a real state change.
 readonly DWM_FIFO="${DWM_FIFO:-/tmp/dwm.fifo}"
 
 # Debounce settings (milliseconds)
@@ -84,15 +83,15 @@ function should_debounce() {
     return 1  # Don't debounce
 }
 
-function dwmblocks_signal() {
-    local signal="$1"
-    if [[ -z "$signal" ]]; then
-        echo "Usage: dwmblocks_signal SIGNAL" >&2
+function dwm_fifo() {
+    local message="$*"
+    if [[ -z "$message" ]]; then
+        echo "Usage: dwm_fifo MSG" >&2
         exit 1
     fi
-    if pgrep -x "dwmblocks" >/dev/null; then
-        pkill -RTMIN+"$signal" dwmblocks
-        echo "󰡕  Success: Sent signal $signal to dwmblocks"
+
+    if [[ -p "$DWM_FIFO" ]]; then
+        echo "$message" > "$DWM_FIFO"
     fi
     return 0
 }
@@ -401,8 +400,8 @@ function handle_event() {
     last_state=$(load_state)
 
     if [[ "$state_key" != "$last_state" ]]; then
-        dwmblocks_signal 23
-        [[ -p "$DWM_FIFO" ]] && echo "mediaosd 0" > "$DWM_FIFO" 2>/dev/null || true
+        dwm_fifo statusblock 0 2>/dev/null || true
+        dwm_fifo mediaosd 0 2>/dev/null || true
     fi
 
     local cache_key
