@@ -258,7 +258,9 @@ function get_progress_time() {
     local text
     text=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" metadata \
         --format '{{ duration(position) }} / {{ duration(mpris:length) }}' 2>/dev/null)
-    [[ -z "$text" || "$text" == " / " ]] && text=""
+    # Blank out whenever the length side is missing (e.g. YouTube ad breaks
+    # briefly report no mpris:length), not just when both sides are empty.
+    [[ -z "$text" || "$text" =~ /\ *$ ]] && text=""
     echo "$text"
 }
 
