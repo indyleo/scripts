@@ -15,6 +15,11 @@ readonly EVENT_PIPE="$STATE_DIR/event_pipe"
 readonly NOTIFICATION_TIMEOUT=5000
 readonly NOTIFICATION_APP="Media Player"
 
+# dwm's fifo (config.h: fifopath). Pushing "mediaosd 0" here pops open
+# the dwm media OSD (mediaosd.c) immediately on a real state change,
+# same trigger point as the dwmblocks signal below.
+readonly DWM_FIFO="${DWM_FIFO:-/tmp/dwm.fifo}"
+
 # Debounce settings (milliseconds)
 readonly DEBOUNCE_TIME_MS=120
 declare -g LAST_EVENT_TIME_MS=0
@@ -383,6 +388,7 @@ function handle_event() {
 
     if [[ "$state_key" != "$last_state" ]]; then
         dwmblocks_signal 23
+        [[ -p "$DWM_FIFO" ]] && echo "mediaosd 0" > "$DWM_FIFO" 2>/dev/null || true
     fi
 
     local cache_key

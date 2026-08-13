@@ -39,6 +39,14 @@ readonly PLAYER_LIST_CACHE="$CACHE_DIR/players"
 readonly CACHE_LOCKFILE="$CACHE_DIR/players.lock"
 readonly CACHE_LIFETIME=1  # seconds
 
+# Art cache for `mediactl art`. Uses the same md5(art_url)-of-the-URL key
+# scheme as medianotify's fetch_art(), and checks medianotify's cache dir
+# first, so the two never download the same cover twice.
+readonly ART_CACHE_DIR="${XDG_RUNTIME_DIR:-/tmp}/mediactl"
+readonly MEDIANOTIFY_CACHE_DIR="${XDG_RUNTIME_DIR:-/tmp}/medianotify"
+readonly ART_FETCH_TIMEOUT=2 # seconds; kept short since callers (e.g. the
+                              # dwm media OSD) may block on this
+
 # Custom Icons (Nerd Fonts recommended)
 readonly ICON_BROWSER="󰖟"
 readonly ICON_SONG="󰎈"
@@ -348,6 +356,46 @@ function cmd_play_pause() { send_control play-pause; }
 function cmd_next()       { send_control next; }
 function cmd_previous()   { send_control previous; }
 
+function cmd_art() {
+    local state art_url
+    state=$(get_state "$SOURCE")
+    IFS=$'\t' read -r _ _ _ _ _ _ art_url _ <<< "$state"
+    [[ -z "$art_url" ]] && return 0
+
+    if [[ "$art_url" == file://* ]]; then
+        local path="${art_url#file://}"
+        [[ -f "$path" ]] && echo "$path"
+        return 0
+    fi
+
+    if [[ "$art_url" == http://* || "$art_url" == https://* ]]; then
+        # NOTE: intentionally `echo` (not `echo -n`) below -- this must
+        # match medianotify's fetch_art() hash exactly (which also uses
+        # a trailing-newline echo) or the caches won't line up.
+        local hash cache_path notify_cache
+        hash=$(echo "$art_url" | md5sum | cut -d' ' -f1)
+
+        notify_cache="$MEDIANOTIFY_CACHE_DIR/art_${hash}.jpg"
+        if [[ -f "$notify_cache" ]]; then
+            echo "$notify_cache"
+            return 0
+        fi
+
+        mkdir -p "$ART_CACHE_DIR"
+        cache_path="$ART_CACHE_DIR/art_${hash}.jpg"
+        if [[ ! -f "$cache_path" ]]; then
+            curl -fsSL --max-time "$ART_FETCH_TIMEOUT" -o "$cache_path" "$art_url" 2>/dev/null || {
+                rm -f "$cache_path"
+                return 1
+            }
+        fi
+        echo "$cache_path"
+        return 0
+    fi
+
+    return 0
+}
+
 function cmd_progress_text() {
     # Get human-readable MM:SS string from playerctl
     local time_str
@@ -430,6 +478,9 @@ INFORMATION COMMANDS:
     title [limit]                  Show current title (default limit 50 chars).
     state-title [limit]            Show icon and title together.
     progress                       Show playback progress.
+    art                            Print a local file path to the active
+                                    track's artwork (downloads/caches
+                                    remote art as needed; empty if none).
 
 CONTROL COMMANDS:
     play-pause                     Toggle playback.
@@ -468,6 +519,7 @@ function main() {
         skip|forward)      cmd_skip "$@" ;;  # Forward/Skip
         back|rewind)       cmd_back "$@" ;;  # Back/Rewind
         progress)           cmd_progress_text ;;
+        art)                cmd_art ;;
         help|--help|-h)    show_help ;;
         *)                 die "Unknown command: $command" ;;
     esac
