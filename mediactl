@@ -9,7 +9,7 @@ set -euo pipefail
 # ============================================================================
 
 readonly SCRIPT_NAME="mediactl"
-readonly VERSION="1.3.0"
+readonly VERSION="1.3.1"
 
 # Priority 1: Browsers (Usually video content)
 readonly BROWSER_PLAYERS=(
@@ -228,16 +228,11 @@ function get_player_metadata() {
     local status combined title artist album art_url
     status=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" status 2>/dev/null || echo "Stopped")
 
-    # Single combined query instead of 4 separate playerctl calls. Each
-    # separate call is its own D-Bus round trip, and some MPRIS bridges
-    # (e.g. firefox-mpris) only report mpris:artUrl for a brief window
-    # right after a track loads - by the time a later, separate call for
-    # just artUrl runs, it may have already gone. One query = one
-    # consistent snapshot of all fields at the same instant.
+    # FIX: Use \x1f (Unit Separator) instead of \t so bash doesn't collapse missing fields
     combined=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" metadata \
-        --format $'{{title}}\t{{artist}}\t{{album}}\t{{mpris:artUrl}}' 2>/dev/null) || combined=""
+        --format $'{{title}}\x1f{{artist}}\x1f{{album}}\x1f{{mpris:artUrl}}' 2>/dev/null) || combined=""
 
-    IFS=$'\t' read -r title artist album art_url <<< "$combined"
+    IFS=$'\x1f' read -r title artist album art_url <<< "$combined"
     [[ -z "$title" ]] && title="Unknown"
     [[ -z "$artist" ]] && artist="Unknown"
 
@@ -255,11 +250,6 @@ function get_progress_raw() {
     fi
 }
 
-# Human-readable "M:SS / M:SS" elapsed/total, for the specific active
-# player (unlike cmd_progress_text's own playerctl call below, which
-# queries whatever player playerctl defaults to -- this one is always
-# scoped with -p so it matches the rest of get_state()). Empty string if
-# position/length aren't available (e.g. a live stream with no duration).
 function get_progress_time() {
     local player="$1"
     local text
@@ -273,7 +263,7 @@ function get_state() {
     local filter="${1:-}"
     local active_info type player status title artist album art_url progress progress_time
     active_info=$(get_active_player "$filter")
-    IFS='|' read -r type player status <<< "$active_info"
+    IFS='|' read -r type player _ <<< "$active_info"
 
     if [[ "$type" == "idle" ]]; then
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "idle" "" "Idle" "Idle" "" "" "" "0" ""
@@ -282,7 +272,14 @@ function get_state() {
 
     local metadata
     metadata=$(get_player_metadata "$player")
-    IFS=$'\t' read -r status title artist album art_url <<< "$metadata"
+
+    # FIX: Use awk instead of read so empty tab fields aren't collapsed
+    status=$(echo "$metadata" | awk -F'\t' '{print $1}')
+    title=$(echo "$metadata" | awk -F'\t' '{print $2}')
+    artist=$(echo "$metadata" | awk -F'\t' '{print $3}')
+    album=$(echo "$metadata" | awk -F'\t' '{print $4}')
+    art_url=$(echo "$metadata" | awk -F'\t' '{print $5}')
+
     progress=$(get_progress_raw "$player")
     progress_time=$(get_progress_time "$player")
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$type" "$player" "$status" "$title" "$artist" "$album" "$art_url" "$progress" "$progress_time"
@@ -313,21 +310,18 @@ function format_title() {
 function send_control() {
     local command="$1"
     shift
-    local active_info type player status
+    local active_info type player _
     active_info=$(get_active_player "$SOURCE")
-    IFS='|' read -r type player status <<< "$active_info"
+    IFS='|' read -r type player _ <<< "$active_info"
 
     [[ "$type" == "idle" ]] && { echo "No active player." >&2; return 1; }
 
     timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" "$command" "$@" 2>/dev/null
 }
 
-# Handles forward skipping (default +)
 function cmd_skip() {
     local val="${1:-5}"
-    # Strip any existing plus/minus to format correctly
     local clean_val="${val#[+-]}"
-
     if [[ "$val" == -* ]]; then
         send_control position "$clean_val-"
     else
@@ -335,7 +329,6 @@ function cmd_skip() {
     fi
 }
 
-# Handles backward skipping (always -)
 function cmd_back() {
     local val="${1:-5}"
     local clean_val="${val#[+-]}"
@@ -343,25 +336,32 @@ function cmd_back() {
 }
 
 function cmd_status() { get_state "$SOURCE"; }
+
 function cmd_title() {
     local cutpoint="${1:-50}"
     local state title
     state=$(get_state "$SOURCE")
-    IFS=$'\t' read -r _ _ _ title _ _ _ _ <<< "$state"
+    title=$(echo "$state" | awk -F'\t' '{print $4}')
     format_title "$title" "$cutpoint"
 }
+
 function cmd_state() {
     local state type status
     state=$(get_state "$SOURCE")
-    IFS=$'\t' read -r type _ status _ _ _ _ _ <<< "$state"
+    type=$(echo "$state" | awk -F'\t' '{print $1}')
+    status=$(echo "$state" | awk -F'\t' '{print $3}')
     [[ "$type" == "idle" ]] && { echo "$ICON_IDLE"; return; }
     get_status_icon "$status"
 }
+
 function cmd_state_title() {
     local cutpoint="${1:-50}"
     local state type status title icon
     state=$(get_state "$SOURCE")
-    IFS=$'\t' read -r type _ status title _ _ _ _ _ <<< "$state"
+    type=$(echo "$state" | awk -F'\t' '{print $1}')
+    status=$(echo "$state" | awk -F'\t' '{print $3}')
+    title=$(echo "$state" | awk -F'\t' '{print $4}')
+
     [[ "$type" == "idle" ]] && { echo "$ICON_IDLE Idle"; return; }
     icon=$(get_status_icon "$status")
     title=$(format_title "$title" "$cutpoint")
@@ -375,19 +375,20 @@ function cmd_previous()   { send_control previous; }
 function cmd_art() {
     local state art_url
     state=$(get_state "$SOURCE")
-    IFS=$'\t' read -r _ _ _ _ _ _ art_url _ <<< "$state"
+    art_url=$(echo "$state" | awk -F'\t' '{print $7}')
     [[ -z "$art_url" ]] && return 0
 
     if [[ "$art_url" == file://* ]]; then
         local path="${art_url#file://}"
+
+        # FIX: URL-decode the path (converts %20 to spaces, etc.)
+        path="$(printf '%b' "${path//%/\\x}")"
+
         [[ -f "$path" ]] && echo "$path"
         return 0
     fi
 
     if [[ "$art_url" == http://* || "$art_url" == https://* ]]; then
-        # NOTE: intentionally `echo` (not `echo -n`) below -- this must
-        # match medianotify's fetch_art() hash exactly (which also uses
-        # a trailing-newline echo) or the caches won't line up.
         local hash cache_path notify_cache
         hash=$(echo "$art_url" | md5sum | cut -d' ' -f1)
 
@@ -413,10 +414,6 @@ function cmd_art() {
 }
 
 function cmd_progress_text() {
-    # Progress percentage and human-readable time, both scoped to the
-    # same active player (get_progress_time queries with -p, unlike a
-    # bare `playerctl metadata`, so this can't mismatch when more than
-    # one player is running).
     local active_info type player pct time_str
     active_info=$(get_active_player "$SOURCE")
     IFS='|' read -r type player _ <<< "$active_info"
@@ -430,7 +427,6 @@ function cmd_progress_text() {
     time_str=$(get_progress_time "$player")
     [[ -z "$time_str" ]] && time_str="00:00 / 00:00"
 
-    # Draw a 10-character wide text progress bar
     local width=10
     local filled=$(( pct * width / 100 ))
     local empty=$(( width - filled ))
@@ -442,19 +438,15 @@ function cmd_progress_text() {
     echo "[$bar] $time_str"
 }
 
-# Click handling
 readonly CLICK_LOG="${XDG_RUNTIME_DIR:-/tmp}/mediactl-click.log"
 
 function handle_block_button() {
     [[ -z "${BLOCK_BUTTON:-}" ]] && return 0
-
     case "$BLOCK_BUTTON" in
-        1) cmd_play_pause >>"$CLICK_LOG" 2>&1 || true ;;  # left click:   play/pause
-        4) cmd_previous   >>"$CLICK_LOG" 2>&1 || true ;;  # scroll up:    previous
-        5) cmd_next       >>"$CLICK_LOG" 2>&1 || true ;;  # scroll down:  next
+        1) cmd_play_pause >>"$CLICK_LOG" 2>&1 || true ;;
+        4) cmd_previous   >>"$CLICK_LOG" 2>&1 || true ;;
+        5) cmd_next       >>"$CLICK_LOG" 2>&1 || true ;;
     esac
-
-    # Give the player a brief moment to update state before we report it.
     sleep 0.1
 }
 
@@ -466,34 +458,6 @@ function show_help() {
     cat << EOF
 $SCRIPT_NAME v$VERSION
 A unified media controller for browsers and music players.
-
-USAGE:
-    $SCRIPT_NAME [options] <command> [args]
-
-OPTIONS:
-    -s, --source <browser|song>    Force command to a specific player type.
-
-INFORMATION COMMANDS:
-    status                         Get raw tab-separated player state.
-    state                          Show only the status icon (Playing/Paused).
-    title [limit]                  Show current title (default limit 50 chars).
-    state-title [limit]            Show icon and title together.
-    progress                       Show playback progress.
-    art                            Print a local file path to the active
-                                    track's artwork (downloads/caches
-                                    remote art as needed; empty if none).
-
-CONTROL COMMANDS:
-    play-pause                     Toggle playback.
-    next                           Skip to next track.
-    previous                       Return to previous track.
-    skip [seconds]                 Seek forward (default 5s). Use - for backward.
-    back [seconds]                 Seek backward (default 5s).
-
-EXAMPLES:
-    $SCRIPT_NAME skip 15            # Move forward 15 seconds
-    $SCRIPT_NAME back               # Move backward 5 seconds
-    $SCRIPT_NAME --source song next # Skip track only on music players
 EOF
 }
 
@@ -511,16 +475,16 @@ function main() {
 
     case "$command" in
         status)            handle_block_button; cmd_status ;;
-        title)              handle_block_button; cmd_title "$@" ;;
-        state)              handle_block_button; cmd_state ;;
-        state-title)        handle_block_button; cmd_state_title "$@" ;;
+        title)             handle_block_button; cmd_title "$@" ;;
+        state)             handle_block_button; cmd_state ;;
+        state-title)       handle_block_button; cmd_state_title "$@" ;;
         play-pause)        cmd_play_pause ;;
         next)              cmd_next ;;
         previous)          cmd_previous ;;
-        skip|forward)      cmd_skip "$@" ;;  # Forward/Skip
-        back|rewind)       cmd_back "$@" ;;  # Back/Rewind
-        progress)           cmd_progress_text ;;
-        art)                cmd_art ;;
+        skip|forward)      cmd_skip "$@" ;;
+        back|rewind)       cmd_back "$@" ;;
+        progress)          cmd_progress_text ;;
+        art)               cmd_art ;;
         help|--help|-h)    show_help ;;
         *)                 die "Unknown command: $command" ;;
     esac
