@@ -334,6 +334,49 @@ function cmd_play_pause() { send_control play-pause; }
 function cmd_next()       { send_control next; }
 function cmd_previous()   { send_control previous; }
 
+function cmd_progress_raw() {
+    local pct
+    # Calculate percentage: (position / length) * 100
+    # 2>/dev/null hides errors if no player is active or if it's a live stream with no length
+    pct=$(playerctl metadata --format '{{ position * 100 / mpris:length }}' 2>/dev/null)
+
+    if [[ -n "$pct" ]]; then
+        # Convert float to integer for the OSD
+        echo "$pct" | awk '{printf "%d", $1}'
+    else
+        echo "0"
+    fi
+}
+
+function cmd_progress_text() {
+    # Get human-readable MM:SS string from playerctl
+    local time_str
+    time_str=$(playerctl metadata --format '{{ duration(position) }} / {{ duration(mpris:length) }}' 2>/dev/null)
+
+    # If no media is playing or playerctl fails, return a default string
+    if [[ -z "$time_str" || "$time_str" == " / " ]]; then
+        echo "[··········] 00:00 / 00:00"
+        return
+    fi
+
+    # Reuse our raw percentage function to calculate the bar
+    local pct
+    pct=$(cmd_progress_raw)
+
+    # Draw a 10-character wide text progress bar
+    local width=10
+    local filled=$(( pct * width / 100 ))
+    local empty=$(( width - filled ))
+
+    local bar=""
+    for ((i=0; i<filled; i++)); do bar+="█"; done
+    for ((i=0; i<empty; i++)); do bar+="·"; done
+
+    echo "[$bar] $time_str"
+}
+
+
+
 # ============================================================================
 # CLICKABLE BLOCKS (dwmblocks-async)
 # ============================================================================
@@ -354,8 +397,8 @@ function handle_block_button() {
         1) cmd_play_pause >>"$CLICK_LOG" 2>&1 || true ;;  # left click:   play/pause
         4) cmd_previous   >>"$CLICK_LOG" 2>&1 || true ;;  # scroll up:    previous
         5) cmd_next       >>"$CLICK_LOG" 2>&1 || true ;;  # scroll down:  next
-        # 2 (middle) and 3 (right) are left free for you to bind, e.g.:
-        # 3) setsid -f "${TERMINAL:-xterm}" -e playerctl -p "$(cmd... )" >/dev/null 2>&1 ;;
+            # 2 (middle) and 3 (right) are left free for you to bind, e.g.:
+            # 3) setsid -f "${TERMINAL:-xterm}" -e playerctl -p "$(cmd... )" >/dev/null 2>&1 ;;
     esac
 
     # Give the player a brief moment to update state before we report it.
@@ -382,6 +425,8 @@ INFORMATION COMMANDS:
     state                          Show only the status icon (Playing/Paused).
     title [limit]                  Show current title (default limit 50 chars).
     state-title [limit]            Show icon and title together.
+		progress                       Show playback progress.
+		progress_raw                   Show playback progress as raw percentage.
 
 CONTROL COMMANDS:
     play-pause                     Toggle playback.
@@ -419,6 +464,8 @@ function main() {
         previous)          cmd_previous ;;
         skip|forward)      cmd_skip "$@" ;;  # Forward/Skip
         back|rewind)       cmd_back "$@" ;;  # Back/Rewind
+        progress_raw)       cmd_progress_raw ;;
+        progress)           cmd_progress_text ;;
         help|--help|-h)    show_help ;;
         *)                 die "Unknown command: $command" ;;
     esac
