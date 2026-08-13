@@ -332,7 +332,11 @@ function retry_notify_with_art() {
         [[ -z "$cur" ]] && return
 
         local type player status title artist album art_url
-        IFS=$'\t' read -r type player status title artist album art_url <<< "$cur"
+        # trailing `_` absorbs progress + progress_time (mediactl status
+        # is now 9 fields) -- without it, `read` dumps any overflow
+        # fields into the last named var and art_url below silently
+        # picks up a mangled, unfetchable URL.
+        IFS=$'\t' read -r type player status title artist album art_url _ <<< "$cur"
         local cur_key="$type"$'\t'"$player"$'\t'"$status"$'\t'"$title"$'\t'"$artist"$'\t'"$album"
 
         # Bail if the track changed underneath us - don't show late art
@@ -385,7 +389,8 @@ function handle_event() {
     current_state=$(mediactl status 2>/dev/null || echo $'idle\t\tIdle\t\t\t')
 
     local type player status title artist album art_url
-    IFS=$'\t' read -r type player status title artist album art_url <<< "$current_state"
+    # same trailing `_` fix as retry_notify_with_art() above
+    IFS=$'\t' read -r type player status title artist album art_url _ <<< "$current_state"
 
     if [[ -z "$type" ]]; then
         return

@@ -255,14 +255,28 @@ function get_progress_raw() {
     fi
 }
 
+# Human-readable "M:SS / M:SS" elapsed/total, for the specific active
+# player (unlike cmd_progress_text's own playerctl call below, which
+# queries whatever player playerctl defaults to -- this one is always
+# scoped with -p so it matches the rest of get_state()). Empty string if
+# position/length aren't available (e.g. a live stream with no duration).
+function get_progress_time() {
+    local player="$1"
+    local text
+    text=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" metadata \
+        --format '{{ duration(position) }} / {{ duration(mpris:length) }}' 2>/dev/null)
+    [[ -z "$text" || "$text" == " / " ]] && text=""
+    echo "$text"
+}
+
 function get_state() {
     local filter="${1:-}"
-    local active_info type player status title artist album art_url progress
+    local active_info type player status title artist album art_url progress progress_time
     active_info=$(get_active_player "$filter")
     IFS='|' read -r type player status <<< "$active_info"
 
     if [[ "$type" == "idle" ]]; then
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "idle" "" "Idle" "Idle" "" "" "" "0"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "idle" "" "Idle" "Idle" "" "" "" "0" ""
         return
     fi
 
@@ -270,8 +284,10 @@ function get_state() {
     metadata=$(get_player_metadata "$player")
     IFS=$'\t' read -r status title artist album art_url <<< "$metadata"
     progress=$(get_progress_raw "$player")
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$type" "$player" "$status" "$title" "$artist" "$album" "$art_url" "$progress"
+    progress_time=$(get_progress_time "$player")
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$type" "$player" "$status" "$title" "$artist" "$album" "$art_url" "$progress" "$progress_time"
 }
+
 
 function get_status_icon() {
     case "$1" in
@@ -397,25 +413,22 @@ function cmd_art() {
 }
 
 function cmd_progress_text() {
-    # Get human-readable MM:SS string from playerctl
-    local time_str
-    time_str=$(playerctl metadata --format '{{ duration(position) }} / {{ duration(mpris:length) }}' 2>/dev/null)
+    # Progress percentage and human-readable time, both scoped to the
+    # same active player (get_progress_time queries with -p, unlike a
+    # bare `playerctl metadata`, so this can't mismatch when more than
+    # one player is running).
+    local active_info type player pct time_str
+    active_info=$(get_active_player "$SOURCE")
+    IFS='|' read -r type player _ <<< "$active_info"
 
-    # If no media is playing or playerctl fails, return a default string
-    if [[ -z "$time_str" || "$time_str" == " / " ]]; then
+    if [[ "$type" == "idle" ]]; then
         echo "[··········] 00:00 / 00:00"
         return
     fi
 
-    # Get progress percentage for the active player
-    local active_info type player pct
-    active_info=$(get_active_player "$SOURCE")
-    IFS='|' read -r type player _ <<< "$active_info"
-    if [[ "$type" == "idle" ]]; then
-        pct=0
-    else
-        pct=$(get_progress_raw "$player")
-    fi
+    pct=$(get_progress_raw "$player")
+    time_str=$(get_progress_time "$player")
+    [[ -z "$time_str" ]] && time_str="00:00 / 00:00"
 
     # Draw a 10-character wide text progress bar
     local width=10
