@@ -151,7 +151,10 @@ function get_player_status_safe() {
 function get_players_by_type() {
     local type="$1"
     local all_players
-    all_players=$(get_all_players)
+    # get_all_players legitimately returns 1 on flock contention or a
+    # playerctl timeout (it already echoes "" in that case) -- don't let
+    # that bare non-zero status trip `set -e` and kill the whole script.
+    all_players=$(get_all_players) || true
 
     while IFS= read -r player; do
         [[ -z "$player" ]] && continue
@@ -427,6 +430,11 @@ function cmd_progress_text() {
     time_str=$(get_progress_time "$player")
     [[ -z "$time_str" ]] && time_str="00:00 / 00:00"
 
+    # Clamp: a momentarily-off mpris:length or seek edge case can push
+    # this outside 0-100, which would otherwise draw a malformed bar.
+    (( pct < 0 )) && pct=0
+    (( pct > 100 )) && pct=100
+
     local width=10
     local filled=$(( pct * width / 100 ))
     local empty=$(( width - filled ))
@@ -491,3 +499,4 @@ function main() {
 }
 
 main "$@"
+

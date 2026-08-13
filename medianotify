@@ -478,8 +478,13 @@ function main_loop() {
             current_players=$(playerctl -l 2>/dev/null || echo "")
 
             if [[ "$current_players" != "$known_players" ]]; then
-                # Write a special internal signal to the pipe to trigger update
-                echo "INTERNAL_UPDATE_PLAYERS $current_players" > "$EVENT_PIPE"
+                # Write a special internal signal to the pipe to trigger update.
+                # playerctl -l returns one player per line; the main loop reads
+                # the pipe one line at a time, so a raw multi-line write here
+                # would get truncated to the first player and leak the rest as
+                # bogus "events" into capture_art_from_line/handle_event. Collapse
+                # to a single line first.
+                echo "INTERNAL_UPDATE_PLAYERS ${current_players//$'\n'/ }" > "$EVENT_PIPE"
                 known_players="$current_players"
             fi
             sleep 2
@@ -528,3 +533,4 @@ trap cleanup SIGINT SIGTERM EXIT
 
 check_dependencies
 main_loop
+
