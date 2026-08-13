@@ -314,10 +314,10 @@ else icon="󰕿"; msg="${vol}%"; fi
 }
 
 function vvolume_raw() {
-    # Gets the raw volume from WirePlumber, converts to percentage, and prints just the integer
     local vol_float
     vol_float=$(wpctl get-volume @DEFAULT_AUDIO_SINK@ | awk '{print $2}')
-    echo "$vol_float * 100" | awk '{printf "%d", $0}'
+    # Pass the float to awk, then tell awk to multiply it by 100
+    echo "$vol_float" | awk '{printf "%d", $1 * 100}'
 }
 
 function mmicrophone() {
@@ -336,10 +336,10 @@ function mmicrophone() {
 }
 
 function mmicrophone_raw() {
-    # Gets the raw microphone volume from WirePlumber, converts to percentage
     local mic_float
     mic_float=$(wpctl get-volume @DEFAULT_AUDIO_SOURCE@ | awk '{print $2}')
-    echo "$mic_float * 100" | awk '{printf "%d", $0}'
+    # Pass the float to awk, then tell awk to multiply it by 100
+    echo "$mic_float" | awk '{printf "%d", $1 * 100}'
 }
 
 function bbrightness() {
