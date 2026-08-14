@@ -24,7 +24,24 @@ readonly NOTIFY_ENABLED="${NOTIFY_ENABLED:-1}"
 
 # dwm's fifo (config.h: fifopath). Pushing "mediaosd 0" here pops open
 # the dwm media OSD (mediaosd.c) immediately on a real state change.
+# Harmless left in place under quickshell -- dwm_fifo() is a no-op
+# whenever $DWM_FIFO isn't actually a fifo.
 readonly DWM_FIFO="${DWM_FIFO:-/tmp/dwm.fifo}"
+
+# quickshell's equivalent entry point: shell.qml exposes an IpcHandler
+# with target "mediaosd" and a show() function that refreshes the bar
+# pill AND pops the media OSD, so this one call replaces both dwm_fifo
+# pushes above when running under quickshell. Set QS_IPC_ENABLED=0 to
+# skip this (e.g. running under dwm only, no quickshell). QS_CMD lets
+# you point at a named config: QS_CMD="qs -c mysheII" in autostart.sh.
+readonly QS_IPC_ENABLED="${QS_IPC_ENABLED:-1}"
+readonly QS_CMD="${QS_CMD:-qs}"
+
+function qs_mediaosd() {
+    [[ "$QS_IPC_ENABLED" == "1" ]] || return 0
+    command -v "${QS_CMD%% *}" &>/dev/null || return 0
+    $QS_CMD ipc call mediaosd show >/dev/null 2>&1 || true
+}
 
 # Debounce settings (milliseconds)
 readonly DEBOUNCE_TIME_MS=120
@@ -402,6 +419,7 @@ function handle_event() {
     if [[ "$state_key" != "$last_state" ]]; then
         dwm_fifo statusblock 0 2>/dev/null || true
         dwm_fifo mediaosd 0 2>/dev/null || true
+        qs_mediaosd
     fi
 
     local cache_key
