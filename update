@@ -11,7 +11,7 @@ function run_priv() {
         if command -v sudo &>/dev/null; then
             sudo "$@"
         else
-            echo "❌ Error: This command requires root privileges, but sudo is not installed."
+            echo " Error: This command requires root privileges, but sudo is not installed."
             return 1
         fi
     else
@@ -22,7 +22,7 @@ function run_priv() {
 # === Core Functions ===
 
 function update_system() {
-    echo -e "\n🔄 Detecting OS and updating system packages..."
+    echo -e "\n Detecting OS and updating system packages..."
 
     if [ -f /etc/os-release ]; then
         # Source the OS release file to get ID and ID_LIKE
@@ -31,48 +31,48 @@ function update_system() {
         # Normalize distros based on ID or ID_LIKE
         case "${ID:-linux}" in
             debian|ubuntu|linuxmint|pop|kali|raspbian)
-                echo "👉 Detected Debian/Ubuntu based system."
+                echo " Detected Debian/Ubuntu based system."
                 run_priv apt-get update && run_priv apt-get upgrade -y && run_priv apt-get autoremove -y
                 ;;
             fedora|rhel|centos|almalinux|rocky)
-                echo "👉 Detected RHEL/Fedora based system."
+                echo " Detected RHEL/Fedora based system."
                 run_priv dnf upgrade --refresh -y
                 ;;
             arch|manjaro|endeavouros|garuda)
-                echo "👉 Detected Arch Linux based system."
+                echo " Detected Arch Linux based system."
 
                 # Check if running as root (AUR helpers generally discourage/block root)
                 if [ "$EUID" -eq 0 ]; then
-                    echo "⚠️  Running as root: Skipping AUR helpers and using pacman directly."
+                    echo "  Running as root: Skipping AUR helpers and using pacman directly."
                     pacman -Syu --noconfirm
                 else
                     # Check for Common AUR Helpers
                     if command -v paru &>/dev/null; then
-                        echo "✨ Found AUR helper: paru"
+                        echo " Found AUR helper: paru"
                         # paru updates both repo and AUR
                         paru -Syu
                     elif command -v yay &>/dev/null; then
-                        echo "✨ Found AUR helper: yay"
+                        echo " Found AUR helper: yay"
                         yay -Syu
                     elif command -v pikaur &>/dev/null; then
-                        echo "✨ Found AUR helper: pikaur"
+                        echo " Found AUR helper: pikaur"
                         pikaur -Syu
                     else
-                        echo "ℹ️  No AUR helper found. Using standard pacman."
+                        echo " No AUR helper found. Using standard pacman."
                         run_priv pacman -Syu --noconfirm
                     fi
                 fi
                 ;;
             opensuse*|suse)
-                echo "👉 Detected OpenSUSE."
+                echo " Detected OpenSUSE."
                 run_priv zypper refresh && run_priv zypper update -y
                 ;;
             alpine)
-                echo "👉 Detected Alpine Linux."
+                echo " Detected Alpine Linux."
                 run_priv apk update && run_priv apk upgrade
                 ;;
             void)
-                echo "👉 Detected Void Linux."
+                echo " Detected Void Linux."
                 run_priv xbps-install -Su
                 ;;
             *)
@@ -80,10 +80,10 @@ function update_system() {
                 if [[ "${ID_LIKE:-}" == *"arch"* ]]; then
                     # Repeat Arch Logic for ID_LIKE matches
                     if [ "$EUID" -ne 0 ] && command -v yay &>/dev/null; then
-                        echo "✨ Found AUR helper: yay"
+                        echo " Found AUR helper: yay"
                         yay -Syu
                     elif [ "$EUID" -ne 0 ] && command -v paru &>/dev/null; then
-                        echo "✨ Found AUR helper: paru"
+                        echo " Found AUR helper: paru"
                         paru -Syu
                     else
                         run_priv pacman -Syu --noconfirm
@@ -93,46 +93,46 @@ function update_system() {
                 elif [[ "${ID_LIKE:-}" == *"rhel"* || "${ID_LIKE:-}" == *"fedora"* ]]; then
                     run_priv dnf upgrade --refresh -y
                 else
-                    echo "⚠️  Could not detect package manager for '$ID'. Skipping system update."
+                    echo "  Could not detect package manager for '$ID'. Skipping system update."
                 fi
                 ;;
         esac
     else
-        echo "⚠️  /etc/os-release not found. Cannot determine OS."
+        echo "  /etc/os-release not found. Cannot determine OS."
     fi
 }
 
 function update_flatpak() {
     if command -v flatpak &>/dev/null; then
-        echo -e "\n📦 Updating Flatpak..."
+        echo -e "\n Updating Flatpak..."
         flatpak update -y
     fi
 }
 
 function update_rustup() {
     if command -v rustup &>/dev/null; then
-        echo -e "\n🦀 Updating Rustup..."
+        echo -e "\n Updating Rustup..."
         rustup update
     fi
 }
 
 function update_bob() {
     if command -v bob &>/dev/null; then
-        echo -e "\n🎛️ Updating Bob (Neovim Version Manager)..."
+        echo -e "\n Updating Bob (Neovim Version Manager)..."
         bob update
     fi
 }
 
 function update_pipx() {
     if command -v pipx &>/dev/null; then
-        echo -e "\n🐍 Updating pipx..."
+        echo -e "\n Updating pipx..."
         pipx upgrade-all
     fi
 }
 
 function update_neovim() {
     if command -v nvim &>/dev/null; then
-        echo -e "\n💡 Updating Neovim plugins..."
+        echo -e "\n Updating Neovim plugins..."
         nvim --headless "+PackUpdateForce" +qa
     fi
 }
@@ -144,10 +144,10 @@ function update_tmux_plugins() {
     fi
 
     if [ -x "$TPM" ]; then
-        echo -e "\n🔧 Updating tmux plugins..."
+        echo -e "\n Updating tmux plugins..."
         "$TPM" all
     else
-        echo "ℹ️  TPM script not found. Skipping."
+        echo " TPM script not found. Skipping."
     fi
 }
 
@@ -158,10 +158,10 @@ function reload_tmux_config() {
 
         if [ -f "$tmux_conf" ]; then
             tmux source-file "$tmux_conf"
-            echo "♻️  Reloaded tmux config"
+            echo "󰑓 Reloaded tmux config"
         fi
     else
-        echo "ℹ️  Not inside a tmux session."
+        echo " Not inside a tmux session."
     fi
 }
 
@@ -179,7 +179,7 @@ function run_all() {
 # === Menus ===
 
 function fzf_menu() {
-    echo -e "🔄 System Update\n📦 Flatpak Update\n🦀 Rustup Update\n🎛️ Bob Update\n🐍 pipx Update\n💡 Neovim Plugin Update\n🔧 Tmux Plugin Update\n♻️ Reload Tmux Config\n✅ Run All\n❌ Exit" | fzf --prompt="Dashboard > "
+    echo -e "󰚰 System Update\n Flatpak Update\n Rustup Update\n Bob Update\n pipx Update\n Neovim Plugin Update\n Tmux Plugin Update\n󰑓 Reload Tmux Config\n✅ Run All\n❌ Exit" | fzf --prompt="Dashboard > "
 }
 
 function simple_menu() {
@@ -197,7 +197,7 @@ function simple_menu() {
             "Tmux Plugin Update") update_tmux_plugins; return 0 ;;
             "Reload Tmux Config") reload_tmux_config; return 0 ;;
             "Run All") run_all; return 0 ;;
-            "Exit") echo "❌ Exit"; return 0 ;;
+            "Exit") echo "Exited"; return 0 ;;
             *) echo "Invalid option $REPLY" ;;
         esac
     done
@@ -227,6 +227,6 @@ while true; do
         *"Exit") break ;;
     esac
 
-    echo -e "\n✅ Done. Press Enter to return to the dashboard..."
+    echo -e "\n Done. Press Enter to return to the dashboard..."
     read -r
 done
