@@ -225,48 +225,60 @@ function get_active_player() {
 # ============================================================================
 
 function get_player_metadata() {
+    # OPTIMIZATION: one playerctl call instead of three (status,
+    # title/artist/album/artUrl, position%, position/length text).
+    # playerctl's --format template supports {{status}}, {{position}}
+    # and {{mpris:length}} directly alongside the usual metadata fields,
+    # so all of it comes back from a single MPRIS round trip. Percent
+    # and the "M:SS / M:SS" text are then computed locally in
+    # compute_progress() instead of asking playerctl to format them,
+    # which used to cost two more playerctl invocations by itself.
     local player="$1"
-    [[ "$player" == "idle" ]] && { echo "Idle||||"; return 0; }
+    [[ "$player" == "idle" ]] && { printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "Idle" "Idle" "" "" "" "0" "0"; return 0; }
 
-    local status combined title artist album art_url
-    status=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" status 2>/dev/null || echo "Stopped")
-
+    local combined status title artist album art_url position length
     # FIX: Use \x1f (Unit Separator) instead of \t so bash doesn't collapse missing fields
     combined=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" metadata \
-        --format $'{{title}}\x1f{{artist}}\x1f{{album}}\x1f{{mpris:artUrl}}' 2>/dev/null) || combined=""
+        --format $'{{status}}\x1f{{title}}\x1f{{artist}}\x1f{{album}}\x1f{{mpris:artUrl}}\x1f{{position}}\x1f{{mpris:length}}' 2>/dev/null) || combined=""
 
-    IFS=$'\x1f' read -r title artist album art_url <<< "$combined"
+    IFS=$'\x1f' read -r status title artist album art_url position length <<< "$combined"
+    [[ -z "$status" ]] && status="Stopped"
     [[ -z "$title" ]] && title="Unknown"
     [[ -z "$artist" ]] && artist="Unknown"
+    [[ "$position" =~ ^[0-9]+$ ]] || position=0
+    [[ "$length" =~ ^[0-9]+$ ]] || length=0
 
-    echo "$status"$'\t'"$title"$'\t'"$artist"$'\t'"$album"$'\t'"$art_url"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$status" "$title" "$artist" "$album" "$art_url" "$position" "$length"
 }
 
-function get_progress_raw() {
-    local player="$1"
-    local pct
-    pct=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" metadata --format '{{ position * 100 / mpris:length }}' 2>/dev/null)
-    if [[ -n "$pct" ]]; then
-        echo "$pct" | awk '{printf "%d", $1}'
-    else
-        echo "0"
+function format_us_duration() {
+    # microseconds -> "M:SS", done locally instead of via
+    # playerctl's duration() helper (which meant another round trip).
+    local us="${1:-0}"
+    [[ "$us" =~ ^[0-9]+$ ]] || us=0
+    local total_sec=$(( us / 1000000 ))
+    printf '%d:%02d' "$(( total_sec / 60 ))" "$(( total_sec % 60 ))"
+}
+
+function compute_progress() {
+    # position/length are raw microseconds from get_player_metadata.
+    # Prints "pct<TAB>time_text", pct clamped to 0-100, time_text empty
+    # when length is unknown/zero (matches the old blank-on-no-length
+    # behavior from get_progress_time).
+    local position="$1" length="$2"
+    local pct=0 text=""
+    if [[ "$length" -gt 0 ]]; then
+        pct=$(( position * 100 / length ))
+        (( pct < 0 )) && pct=0
+        (( pct > 100 )) && pct=100
+        text="$(format_us_duration "$position") / $(format_us_duration "$length")"
     fi
-}
-
-function get_progress_time() {
-    local player="$1"
-    local text
-    text=$(timeout "$PLAYERCTL_TIMEOUT" playerctl -p "$player" metadata \
-        --format '{{ duration(position) }} / {{ duration(mpris:length) }}' 2>/dev/null)
-    # Blank out whenever the length side is missing (e.g. YouTube ad breaks
-    # briefly report no mpris:length), not just when both sides are empty.
-    [[ -z "$text" || "$text" =~ /\ *$ ]] && text=""
-    echo "$text"
+    printf '%s\t%s' "$pct" "$text"
 }
 
 function get_state() {
     local filter="${1:-}"
-    local active_info type player status title artist album art_url progress progress_time
+    local active_info type player status title artist album art_url position length progress_fields progress progress_time
     active_info=$(get_active_player "$filter")
     IFS='|' read -r type player _ <<< "$active_info"
 
@@ -284,9 +296,13 @@ function get_state() {
     artist=$(echo "$metadata" | awk -F'\t' '{print $3}')
     album=$(echo "$metadata" | awk -F'\t' '{print $4}')
     art_url=$(echo "$metadata" | awk -F'\t' '{print $5}')
+    position=$(echo "$metadata" | awk -F'\t' '{print $6}')
+    length=$(echo "$metadata" | awk -F'\t' '{print $7}')
 
-    progress=$(get_progress_raw "$player")
-    progress_time=$(get_progress_time "$player")
+    progress_fields=$(compute_progress "$position" "$length")
+    progress=$(echo "$progress_fields" | awk -F'\t' '{print $1}')
+    progress_time=$(echo "$progress_fields" | awk -F'\t' '{print $2}')
+
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$type" "$player" "$status" "$title" "$artist" "$album" "$art_url" "$progress" "$progress_time"
 }
 
@@ -419,7 +435,7 @@ function cmd_art() {
 }
 
 function cmd_progress_text() {
-    local active_info type player pct time_str
+    local active_info type player metadata position length progress_fields pct time_str
     active_info=$(get_active_player "$SOURCE")
     IFS='|' read -r type player _ <<< "$active_info"
 
@@ -428,8 +444,12 @@ function cmd_progress_text() {
         return
     fi
 
-    pct=$(get_progress_raw "$player")
-    time_str=$(get_progress_time "$player")
+    metadata=$(get_player_metadata "$player")
+    position=$(echo "$metadata" | awk -F'\t' '{print $6}')
+    length=$(echo "$metadata" | awk -F'\t' '{print $7}')
+    progress_fields=$(compute_progress "$position" "$length")
+    pct=$(echo "$progress_fields" | awk -F'\t' '{print $1}')
+    time_str=$(echo "$progress_fields" | awk -F'\t' '{print $2}')
     [[ -z "$time_str" ]] && time_str="00:00 / 00:00"
 
     # Clamp: a momentarily-off mpris:length or seek edge case can push
