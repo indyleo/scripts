@@ -12,6 +12,7 @@ readonly SCRIPT_NAME="medianotify"
 readonly STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/medianotify"
 readonly STATE_FILE="$STATE_DIR/last_state"
 readonly EVENT_PIPE="$STATE_DIR/event_pipe"
+readonly PENDING_TRAIL_MARKER="$STATE_DIR/trailing_event_pending"
 readonly NOTIFICATION_TIMEOUT=5000
 readonly NOTIFICATION_APP="Media Player"
 
@@ -38,9 +39,22 @@ readonly QS_IPC_ENABLED="${QS_IPC_ENABLED:-1}"
 readonly QS_CMD="${QS_CMD:-qs}"
 
 function qs_mediaosd() {
-    [[ "$QS_IPC_ENABLED" == "1" ]] || return 0
-    command -v "${QS_CMD%% *}" &>/dev/null || return 0
-    $QS_CMD ipc call mediaosd show >/dev/null 2>&1 || true
+    if [[ "$QS_IPC_ENABLED" != "1" ]]; then
+        return 0
+    fi
+    if ! command -v "${QS_CMD%% *}" &>/dev/null; then
+        log "qs_mediaosd: '$QS_CMD' not found in PATH -- skipping (set QS_IPC_ENABLED=0 to silence this)"
+        return 0
+    fi
+
+    local output rc=0
+    output=$($QS_CMD ipc call mediaosd show 2>&1) || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        log "qs_mediaosd: OK${output:+ - $output}"
+    else
+        log "qs_mediaosd: FAILED (exit $rc)${output:+ - $output}"
+    fi
+    return 0
 }
 
 # Debounce settings (milliseconds)
@@ -80,6 +94,9 @@ function init_state_dir() {
         rm -f "$EVENT_PIPE"
         mkfifo "$EVENT_PIPE"
     fi
+    # Stale marker from a previous run/crash would otherwise permanently
+    # block scheduling a trailing event this session.
+    rm -f "$PENDING_TRAIL_MARKER"
 }
 
 function get_current_time_ms() {
@@ -93,11 +110,36 @@ function should_debounce() {
     local elapsed=$((current_time_ms - LAST_EVENT_TIME_MS))
 
     if (( elapsed < DEBOUNCE_TIME_MS )); then
+        # Leading-edge debounce: this event is within DEBOUNCE_TIME_MS of the
+        # last one we actually processed, so skip it. But MPRIS metadata for
+        # a freshly-loaded track often arrives in a burst -- title, then a
+        # moment later artist/album, then artUrl once the thumbnail resolves
+        # -- and whichever one of those lands *last* used to just get
+        # dropped here with nothing to pick it back up. That meant the OSD
+        # sometimes showed stale/incomplete data (or didn't fire at all)
+        # until some unrelated later event happened, or quickshell's own
+        # slow fallback poll eventually caught up (up to several seconds).
+        # Schedule a single trailing call so whatever the burst settles on
+        # still gets processed once things go quiet.
+        schedule_trailing_event
         return 0  # Should debounce
     fi
 
     LAST_EVENT_TIME_MS=$current_time_ms
     return 1  # Don't debounce
+}
+
+function schedule_trailing_event() {
+    # Only one trailing call in flight at a time -- if a burst is still
+    # going when it fires, should_debounce() just schedules another.
+    [[ -e "$PENDING_TRAIL_MARKER" ]] && return 0
+    : > "$PENDING_TRAIL_MARKER"
+    (
+        sleep "$(awk -v ms="$DEBOUNCE_TIME_MS" 'BEGIN { printf "%.3f", ms / 1000 }')"
+        rm -f "$PENDING_TRAIL_MARKER"
+        echo "INTERNAL_TRAILING_EVENT" > "$EVENT_PIPE" 2>/dev/null || true
+    ) &
+    disown
 }
 
 function dwm_fifo() {
@@ -519,6 +561,10 @@ function main_loop() {
             spawn_writers "$new_list"
             # Trigger an immediate check
             handle_event
+        elif [[ "$line" == "INTERNAL_TRAILING_EVENT" ]]; then
+            # Catch-up call from schedule_trailing_event() -- by now enough
+            # time has passed that should_debounce() will let it through.
+            handle_event
         else
             capture_art_from_line "$line"
             handle_event
@@ -537,7 +583,7 @@ function cleanup() {
     log "Shutting down..."
     kill_writers
     pkill -P $$ 2>/dev/null || true
-    rm -f "$EVENT_PIPE" "$STATE_DIR/events" 2>/dev/null
+    rm -f "$EVENT_PIPE" "$STATE_DIR/events" "$PENDING_TRAIL_MARKER" 2>/dev/null
     rm -f "$STATE_DIR"/art_*.jpg "$STATE_DIR"/art_local_*.* "$STATE_DIR"/artcache_* 2>/dev/null
     exec 3>&- # Close FD
     exit 0
