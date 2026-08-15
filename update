@@ -179,7 +179,7 @@ function run_all() {
 # === Menus ===
 
 function fzf_menu() {
-    echo -e "󰚰 System Update\n Flatpak Update\n Rustup Update\n Bob Update\n pipx Update\n Neovim Plugin Update\n Tmux Plugin Update\n󰑓 Reload Tmux Config\n✅ Run All\n❌ Exit" | fzf --prompt="Dashboard > "
+    echo -e "󰚰 System Update\n Flatpak Update\n Rustup Update\n Bob Update\n pipx Update\n Neovim Plugin Update\n Tmux Plugin Update\n󰑓 Reload Tmux Config\n Run All\n Exit" | fzf --prompt="Dashboard > "
 }
 
 function simple_menu() {
