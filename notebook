@@ -34,7 +34,7 @@ function fbopen() {
     fi
 
     if [[ "$TERMINAL" == "wezterm" ]]; then
-        wezterm start -- "$SHELL" -c "${EDITOR:-nvim} \"$file\""
+        footclient -e "$SHELL" -c "${EDITOR:-nvim} \"$file\""
 
     elif [[ "$TERMINAL" == "st" ]]; then
         st -e "$SHELL" -c "${EDITOR:-nvim} \"$file\""
