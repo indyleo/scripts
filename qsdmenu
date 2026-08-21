@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Drop-in dmenu replacement backed by the Quickshell bar's Dmenu picker.
+#
+# Usage (same idea as dmenu):
+#   some-command | qsdmenu -p "Prompt:"
+#   choice=$(printf 'yes\nno\n' | qsdmenu -p "Confirm:")
+#
+# Multi-select: Ctrl+click any number of items in the picker (no flag
+# needed here - it's a gesture in the UI itself), then press Enter. Each
+# selected item comes back on its own line, so a caller that wants to
+# handle multiple choices should read line-by-line rather than assume a
+# single value, e.g.:
+#   qsdmenu -p "Pick files:" < filelist.txt | while IFS= read -r f; do
+#       echo "chose: $f"
+#   done
+# A plain click (no Ctrl) still submits immediately with just that one
+# item, so single-select callers work exactly as before.
+#
+# Only -p (prompt) is honoured; other dmenu flags are accepted and ignored
+# so existing scripts don't break outright. Exit status is 0 with the
+# choice(s) on stdout, or 1 with nothing on stdout if cancelled (Escape)
+# or nothing was selected.
+
+prompt="run"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -p) prompt="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+
+tmpdir=$(mktemp -d)
+infile="$tmpdir/in"
+outfifo="$tmpdir/out"
+cleanup() { rm -rf "$tmpdir"; }
+trap cleanup EXIT
+
+cat > "$infile"
+mkfifo "$outfifo"
+
+qs ipc call pick dmenu "$infile" "$outfifo" "$prompt"
+
+result=$(cat "$outfifo")
+
+if [ -n "$result" ]; then
+    printf '%s\n' "$result"
+    exit 0
+else
+    exit 1
+fi
