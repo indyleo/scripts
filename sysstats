@@ -453,14 +453,14 @@ function weather() {
 
     # 4. Map codes to Nerd Font Icons
     case "$code" in
-        113) icon="󰖙" ;; # Sunny
-        116) icon="󰖕" ;; # Partly Cloudy
-        119|122) icon="󰖐" ;; # Cloudy
+        113) icon="" ;; # Sunny
+        116) icon="" ;; # Partly Cloudy
+        119|122) icon="" ;; # Cloudy
         143|248|260) icon="󰖑" ;; # Fog
-        176|263|266|293|296|299|302|305|308) icon="󰖗" ;; # Rain
-        200|386|389|392|395) icon="󰙾" ;; # Storm
-        179|182|185|227|230|323|326|329|332|335|338) icon="󰼶" ;; # Snow
-        *) icon="󰖐" ;; # Default Cloud
+        176|263|266|293|296|299|302|305|308) icon="" ;; # Rain
+        200|386|389|392|395) icon="" ;; # Storm
+        179|182|185|227|230|323|326|329|332|335|338) icon="" ;; # Snow
+        *) icon="" ;; # Default Cloud
     esac
 
     echo "${icon} ${temp}"
