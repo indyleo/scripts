@@ -1,0 +1,591 @@
+#!/usr/bin/env bash
+#
+# macro — Wayland/X11 macro + macro recorder/player, built on ydotool
+#
+# Modes:
+#   ./macro click  [-r 100] [-b left] [-c 50] [-d 3]
+#       Plain repeated clicking (original behavior).
+#
+#   ./macro record -o my_macro.json [-t 30] [-f json|mac]
+#       Records mouse clicks, mouse movement, and key presses (with real
+#       timing) until Ctrl+C or the optional -t timeout (seconds) elapses.
+#       Default format is JSON (newline-delimited). Requires read access to
+#       input devices (root, or membership in the 'input' group) because it
+#       uses `libinput debug-events`.
+#
+#   ./macro play -i my_macro.json [-l 1] [-s 1.0] [-d 3]
+#       Replays a recorded macro (json or legacy mac format, auto-detected).
+#         -l  number of loops (0 = infinite, default 1)
+#         -s  speed multiplier (0.5 = half speed, 2 = double speed)
+#         -d  seconds to wait before starting
+#
+#   ./macro convert -i in.mac -o out.json
+#       Converts between the legacy tab-separated .mac format and the JSON
+#       (newline-delimited) format. Direction is inferred from extensions;
+#       override with -f json|mac and -t json|mac if needed.
+#
+#   ./macro trim -i in.json -o out.json -s 1.0 -e 5.0
+#       Keeps only events with timestamp in [-s, -e] and rebases them to
+#       start at 0. Works on JSON macros; convert a .mac file first if
+#       needed.
+#
+#   ./macro edit -i my_macro.json
+#       Interactive line editor for a JSON macro. Commands once inside:
+#         list                    show all events with index numbers
+#         d N        / d N M      delete event N, or events N..M
+#         t N SECS                change the timestamp of event N
+#         shift N SECS            add SECS to the timestamp of events N..end
+#         scale FACTOR [N]        multiply timestamps by FACTOR (from N on, default 1)
+#         save [file]             write current state out (default: overwrite input)
+#         q                       quit (warns if there are unsaved changes)
+#
+# Stop anytime with Ctrl+C.
+
+set -euo pipefail
+
+MODE="${1:-}"
+[ $# -gt 0 ] && shift || true
+
+TMP_TSV=""
+
+usage() {
+    grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '/Modes:/,/Ctrl+C\./p'
+    exit 0
+}
+
+require_ydotool() {
+    if ! command -v ydotool >/dev/null 2>&1; then
+        echo "ydotool is not installed. Install it first."
+        exit 1
+    fi
+    if ! ydotool click 0x00 >/dev/null 2>&1; then
+        echo "Couldn't reach ydotoold. Start it with:"
+        echo "  sudo systemctl enable --now ydotoold"
+        echo "or run 'ydotoold &' manually, then try again."
+        exit 1
+    fi
+}
+
+require_jq() {
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "jq is required for JSON macro support. Install it (e.g. apt install jq)."
+        exit 1
+    fi
+}
+
+button_code() {
+    case "$1" in
+        left)   echo "0xC0" ;;
+        right)  echo "0xC1" ;;
+        middle) echo "0xC2" ;;
+        *) echo "Unknown button '$1' (use left, right, or middle)" >&2; exit 1 ;;
+    esac
+}
+
+# Guess a file's macro format from its extension. Echoes "json" or "mac".
+guess_format() {
+    case "$1" in
+        *.json|*.ndjson) echo json ;;
+        *.mac)            echo mac ;;
+        *)
+            # Fall back to sniffing the first non-empty line.
+            if [ -s "$1" ] && head -1 "$1" | grep -q '^{'; then
+                echo json
+            else
+                echo mac
+            fi
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# click mode (original behavior)
+# ---------------------------------------------------------------------------
+mode_click() {
+    local INTERVAL_MS=100 BUTTON="left" COUNT=0 START_DELAY=3
+    while getopts "r:b:c:d:h" opt; do
+        case "$opt" in
+            r) INTERVAL_MS="$OPTARG" ;;
+            b) BUTTON="$OPTARG" ;;
+            c) COUNT="$OPTARG" ;;
+            d) START_DELAY="$OPTARG" ;;
+            h) usage ;;
+            *) usage ;;
+        esac
+    done
+
+    local CODE; CODE="$(button_code "$BUTTON")"
+    require_ydotool
+
+    echo "Clicker: button=$BUTTON interval=${INTERVAL_MS}ms count=$([ "$COUNT" -eq 0 ] && echo infinite || echo "$COUNT")"
+    echo "Starting in ${START_DELAY}s — switch to your target window now."
+    sleep "$START_DELAY"
+    echo "Clicking... press Ctrl+C to stop."
+
+    local n=0
+    while true; do
+        ydotool click "$CODE"
+        n=$((n + 1))
+        if [ "$COUNT" -ne 0 ] && [ "$n" -ge "$COUNT" ]; then
+            echo "Done: $n clicks."
+            break
+        fi
+        sleep "$(awk "BEGIN {printf \"%.3f\", $INTERVAL_MS/1000}")"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# record mode
+#
+# JSON format: one JSON object per line (newline-delimited JSON), e.g.
+#   {"t":0.123,"type":"BUTTON","button":"left","state":"press"}
+#   {"t":0.500,"type":"MOVE","dx":10,"dy":-5}
+#   {"t":1.000,"type":"KEY","code":30,"state":"press"}
+#
+# Legacy mac format: tab-separated, one event per line:
+#   <elapsed_seconds>\tBUTTON\t<btn_name>\t<press|release>
+#   <elapsed_seconds>\tMOVE\t<dx>\t<dy>
+#   <elapsed_seconds>\tKEY\t<keycode>\t<press|release>
+# ---------------------------------------------------------------------------
+mode_record() {
+    local OUT="" TIMEOUT=0 FORMAT="json"
+    while getopts "o:t:f:h" opt; do
+        case "$opt" in
+            o) OUT="$OPTARG" ;;
+            t) TIMEOUT="$OPTARG" ;;
+            f) FORMAT="$OPTARG" ;;
+            h) usage ;;
+            *) usage ;;
+        esac
+    done
+    [ -z "$OUT" ] && OUT="macro_$(date +%s).${FORMAT}"
+
+    if ! command -v libinput >/dev/null 2>&1; then
+        echo "libinput (with 'libinput debug-events') is required for recording."
+        echo "Install it via your package manager (e.g. apt install libinput-tools)."
+        exit 1
+    fi
+    [ "$FORMAT" = "json" ] && require_jq
+
+    # Pre-flight: libinput debug-events opens raw /dev/input/eventX nodes
+    # directly, which almost always requires root (being in the 'input'
+    # group alone is often not enough). Fail loudly here instead of letting
+    # a permission error silently kill the script via `set -e`.
+    local preflight_err
+    preflight_err="$(timeout 1 libinput debug-events 2>&1 >/dev/null || true)"
+    if echo "$preflight_err" | grep -qiE 'permission denied|failed to.*seat|not part of|must be run as root'; then
+        echo "Couldn't open input devices for recording:"
+        echo "  $preflight_err" | head -3
+        echo
+        echo "libinput debug-events needs raw access to /dev/input/eventX,"
+        echo "which normally requires root. Try:"
+        echo "  sudo $0 record -o \"$OUT\"${TIMEOUT:+ -t $TIMEOUT} -f $FORMAT"
+        exit 1
+    fi
+
+    : > "$OUT"
+    echo "Recording ($FORMAT format) to '$OUT'. Move/click/type as you like."
+    echo "Press Ctrl+C to stop$( [ "$TIMEOUT" -ne 0 ] && echo " (or wait ${TIMEOUT}s)" )."
+
+    local start_ts=""
+    record_line() {
+        local raw="$1"
+        # Example lines from `libinput debug-events`:
+        #   event6   POINTER_MOTION   +9.760s  0.29/-0.36 (0.29/-0.36 unaccelerated)
+        #   event6   POINTER_BUTTON   +12.259s BTN_LEFT (272) pressed, seat count: 1
+        #   event6   KEYBOARD_KEY     +5.001s  KEY_A (30) pressed
+        local ts
+        ts=$(echo "$raw" | grep -oE '\+[0-9]+\.[0-9]+s' | tr -d '+s') || return 0
+        [ -z "$ts" ] && return 0
+        [ -z "$start_ts" ] && start_ts="$ts"
+        local elapsed
+        elapsed=$(awk "BEGIN {printf \"%.3f\", $ts - $start_ts}")
+
+        if echo "$raw" | grep -q "POINTER_BUTTON"; then
+            local btn state
+            btn=$(echo "$raw" | grep -oE 'BTN_[A-Z]+')
+            state=$(echo "$raw" | grep -qE 'pressed' && echo press || echo release)
+            case "$btn" in
+                BTN_LEFT)   btn="left" ;;
+                BTN_RIGHT)  btn="right" ;;
+                BTN_MIDDLE) btn="middle" ;;
+                *) return 0 ;;
+            esac
+            if [ "$FORMAT" = "json" ]; then
+                printf '{"t":%s,"type":"BUTTON","button":"%s","state":"%s"}\n' "$elapsed" "$btn" "$state" >> "$OUT"
+            else
+                printf '%s\tBUTTON\t%s\t%s\n' "$elapsed" "$btn" "$state" >> "$OUT"
+            fi
+        elif echo "$raw" | grep -q "POINTER_MOTION"; then
+            local dxdy dx dy
+            dxdy=$(echo "$raw" | grep -oE '^-?[0-9.]+/-?[0-9.]+' | head -1)
+            [ -z "$dxdy" ] && dxdy=$(echo "$raw" | grep -oE '[0-9.-]+/[0-9.-]+' | head -1)
+            dx=$(echo "$dxdy" | cut -d/ -f1)
+            dy=$(echo "$dxdy" | cut -d/ -f2)
+            if [ -n "$dx" ] && [ -n "$dy" ]; then
+                if [ "$FORMAT" = "json" ]; then
+                    printf '{"t":%s,"type":"MOVE","dx":%.0f,"dy":%.0f}\n' "$elapsed" "$dx" "$dy" >> "$OUT"
+                else
+                    printf '%s\tMOVE\t%.0f\t%.0f\n' "$elapsed" "$dx" "$dy" >> "$OUT"
+                fi
+            fi
+        elif echo "$raw" | grep -q "KEYBOARD_KEY"; then
+            local code state
+            code=$(echo "$raw" | grep -oE '\([0-9]+\)' | tr -d '()')
+            state=$(echo "$raw" | grep -qE 'pressed' && echo press || echo release)
+            if [ -n "$code" ]; then
+                if [ "$FORMAT" = "json" ]; then
+                    printf '{"t":%s,"type":"KEY","code":%s,"state":"%s"}\n' "$elapsed" "$code" "$state" >> "$OUT"
+                else
+                    printf '%s\tKEY\t%s\t%s\n' "$elapsed" "$code" "$state" >> "$OUT"
+                fi
+            fi
+        fi
+    }
+
+    set +e
+    if [ "$TIMEOUT" -ne 0 ]; then
+        timeout "$TIMEOUT" libinput debug-events | while IFS= read -r line; do record_line "$line"; done
+    else
+        libinput debug-events | while IFS= read -r line; do record_line "$line"; done
+    fi
+    local li_status="${PIPESTATUS[0]}"
+    set -e
+
+    # timeout's exit code 124 just means the timer expired — that's success.
+    if [ "$li_status" -ne 0 ] && [ "$li_status" -ne 124 ]; then
+        echo "libinput debug-events exited with status $li_status — recording may be incomplete."
+        echo "If this is a permissions issue, try running with sudo."
+    fi
+
+    local count; count=$(wc -l < "$OUT")
+    echo "Recorded $count events to '$OUT'."
+}
+
+# ---------------------------------------------------------------------------
+# play mode — accepts either json or legacy mac format (auto-detected)
+# ---------------------------------------------------------------------------
+mode_play() {
+    local IN="" LOOPS=1 SPEED=1.0 START_DELAY=3
+    while getopts "i:l:s:d:h" opt; do
+        case "$opt" in
+            i) IN="$OPTARG" ;;
+            l) LOOPS="$OPTARG" ;;
+            s) SPEED="$OPTARG" ;;
+            d) START_DELAY="$OPTARG" ;;
+            h) usage ;;
+            *) usage ;;
+        esac
+    done
+
+    [ -z "$IN" ] && { echo "Specify a macro file with -i"; exit 1; }
+    [ -f "$IN" ] || { echo "No such file: $IN"; exit 1; }
+
+    require_ydotool
+
+    local fmt; fmt="$(guess_format "$IN")"
+    local TSV_FILE="$IN"
+    if [ "$fmt" = "json" ]; then
+        require_jq
+        TMP_TSV="$(mktemp)"
+        jq -r '
+            if .type=="BUTTON" then [.t,.type,.button,.state]
+            elif .type=="MOVE" then [.t,.type,(.dx|tostring),(.dy|tostring)]
+            elif .type=="KEY" then [.t,.type,(.code|tostring),.state]
+            else empty end | @tsv
+        ' "$IN" > "$TMP_TSV"
+        TSV_FILE="$TMP_TSV"
+        trap 'rm -f "$TMP_TSV"' EXIT
+    fi
+
+    echo "Playing '$IN' ($fmt) — loops=$([ "$LOOPS" -eq 0 ] && echo infinite || echo "$LOOPS") speed=${SPEED}x"
+    echo "Starting in ${START_DELAY}s — switch to your target window now."
+    sleep "$START_DELAY"
+
+    play_once() {
+        local prev_ts=0
+        while IFS=$'\t' read -r ts type a b; do
+            local wait_s
+            wait_s=$(awk "BEGIN {d=($ts-$prev_ts)/$SPEED; if (d<0) d=0; printf \"%.3f\", d}")
+            sleep "$wait_s"
+            prev_ts="$ts"
+
+            case "$type" in
+                BUTTON)
+                    local base
+                    case "$a" in
+                        left)   base=0x00 ;;
+                        right)  base=0x01 ;;
+                        middle) base=0x02 ;;
+                        *) continue ;;
+                    esac
+                    if [ "$b" = "press" ]; then
+                        ydotool click "$(( base | 0x40 ))"
+                    else
+                        ydotool click "$(( base | 0x80 ))"
+                    fi
+                    ;;
+                MOVE)
+                    ydotool mousemove -- "$a" "$b" ;;
+                KEY)
+                    if [ "$b" = "press" ]; then
+                        ydotool key "${a}:1"
+                    else
+                        ydotool key "${a}:0"
+                    fi
+                    ;;
+            esac
+        done < "$TSV_FILE"
+    }
+
+    local i=0
+    while true; do
+        play_once
+        i=$((i + 1))
+        [ "$LOOPS" -ne 0 ] && [ "$i" -ge "$LOOPS" ] && break
+    done
+    echo "Playback finished ($i loop(s))."
+}
+
+# ---------------------------------------------------------------------------
+# convert mode — mac <-> json
+# ---------------------------------------------------------------------------
+mode_convert() {
+    local IN="" OUT="" FROM="" TO=""
+    while getopts "i:o:f:t:h" opt; do
+        case "$opt" in
+            i) IN="$OPTARG" ;;
+            o) OUT="$OPTARG" ;;
+            f) FROM="$OPTARG" ;;
+            t) TO="$OPTARG" ;;
+            h) usage ;;
+            *) usage ;;
+        esac
+    done
+    [ -z "$IN" ] || [ -z "$OUT" ] && { :; }
+    [ -z "$IN" ] && { echo "Specify input with -i"; exit 1; }
+    [ -z "$OUT" ] && { echo "Specify output with -o"; exit 1; }
+    [ -f "$IN" ] || { echo "No such file: $IN"; exit 1; }
+
+    require_jq
+    [ -z "$FROM" ] && FROM="$(guess_format "$IN")"
+    [ -z "$TO" ] && TO="$(guess_format "$OUT")"
+
+    if [ "$FROM" = "$TO" ]; then
+        cp "$IN" "$OUT"
+    elif [ "$FROM" = "mac" ] && [ "$TO" = "json" ]; then
+        awk -F'\t' '
+            $2=="BUTTON" { printf "{\"t\":%s,\"type\":\"BUTTON\",\"button\":\"%s\",\"state\":\"%s\"}\n", $1,$3,$4 }
+            $2=="MOVE"   { printf "{\"t\":%s,\"type\":\"MOVE\",\"dx\":%s,\"dy\":%s}\n", $1,$3,$4 }
+            $2=="KEY"    { printf "{\"t\":%s,\"type\":\"KEY\",\"code\":%s,\"state\":\"%s\"}\n", $1,$3,$4 }
+        ' "$IN" > "$OUT"
+    elif [ "$FROM" = "json" ] && [ "$TO" = "mac" ]; then
+        jq -r '
+            if .type=="BUTTON" then [.t,.type,.button,.state]
+            elif .type=="MOVE" then [.t,.type,(.dx|tostring),(.dy|tostring)]
+            elif .type=="KEY" then [.t,.type,(.code|tostring),.state]
+            else empty end | @tsv
+        ' "$IN" > "$OUT"
+    else
+        echo "Don't know how to convert '$FROM' -> '$TO'"; exit 1
+    fi
+    echo "Converted '$IN' ($FROM) -> '$OUT' ($TO)."
+}
+
+# ---------------------------------------------------------------------------
+# trim mode — JSON only; convert a .mac file first if needed
+# ---------------------------------------------------------------------------
+mode_trim() {
+    local IN="" OUT="" START="0" END=""
+    while getopts "i:o:s:e:h" opt; do
+        case "$opt" in
+            i) IN="$OPTARG" ;;
+            o) OUT="$OPTARG" ;;
+            s) START="$OPTARG" ;;
+            e) END="$OPTARG" ;;
+            h) usage ;;
+            *) usage ;;
+        esac
+    done
+    [ -z "$IN" ] && { echo "Specify input with -i"; exit 1; }
+    [ -z "$OUT" ] && { echo "Specify output with -o"; exit 1; }
+    [ -f "$IN" ] || { echo "No such file: $IN"; exit 1; }
+    require_jq
+
+    if [ "$(guess_format "$IN")" != "json" ]; then
+        echo "trim only works on JSON macros — convert first:"
+        echo "  ./macro convert -i '$IN' -o '${IN%.*}.json'"
+        exit 1
+    fi
+
+    if [ -z "$END" ]; then
+        jq -c --argjson s "$START" 'select(.t >= $s) | .t = (.t - $s)' "$IN" > "$OUT"
+    else
+        jq -c --argjson s "$START" --argjson e "$END" \
+            'select(.t >= $s and .t <= $e) | .t = (.t - $s)' "$IN" > "$OUT"
+    fi
+    local count; count=$(wc -l < "$OUT")
+    echo "Trimmed to [$START, ${END:-end}] -> '$OUT' ($count events)."
+}
+
+# ---------------------------------------------------------------------------
+# edit mode — interactive editor for a JSON macro
+# ---------------------------------------------------------------------------
+mode_edit() {
+    local IN=""
+    while getopts "i:h" opt; do
+        case "$opt" in
+            i) IN="$OPTARG" ;;
+            h) usage ;;
+            *) usage ;;
+        esac
+    done
+    [ -z "$IN" ] && { echo "Specify a macro file with -i"; exit 1; }
+    [ -f "$IN" ] || { echo "No such file: $IN"; exit 1; }
+    require_jq
+
+    if [ "$(guess_format "$IN")" != "json" ]; then
+        echo "edit only works on JSON macros — convert first:"
+        echo "  ./macro convert -i '$IN' -o '${IN%.*}.json'"
+        exit 1
+    fi
+
+    # Load events into a bash array, one JSON object string per element.
+    local -a events=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && events+=("$line")
+    done < "$IN"
+
+    local dirty=0
+
+    print_list() {
+        local i=1
+        for e in "${events[@]}"; do
+            printf '%3d  %s\n' "$i" "$(echo "$e" | jq -c '.')"
+            i=$((i + 1))
+        done
+    }
+
+    echo "Editing '$IN' — ${#events[@]} events loaded. Type 'list' to see them, or 'q' to quit."
+    print_list
+
+    while true; do
+        printf '> '
+        read -r cmd arg1 arg2 arg3 || break
+        case "$cmd" in
+            list)
+                print_list ;;
+            d)
+                if [ -n "$arg1" ] && [ -z "$arg2" ]; then
+                    local idx=$((arg1 - 1))
+                    if [ "$idx" -ge 0 ] && [ "$idx" -lt "${#events[@]}" ]; then
+                        unset 'events[idx]'
+                        events=("${events[@]}")
+                        dirty=1
+                        echo "Deleted event $arg1."
+                    else
+                        echo "No such event: $arg1"
+                    fi
+                elif [ -n "$arg1" ] && [ -n "$arg2" ]; then
+                    local from=$((arg1 - 1)) to=$((arg2 - 1))
+                    local -a kept=()
+                    local i=0
+                    for e in "${events[@]}"; do
+                        if [ "$i" -lt "$from" ] || [ "$i" -gt "$to" ]; then
+                            kept+=("$e")
+                        fi
+                        i=$((i + 1))
+                    done
+                    events=("${kept[@]}")
+                    dirty=1
+                    echo "Deleted events $arg1-$arg2."
+                else
+                    echo "Usage: d N   or   d N M"
+                fi
+                ;;
+            t)
+                if [ -n "$arg1" ] && [ -n "$arg2" ]; then
+                    local idx=$((arg1 - 1))
+                    if [ "$idx" -ge 0 ] && [ "$idx" -lt "${#events[@]}" ]; then
+                        events[idx]="$(echo "${events[idx]}" | jq -c --argjson t "$arg2" '.t = $t')"
+                        dirty=1
+                        echo "Set event $arg1 timestamp to $arg2."
+                    else
+                        echo "No such event: $arg1"
+                    fi
+                else
+                    echo "Usage: t N SECS"
+                fi
+                ;;
+            shift)
+                if [ -n "$arg1" ] && [ -n "$arg2" ]; then
+                    local from=$((arg1 - 1))
+                    local i=0
+                    for e in "${!events[@]}"; do :; done # no-op, keeps shellcheck quiet
+                    local -a newevents=()
+                    i=0
+                    for e in "${events[@]}"; do
+                        if [ "$i" -ge "$from" ]; then
+                            e="$(echo "$e" | jq -c --argjson d "$arg2" '.t = (.t + $d)')"
+                        fi
+                        newevents+=("$e")
+                        i=$((i + 1))
+                    done
+                    events=("${newevents[@]}")
+                    dirty=1
+                    echo "Shifted events $arg1..end by ${arg2}s."
+                else
+                    echo "Usage: shift N SECS"
+                fi
+                ;;
+            scale)
+                if [ -n "$arg1" ]; then
+                    local from=0
+                    [ -n "$arg2" ] && from=$((arg2 - 1))
+                    local -a newevents=()
+                    local i=0
+                    for e in "${events[@]}"; do
+                        if [ "$i" -ge "$from" ]; then
+                            e="$(echo "$e" | jq -c --argjson f "$arg1" '.t = (.t * $f)')"
+                        fi
+                        newevents+=("$e")
+                        i=$((i + 1))
+                    done
+                    events=("${newevents[@]}")
+                    dirty=1
+                    echo "Scaled timestamps from event $((from + 1)) onward by ${arg1}x."
+                else
+                    echo "Usage: scale FACTOR [N]"
+                fi
+                ;;
+            save)
+                local dest="${arg1:-$IN}"
+                : > "$dest"
+                for e in "${events[@]}"; do
+                    echo "$e" >> "$dest"
+                done
+                echo "Saved ${#events[@]} events to '$dest'."
+                [ "$dest" = "$IN" ] && dirty=0
+                ;;
+            q|quit|exit)
+                if [ "$dirty" -eq 1 ]; then
+                    echo "You have unsaved changes. 'save' first, or run again to discard."
+                fi
+                break
+                ;;
+            "") ;;
+            *) echo "Unknown command '$cmd'. Try: list, d, t, shift, scale, save, q" ;;
+        esac
+    done
+}
+
+case "$MODE" in
+    click)   mode_click "$@" ;;
+    record)  mode_record "$@" ;;
+    play)    mode_play "$@" ;;
+    convert) mode_convert "$@" ;;
+    trim)    mode_trim "$@" ;;
+    edit)    mode_edit "$@" ;;
+    -h|--help|help|"") usage ;;
+    *) echo "Unknown mode '$MODE' (use click, record, play, convert, trim, or edit)"; exit 1 ;;
+esac
