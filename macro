@@ -366,7 +366,7 @@ mode_record() {
     # group alone is often not enough). Fail loudly here instead of letting
     # a permission error silently kill the script via `set -e`.
     local preflight_err
-    preflight_err="$(timeout 1 libinput debug-events 2>&1 >/dev/null || true)"
+    preflight_err="$(timeout 1 libinput debug-events --show-keycodes 2>&1 >/dev/null || true)"
     if echo "$preflight_err" | grep -qiE 'permission denied|failed to.*seat|not part of|must be run as root'; then
         echo "Couldn't open input devices for recording:"
         echo "  $preflight_err" | head -3
@@ -411,11 +411,17 @@ mode_record() {
                 printf '%s\tBUTTON\t%s\t%s\n' "$elapsed" "$btn" "$state" >> "$OUT"
             fi
         elif echo "$raw" | grep -q "POINTER_MOTION"; then
-            local dxdy dx dy
-            dxdy=$(echo "$raw" | grep -oE '^-?[0-9.]+/-?[0-9.]+' | head -1)
-            [ -z "$dxdy" ] && dxdy=$(echo "$raw" | grep -oE '[0-9.-]+/[0-9.-]+' | head -1)
-            dx=$(echo "$dxdy" | cut -d/ -f1)
-            dy=$(echo "$dxdy" | cut -d/ -f2)
+            # Columns are right-justified for display, so there's often
+            # whitespace between the '/' and the second number (e.g.
+            # "  0.88/  0.00"), which a plain [0-9.-]+/[0-9.-]+ regex can't
+            # match. Pull the pair out of the parens instead — it's also
+            # the *accelerated*, already-integer delta (the actual on-screen
+            # cursor movement), rather than sub-pixel hardware deltas that
+            # would round away to 0/0 when truncated below.
+            local paren dx dy
+            paren=$(echo "$raw" | grep -oE '\([^)]*\)' | tr -d '()')
+            dx=$(echo "$paren" | cut -d/ -f1 | tr -d '[:space:]')
+            dy=$(echo "$paren" | cut -d/ -f2 | tr -d '[:space:]')
             if [ -n "$dx" ] && [ -n "$dy" ]; then
                 if [ "$FORMAT" = "json" ]; then
                     printf '{"t":%s,"type":"MOVE","dx":%.0f,"dy":%.0f}\n' "$elapsed" "$dx" "$dy" >> "$OUT"
@@ -425,9 +431,9 @@ mode_record() {
             fi
         elif echo "$raw" | grep -q "KEYBOARD_KEY"; then
             local code state
-            code=$(echo "$raw" | grep -oE '\([0-9]+\)' | tr -d '()' || true)
+            code=$(echo "$raw" | grep -oE '\(-?[0-9]+\)' | tr -d '()' || true)
             state=$(echo "$raw" | grep -qE 'pressed' && echo press || echo release)
-            if [ -n "$code" ]; then
+            if [ -n "$code" ] && [ "$code" != "-1" ]; then
                 if [ "$FORMAT" = "json" ]; then
                     printf '{"t":%s,"type":"KEY","code":%s,"state":"%s"}\n' "$elapsed" "$code" "$state" >> "$OUT"
                 else
@@ -459,9 +465,9 @@ mode_record() {
 
     set +e
     if [ "$TIMEOUT" -ne 0 ]; then
-        timeout "$TIMEOUT" "${STDBUF[@]}" libinput debug-events | while IFS= read -r line; do record_line "$line"; done
+        timeout "$TIMEOUT" "${STDBUF[@]}" libinput debug-events --show-keycodes | while IFS= read -r line; do record_line "$line"; done
     else
-        "${STDBUF[@]}" libinput debug-events | while IFS= read -r line; do record_line "$line"; done
+        "${STDBUF[@]}" libinput debug-events --show-keycodes | while IFS= read -r line; do record_line "$line"; done
     fi
     local li_status="${PIPESTATUS[0]}"
     set -e
