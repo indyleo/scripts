@@ -3,7 +3,7 @@
 # macro — Wayland/X11 macro + macro recorder/player, built on ydotool
 #
 # Modes:
-#   ./macro click  [-r 100] [-b left] [-c 50] [-d 3]
+#   ./macro click  [-r 100] [-b left] [-c 50] [-d 3] [-w classname]
 #       Plain repeated clicking (original behavior).
 #
 #   ./macro record -o my_macro.json [-t 30] [-f json|mac]
@@ -13,11 +13,23 @@
 #       input devices (root, or membership in the 'input' group) because it
 #       uses `libinput debug-events`.
 #
-#   ./macro play -i my_macro.json [-l 1] [-s 1.0] [-d 3]
+#   ./macro play -i my_macro.json [-l 1] [-s 1.0] [-d 3] [-w classname]
 #       Replays a recorded macro (json or legacy mac format, auto-detected).
 #         -l  number of loops (0 = infinite, default 1)
 #         -s  speed multiplier (0.5 = half speed, 2 = double speed)
 #         -d  seconds to wait before starting
+#
+# Window scoping (-w, Hyprland only):
+#   ydotool emulates real hardware input via uinput, so it always goes to
+#   whatever window currently has focus — there is no way to send synthetic
+#   input to a specific *unfocused* Wayland window (the compositor blocks
+#   that on purpose, unlike X11's xdotool). Passing -w <window-class> makes
+#   click/play window-aware instead:
+#     1. It focuses the matching window (via hyprctl) before starting.
+#     2. While running, it polls the focused window and PAUSES output
+#        whenever you switch away, resuming automatically when that window
+#        is focused again. Nothing is sent while paused.
+#   Find a window's class with: hyprctl clients | grep -A2 class
 #
 #   ./macro convert -i in.mac -o out.json
 #       Converts between the legacy tab-separated .mac format and the JSON
@@ -73,6 +85,87 @@ require_jq() {
     fi
 }
 
+require_hyprctl() {
+    if ! command -v hyprctl >/dev/null 2>&1; then
+        echo "hyprctl not found — -w window scoping only works inside a running Hyprland session."
+        exit 1
+    fi
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "jq is required for -w window scoping."
+        exit 1
+    fi
+}
+
+# Focuses a window by address, working with both classic hyprctl dispatch
+# syntax and the newer Lua-config dispatch syntax (Hyprland 0.55+, where
+# `hyprctl dispatch` takes a Lua expression instead of "dispatcher args").
+# Auto-detects and caches which one this Hyprland instance uses.
+HYPR_DISPATCH_MODE=""   # "classic" or "lua", set on first successful call
+hypr_focus_address() {
+    local addr="$1" out status
+
+    if [ "$HYPR_DISPATCH_MODE" != "lua" ]; then
+        out="$(hyprctl dispatch focuswindow "address:$addr" 2>&1)"
+        status=$?
+        if [ "$status" -eq 0 ] && ! echo "$out" | grep -qi 'hl\.dispatch'; then
+            HYPR_DISPATCH_MODE="classic"
+            return 0
+        fi
+    fi
+
+    out="$(hyprctl dispatch "hl.dsp.focus({ window = \"address:$addr\" })" 2>&1)"
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        echo "hyprctl dispatch failed to focus address $addr:" >&2
+        echo "  $out" >&2
+        return 1
+    fi
+    HYPR_DISPATCH_MODE="lua"
+    return 0
+}
+
+# Focus the first window whose class matches (case-insensitive substring).
+# Exits with an error if no matching window is found.
+focus_window_by_class() {
+    local want="$1"
+    local addr
+    addr=$(hyprctl clients -j | jq -r --arg w "$want" '
+        [.[] | select(.class | ascii_downcase | contains($w | ascii_downcase))][0].address // empty
+    ')
+    if [ -z "$addr" ] || [ "$addr" = "null" ]; then
+        echo "No window found with class matching '$want'. Try: hyprctl clients | grep -A2 class"
+        exit 1
+    fi
+    hypr_focus_address "$addr" || exit 1
+}
+
+# Echoes the class of the currently focused window (empty if none).
+active_window_class() {
+    hyprctl activewindow -j 2>/dev/null | jq -r '.class // empty'
+}
+
+# Blocks (polling every 0.15s) until the focused window's class contains
+# $1 (case-insensitive). Prints a one-time "paused" notice while waiting.
+WINDOW_PAUSED_NOTICE_SHOWN=0
+wait_for_window_focus() {
+    local want="$1"
+    while true; do
+        local cur; cur="$(active_window_class)"
+        if echo "$cur" | grep -qiF "$want"; then
+            if [ "$WINDOW_PAUSED_NOTICE_SHOWN" -eq 1 ]; then
+                echo "Resumed — '$want' is focused again."
+                WINDOW_PAUSED_NOTICE_SHOWN=0
+            fi
+            return 0
+        fi
+        if [ "$WINDOW_PAUSED_NOTICE_SHOWN" -eq 0 ]; then
+            echo "Paused — focus '$want' to continue (currently: ${cur:-none})."
+            WINDOW_PAUSED_NOTICE_SHOWN=1
+        fi
+        sleep 0.15
+    done
+}
+
 button_code() {
     case "$1" in
         left)   echo "0xC0" ;;
@@ -102,13 +195,14 @@ guess_format() {
 # click mode (original behavior)
 # ---------------------------------------------------------------------------
 mode_click() {
-    local INTERVAL_MS=100 BUTTON="left" COUNT=0 START_DELAY=3
-    while getopts "r:b:c:d:h" opt; do
+    local INTERVAL_MS=100 BUTTON="left" COUNT=0 START_DELAY=3 WINCLASS=""
+    while getopts "r:b:c:d:w:h" opt; do
         case "$opt" in
             r) INTERVAL_MS="$OPTARG" ;;
             b) BUTTON="$OPTARG" ;;
             c) COUNT="$OPTARG" ;;
             d) START_DELAY="$OPTARG" ;;
+            w) WINCLASS="$OPTARG" ;;
             h) usage ;;
             *) usage ;;
         esac
@@ -116,14 +210,21 @@ mode_click() {
 
     local CODE; CODE="$(button_code "$BUTTON")"
     require_ydotool
+    [ -n "$WINCLASS" ] && require_hyprctl
 
     echo "Clicker: button=$BUTTON interval=${INTERVAL_MS}ms count=$([ "$COUNT" -eq 0 ] && echo infinite || echo "$COUNT")"
-    echo "Starting in ${START_DELAY}s — switch to your target window now."
-    sleep "$START_DELAY"
+    if [ -n "$WINCLASS" ]; then
+        echo "Window scope: '$WINCLASS' — focusing it now."
+        focus_window_by_class "$WINCLASS"
+    else
+        echo "Starting in ${START_DELAY}s — switch to your target window now."
+        sleep "$START_DELAY"
+    fi
     echo "Clicking... press Ctrl+C to stop."
 
     local n=0
     while true; do
+        [ -n "$WINCLASS" ] && wait_for_window_focus "$WINCLASS"
         ydotool click "$CODE"
         n=$((n + 1))
         if [ "$COUNT" -ne 0 ] && [ "$n" -ge "$COUNT" ]; then
@@ -266,13 +367,14 @@ mode_record() {
 # play mode — accepts either json or legacy mac format (auto-detected)
 # ---------------------------------------------------------------------------
 mode_play() {
-    local IN="" LOOPS=1 SPEED=1.0 START_DELAY=3
-    while getopts "i:l:s:d:h" opt; do
+    local IN="" LOOPS=1 SPEED=1.0 START_DELAY=3 WINCLASS=""
+    while getopts "i:l:s:d:w:h" opt; do
         case "$opt" in
             i) IN="$OPTARG" ;;
             l) LOOPS="$OPTARG" ;;
             s) SPEED="$OPTARG" ;;
             d) START_DELAY="$OPTARG" ;;
+            w) WINCLASS="$OPTARG" ;;
             h) usage ;;
             *) usage ;;
         esac
@@ -282,6 +384,7 @@ mode_play() {
     [ -f "$IN" ] || { echo "No such file: $IN"; exit 1; }
 
     require_ydotool
+    [ -n "$WINCLASS" ] && require_hyprctl
 
     local fmt; fmt="$(guess_format "$IN")"
     local TSV_FILE="$IN"
@@ -299,8 +402,13 @@ mode_play() {
     fi
 
     echo "Playing '$IN' ($fmt) — loops=$([ "$LOOPS" -eq 0 ] && echo infinite || echo "$LOOPS") speed=${SPEED}x"
-    echo "Starting in ${START_DELAY}s — switch to your target window now."
-    sleep "$START_DELAY"
+    if [ -n "$WINCLASS" ]; then
+        echo "Window scope: '$WINCLASS' — focusing it now."
+        focus_window_by_class "$WINCLASS"
+    else
+        echo "Starting in ${START_DELAY}s — switch to your target window now."
+        sleep "$START_DELAY"
+    fi
 
     play_once() {
         local prev_ts=0
@@ -309,6 +417,8 @@ mode_play() {
             wait_s=$(awk "BEGIN {d=($ts-$prev_ts)/$SPEED; if (d<0) d=0; printf \"%.3f\", d}")
             sleep "$wait_s"
             prev_ts="$ts"
+
+            [ -n "$WINCLASS" ] && wait_for_window_focus "$WINCLASS"
 
             case "$type" in
                 BUTTON)
