@@ -192,8 +192,21 @@ require_xdotool() {
 }
 
 # First window id whose class/name matches (substring, case-insensitive).
+# xdotool's own --class matching is case-sensitive, so build a
+# case-insensitive ERE (e.g. "Foo" -> "[Ff][Oo][Oo]") to match the
+# documented (and Hyprland-path) behavior.
 x11_find_window() {
-    xdotool search --class "$1" 2>/dev/null | head -1
+    local want="$1" pattern="" ch
+    local i n=${#want}
+    for (( i=0; i<n; i++ )); do
+        ch="${want:i:1}"
+        if [[ "$ch" =~ [A-Za-z] ]]; then
+            pattern+="[${ch^^}${ch,,}]"
+        else
+            pattern+="$(printf '%s' "$ch" | sed 's/[.[\*^$]/\\&/g')"
+        fi
+    done
+    xdotool search --class "$pattern" 2>/dev/null | head -1
 }
 
 x11_button_num() {
@@ -384,7 +397,7 @@ mode_record() {
 
         if echo "$raw" | grep -q "POINTER_BUTTON"; then
             local btn state
-            btn=$(echo "$raw" | grep -oE 'BTN_[A-Z]+')
+            btn=$(echo "$raw" | grep -oE 'BTN_[A-Z]+' || true)
             state=$(echo "$raw" | grep -qE 'pressed' && echo press || echo release)
             case "$btn" in
                 BTN_LEFT)   btn="left" ;;
@@ -412,7 +425,7 @@ mode_record() {
             fi
         elif echo "$raw" | grep -q "KEYBOARD_KEY"; then
             local code state
-            code=$(echo "$raw" | grep -oE '\([0-9]+\)' | tr -d '()')
+            code=$(echo "$raw" | grep -oE '\([0-9]+\)' | tr -d '()' || true)
             state=$(echo "$raw" | grep -qE 'pressed' && echo press || echo release)
             if [ -n "$code" ]; then
                 if [ "$FORMAT" = "json" ]; then
@@ -705,6 +718,7 @@ mode_edit() {
     done < "$IN"
 
     local dirty=0
+    local pending_quit=0
 
     print_list() {
         local i=1
@@ -721,6 +735,10 @@ mode_edit() {
         printf '> '
         read -r cmd arg1 arg2 arg3 || break
         case "$cmd" in
+            q|quit|exit) ;;
+            *) pending_quit=0 ;;
+        esac
+        case "$cmd" in
             list)
                 print_list ;;
             d)
@@ -736,17 +754,21 @@ mode_edit() {
                     fi
                 elif [ -n "$arg1" ] && [ -n "$arg2" ]; then
                     local from=$((arg1 - 1)) to=$((arg2 - 1))
-                    local -a kept=()
-                    local i=0
-                    for e in "${events[@]}"; do
-                        if [ "$i" -lt "$from" ] || [ "$i" -gt "$to" ]; then
-                            kept+=("$e")
-                        fi
-                        i=$((i + 1))
-                    done
-                    events=("${kept[@]}")
-                    dirty=1
-                    echo "Deleted events $arg1-$arg2."
+                    if [ "$from" -lt 0 ] || [ "$to" -ge "${#events[@]}" ] || [ "$from" -gt "$to" ]; then
+                        echo "Invalid range: $arg1-$arg2 (valid: 1-${#events[@]}, start <= end)"
+                    else
+                        local -a kept=()
+                        local i=0
+                        for e in "${events[@]}"; do
+                            if [ "$i" -lt "$from" ] || [ "$i" -gt "$to" ]; then
+                                kept+=("$e")
+                            fi
+                            i=$((i + 1))
+                        done
+                        events=("${kept[@]}")
+                        dirty=1
+                        echo "Deleted events $arg1-$arg2."
+                    fi
                 else
                     echo "Usage: d N   or   d N M"
                 fi
@@ -816,10 +838,12 @@ mode_edit() {
                 [ "$dest" = "$IN" ] && dirty=0
                 ;;
             q|quit|exit)
-                if [ "$dirty" -eq 1 ]; then
-                    echo "You have unsaved changes. 'save' first, or run again to discard."
+                if [ "$dirty" -eq 1 ] && [ "$pending_quit" -eq 0 ]; then
+                    echo "You have unsaved changes. 'save' first, or run '$cmd' again to discard."
+                    pending_quit=1
+                else
+                    break
                 fi
-                break
                 ;;
             "") ;;
             *) echo "Unknown command '$cmd'. Try: list, d, t, shift, scale, save, q" ;;
