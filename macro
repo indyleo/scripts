@@ -437,17 +437,41 @@ mode_record() {
         fi
     }
 
+    # libinput debug-events fully block-buffers its stdout once it isn't a
+    # tty (i.e. as soon as it's piped). Without forcing line buffering here,
+    # every event sits in that buffer and is lost the moment the process
+    # dies (e.g. via the SIGPIPE below) instead of being flushed — which is
+    # why recordings could come back empty even with correct permissions.
+    local STDBUF=()
+    if command -v stdbuf >/dev/null 2>&1; then
+        STDBUF=(stdbuf -oL)
+    else
+        echo "Warning: 'stdbuf' not found — libinput's output may be buffered" >&2
+        echo "and events could be lost when recording stops. (coreutils package)" >&2
+    fi
+
+    # Ctrl+C delivers SIGINT to the whole pipeline at once. The `while read`
+    # side dies first and closes the pipe, so libinput's next write gets
+    # SIGPIPE and it exits 141 — that's the *expected* way this recording
+    # stops, not an error, so trap it quietly instead of alarming the user.
+    local interrupted=0
+    trap 'interrupted=1' INT
+
     set +e
     if [ "$TIMEOUT" -ne 0 ]; then
-        timeout "$TIMEOUT" libinput debug-events | while IFS= read -r line; do record_line "$line"; done
+        timeout "$TIMEOUT" "${STDBUF[@]}" libinput debug-events | while IFS= read -r line; do record_line "$line"; done
     else
-        libinput debug-events | while IFS= read -r line; do record_line "$line"; done
+        "${STDBUF[@]}" libinput debug-events | while IFS= read -r line; do record_line "$line"; done
     fi
     local li_status="${PIPESTATUS[0]}"
     set -e
+    trap - INT
 
     # timeout's exit code 124 just means the timer expired — that's success.
-    if [ "$li_status" -ne 0 ] && [ "$li_status" -ne 124 ]; then
+    # 130 (SIGINT) and 141 (SIGPIPE from the reader closing after SIGINT)
+    # are the normal ways a Ctrl+C stop looks — not errors.
+    if [ "$li_status" -ne 0 ] && [ "$li_status" -ne 124 ] && [ "$interrupted" -ne 1 ] \
+        && [ "$li_status" -ne 130 ] && [ "$li_status" -ne 141 ]; then
         echo "libinput debug-events exited with status $li_status — recording may be incomplete."
         echo "If this is a permissions issue, try running with sudo."
     fi
