@@ -23,16 +23,18 @@
 #   Behavior depends on the display server, auto-detected via $DISPLAY /
 #   $WAYLAND_DISPLAY:
 #
-#   X11: true unfocused-window targeting. Clicks/keys/moves are sent via
-#     xdotool straight to that window's X id (XSendEvent), regardless of
-#     what's focused — nothing goes to any other window. Requires xdotool.
-#     KEY replay looks up the right keysym for your current layout via
-#     xmodmap; unmapped keycodes are skipped rather than guessed.
+#   X11: focus-based targeting, same model as the Hyprland path below.
+#     The script raises/focuses the window via `xdotool windowactivate`
+#     before it starts, then PAUSES (and re-focuses) whenever the target
+#     stops being the active window, resuming once it's focused again —
+#     it never silently sends events to whatever else happens to be
+#     focused. Requires xdotool. All actual input injection is done via
+#     ydotool (kernel‑level), matching the Hyprland behaviour exactly.
 #
-#   Wayland/Hyprland: no such targeting exists (the compositor blocks
-#     synthetic input to unfocused windows on purpose — see the Hyprland
-#     wiki). Instead the script focuses the window via hyprctl and PAUSES
-#     input whenever you switch away, resuming when it's focused again.
+#   Wayland/Hyprland: synthetic input can't be sent to unfocused windows
+#     at all (the compositor blocks it on purpose — see the Hyprland
+#     wiki). The script focuses the window via hyprctl and PAUSES input
+#     whenever you switch away, resuming when it's focused again.
 #     Requires hyprctl + jq.
 #
 #   Find a window's class with: hyprctl clients | grep -A2 class  (Hyprland)
@@ -209,21 +211,41 @@ x11_find_window() {
     xdotool search --class "$pattern" 2>/dev/null | head -1
 }
 
-x11_button_num() {
-    case "$1" in
-        left)   echo 1 ;;
-        middle) echo 2 ;;
-        right)  echo 3 ;;
-        *) echo "Unknown button '$1' (use left, right, or middle)" >&2; exit 1 ;;
-    esac
+# Focus + raise a window by id, the same way focus_window_by_class does for
+# Hyprland (hyprctl dispatch focuswindow). Best-effort: some window managers
+# ignore parts of this, so we don't hard-fail on it.
+x11_activate_window() {
+    local winid="$1"
+    xdotool windowactivate --sync "$winid" >/dev/null 2>&1 || true
 }
 
-# Look up the keysym name xdotool needs for a given evdev-style keycode
-# (as recorded by libinput). X11 keycode = evdev code + 8; xmodmap gives us
-# the keysym bound to that X11 keycode under the current keyboard layout.
-x11_keysym_from_evdev_code() {
-    local x11code=$(( $1 + 8 ))
-    xmodmap -pke 2>/dev/null | awk -v kc="$x11code" '$2==kc {print $4; exit}'
+# Echoes the X11 id of the currently focused window (empty if none/unknown).
+x11_active_window_id() {
+    xdotool getactivewindow 2>/dev/null || true
+}
+
+# Blocks (polling every 0.15s) until $winid is the focused window. Pure
+# port of wait_for_window_focus for X11 — it does NOT keep re-stealing focus,
+# it just waits for the window to be focused again, exactly like the Hyprland
+# path does with hyprctl.
+X11_PAUSED_NOTICE_SHOWN=0
+x11_wait_for_window_focus() {
+    local winid="$1"
+    while true; do
+        local cur; cur="$(x11_active_window_id)"
+        if [ "$cur" = "$winid" ]; then
+            if [ "$X11_PAUSED_NOTICE_SHOWN" -eq 1 ]; then
+                echo "Resumed — target window is focused again."
+                X11_PAUSED_NOTICE_SHOWN=0
+            fi
+            return 0
+        fi
+        if [ "$X11_PAUSED_NOTICE_SHOWN" -eq 0 ]; then
+            echo "Paused — focus the target window to continue (currently: ${cur:-none})."
+            X11_PAUSED_NOTICE_SHOWN=1
+        fi
+        sleep 0.15
+    done
 }
 
 button_code() {
@@ -275,14 +297,17 @@ mode_click() {
         case "$SESSION" in
             x11)
                 require_xdotool
+                require_ydotool   # now required for input injection
                 local WINID; WINID="$(x11_find_window "$WINCLASS")"
                 [ -z "$WINID" ] && { echo "No X11 window found matching '$WINCLASS'. Try: xdotool search --name '' | xargs -I{} xdotool getwindowclassname {}"; exit 1; }
-                local XBTN; XBTN="$(x11_button_num "$BUTTON")"
                 echo "Clicker (X11, window-targeted): button=$BUTTON interval=${INTERVAL_MS}ms count=$([ "$COUNT" -eq 0 ] && echo infinite || echo "$COUNT")"
-                echo "Target: '$WINCLASS' (id $WINID) — sends directly to that window, no focus needed."
+                echo "Target: '$WINCLASS' (id $WINID) — focusing it now."
+                x11_activate_window "$WINID"
+                echo "Clicking... press Ctrl+C to stop."
                 local n=0
                 while true; do
-                    xdotool click --window "$WINID" "$XBTN"
+                    x11_wait_for_window_focus "$WINID"
+                    ydotool click "$CODE"   # kernel‑level injection
                     n=$((n + 1))
                     if [ "$COUNT" -ne 0 ] && [ "$n" -ge "$COUNT" ]; then
                         echo "Done: $n clicks."
@@ -506,17 +531,16 @@ mode_play() {
     [ -z "$IN" ] && { echo "Specify a macro file with -i"; exit 1; }
     [ -f "$IN" ] || { echo "No such file: $IN"; exit 1; }
 
-    local PLAY_SESSION="" X11_WINID="" X11_CURX=0 X11_CURY=0
+    local PLAY_SESSION="" X11_WINID=""
     if [ -n "$WINCLASS" ]; then
         PLAY_SESSION="$(session_type)"
         case "$PLAY_SESSION" in
             x11)
                 require_xdotool
+                require_ydotool   # input injection also uses ydotool
                 X11_WINID="$(x11_find_window "$WINCLASS")"
                 [ -z "$X11_WINID" ] && { echo "No X11 window found matching '$WINCLASS'."; exit 1; }
-                eval "$(xdotool getwindowgeometry --shell "$X11_WINID" 2>/dev/null)"
-                X11_CURX=$(( ${WIDTH:-400} / 2 ))
-                X11_CURY=$(( ${HEIGHT:-300} / 2 ))
+                x11_activate_window "$X11_WINID"
                 ;;
             wayland)
                 require_ydotool
@@ -548,7 +572,7 @@ mode_play() {
 
     echo "Playing '$IN' ($fmt) — loops=$([ "$LOOPS" -eq 0 ] && echo infinite || echo "$LOOPS") speed=${SPEED}x"
     if [ "$PLAY_SESSION" = "x11" ]; then
-        echo "Target: '$WINCLASS' (id $X11_WINID) — sends directly to that window, no focus needed."
+        echo "Target: '$WINCLASS' (id $X11_WINID) — focusing it now."
     elif [ -n "$WINCLASS" ]; then
         echo "Window scope: '$WINCLASS' — focusing it now."
         focus_window_by_class "$WINCLASS"
@@ -565,42 +589,16 @@ mode_play() {
             sleep "$wait_s"
             prev_ts="$ts"
 
-            if [ "$PLAY_SESSION" = "x11" ]; then
-                case "$type" in
-                    BUTTON)
-                        local xbtn
-                        case "$a" in
-                            left) xbtn=1 ;; middle) xbtn=2 ;; right) xbtn=3 ;;
-                            *) continue ;;
-                        esac
-                        if [ "$b" = "press" ]; then
-                            xdotool mousedown --window "$X11_WINID" "$xbtn"
-                        else
-                            xdotool mouseup --window "$X11_WINID" "$xbtn"
-                        fi
-                        ;;
-                    MOVE)
-                        X11_CURX=$(( X11_CURX + a ))
-                        X11_CURY=$(( X11_CURY + b ))
-                        xdotool mousemove --window "$X11_WINID" -- "$X11_CURX" "$X11_CURY"
-                        ;;
-                    KEY)
-                        local keysym; keysym="$(x11_keysym_from_evdev_code "$a")"
-                        if [ -z "$keysym" ]; then
-                            continue  # unmapped keycode under current layout — skip rather than guess
-                        fi
-                        if [ "$b" = "press" ]; then
-                            xdotool keydown --window "$X11_WINID" "$keysym"
-                        else
-                            xdotool keyup --window "$X11_WINID" "$keysym"
-                        fi
-                        ;;
-                esac
-                continue
+            # Wait for the target window to have focus if window scoping is active
+            if [ -n "$PLAY_SESSION" ]; then
+                if [ "$PLAY_SESSION" = "x11" ]; then
+                    x11_wait_for_window_focus "$X11_WINID"
+                else
+                    wait_for_window_focus "$WINCLASS"
+                fi
             fi
 
-            [ -n "$WINCLASS" ] && wait_for_window_focus "$WINCLASS"
-
+            # All input injection uses ydotool (kernel-level) regardless of session
             case "$type" in
                 BUTTON)
                     local base
@@ -617,7 +615,8 @@ mode_play() {
                     fi
                     ;;
                 MOVE)
-                    ydotool mousemove -- "$a" "$b" ;;
+                    ydotool mousemove -- "$a" "$b"
+                    ;;
                 KEY)
                     if [ "$b" = "press" ]; then
                         ydotool key "${a}:1"
@@ -653,7 +652,6 @@ mode_convert() {
             *) usage ;;
         esac
     done
-    [ -z "$IN" ] || [ -z "$OUT" ] && { :; }
     [ -z "$IN" ] && { echo "Specify input with -i"; exit 1; }
     [ -z "$OUT" ] && { echo "Specify output with -o"; exit 1; }
     [ -f "$IN" ] || { echo "No such file: $IN"; exit 1; }
