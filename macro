@@ -205,7 +205,7 @@ x11_find_window() {
         if [[ "$ch" =~ [A-Za-z] ]]; then
             pattern+="[${ch^^}${ch,,}]"
         else
-            pattern+="$(printf '%s' "$ch" | sed 's/[.[\*^$]/\\&/g')"
+            pattern+="$(printf '%s' "$ch" | sed 's/[][\\.^$*+?(){}|]/\\&/g')"
         fi
     done
     xdotool search --class "$pattern" 2>/dev/null | head -1
@@ -246,6 +246,31 @@ x11_wait_for_window_focus() {
         fi
         sleep 0.15
     done
+}
+
+require_nonnegative_number() {
+    local name="$1" value="$2"
+    if ! [[ "$value" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]; then
+        echo "$name must be a non-negative number (got '$value')." >&2
+        exit 1
+    fi
+}
+
+require_positive_number() {
+    local name="$1" value="$2"
+    require_nonnegative_number "$name" "$value"
+    if ! awk "BEGIN {exit !($value > 0)}"; then
+        echo "$name must be greater than 0 (got '$value')." >&2
+        exit 1
+    fi
+}
+
+require_nonnegative_integer() {
+    local name="$1" value="$2"
+    if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+        echo "$name must be a non-negative integer (got '$value')." >&2
+        exit 1
+    fi
 }
 
 button_code() {
@@ -289,6 +314,10 @@ mode_click() {
             *) usage ;;
         esac
     done
+
+    require_positive_number "interval (-r)" "$INTERVAL_MS"
+    require_nonnegative_integer "count (-c)" "$COUNT"
+    require_nonnegative_number "start delay (-d)" "$START_DELAY"
 
     local CODE; CODE="$(button_code "$BUTTON")"
     local SESSION=""
@@ -378,6 +407,8 @@ mode_record() {
         esac
     done
     [ -z "$OUT" ] && OUT="macro_$(date +%s).${FORMAT}"
+    case "$FORMAT" in json|mac) ;; *) echo "Unknown format '$FORMAT' (use json or mac)." >&2; exit 1 ;; esac
+    require_nonnegative_integer "timeout (-t)" "$TIMEOUT"
 
     if ! command -v libinput >/dev/null 2>&1; then
         echo "libinput (with 'libinput debug-events') is required for recording."
@@ -443,10 +474,13 @@ mode_record() {
             # the *accelerated*, already-integer delta (the actual on-screen
             # cursor movement), rather than sub-pixel hardware deltas that
             # would round away to 0/0 when truncated below.
-            local paren dx dy
-            paren=$(echo "$raw" | grep -oE '\([^)]*\)' | tr -d '()')
-            dx=$(echo "$paren" | cut -d/ -f1 | tr -d '[:space:]')
-            dy=$(echo "$paren" | cut -d/ -f2 | tr -d '[:space:]')
+            local pair dx dy
+            # Extract only the numeric motion pair; libinput may append
+            # "unaccelerated" inside the parentheses.
+            pair=$(echo "$raw" | grep -oE '\\([-+]?[0-9]+([.][0-9]+)?[[:space:]]*/[[:space:]]*[-+]?[0-9]+([.][0-9]+)?' | head -1 || true)
+            pair="${pair#(}"
+            dx=$(echo "$pair" | cut -d/ -f1 | tr -d '[:space:]')
+            dy=$(echo "$pair" | cut -d/ -f2 | tr -d '[:space:]')
             if [ -n "$dx" ] && [ -n "$dy" ]; then
                 if [ "$FORMAT" = "json" ]; then
                     printf '{"t":%s,"type":"MOVE","dx":%.0f,"dy":%.0f}\n' "$elapsed" "$dx" "$dy" >> "$OUT"
@@ -530,6 +564,9 @@ mode_play() {
 
     [ -z "$IN" ] && { echo "Specify a macro file with -i"; exit 1; }
     [ -f "$IN" ] || { echo "No such file: $IN"; exit 1; }
+    require_nonnegative_integer "loops (-l)" "$LOOPS"
+    require_positive_number "speed (-s)" "$SPEED"
+    require_nonnegative_number "start delay (-d)" "$START_DELAY"
 
     local PLAY_SESSION="" X11_WINID=""
     if [ -n "$WINCLASS" ]; then
@@ -659,6 +696,8 @@ mode_convert() {
     require_jq
     [ -z "$FROM" ] && FROM="$(guess_format "$IN")"
     [ -z "$TO" ] && TO="$(guess_format "$OUT")"
+    case "$FROM" in json|mac) ;; *) echo "Unknown input format '$FROM' (use json or mac)." >&2; exit 1 ;; esac
+    case "$TO" in json|mac) ;; *) echo "Unknown output format '$TO' (use json or mac)." >&2; exit 1 ;; esac
 
     if [ "$FROM" = "$TO" ]; then
         cp "$IN" "$OUT"
@@ -700,6 +739,12 @@ mode_trim() {
     [ -z "$OUT" ] && { echo "Specify output with -o"; exit 1; }
     [ -f "$IN" ] || { echo "No such file: $IN"; exit 1; }
     require_jq
+    require_nonnegative_number "start (-s)" "$START"
+    [ -z "$END" ] || require_nonnegative_number "end (-e)" "$END"
+    if [ -n "$END" ] && ! awk "BEGIN {exit !($END >= $START)}"; then
+        echo "end (-e) must be greater than or equal to start (-s)." >&2
+        exit 1
+    fi
 
     if [ "$(guess_format "$IN")" != "json" ]; then
         echo "trim only works on JSON macros — convert first:"
@@ -802,7 +847,7 @@ mode_edit() {
                 fi
                 ;;
             t)
-                if [ -n "$arg1" ] && [ -n "$arg2" ]; then
+                if [ -n "$arg1" ] && [ -n "$arg2" ] && [[ "$arg1" =~ ^[0-9]+$ ]] && [[ "$arg2" =~ ^[-+]?[0-9]+([.][0-9]+)?$ ]]; then
                     local idx=$((arg1 - 1))
                     if [ "$idx" -ge 0 ] && [ "$idx" -lt "${#events[@]}" ]; then
                         events[idx]="$(echo "${events[idx]}" | jq -c --argjson t "$arg2" '.t = $t')"
@@ -816,7 +861,7 @@ mode_edit() {
                 fi
                 ;;
             shift)
-                if [ -n "$arg1" ] && [ -n "$arg2" ]; then
+                if [ -n "$arg1" ] && [ -n "$arg2" ] && [[ "$arg1" =~ ^[0-9]+$ ]] && [[ "$arg2" =~ ^[-+]?[0-9]+([.][0-9]+)?$ ]]; then
                     local from=$((arg1 - 1))
                     local i=0
                     for e in "${!events[@]}"; do :; done # no-op, keeps shellcheck quiet
@@ -837,9 +882,14 @@ mode_edit() {
                 fi
                 ;;
             scale)
-                if [ -n "$arg1" ]; then
+                if [ -n "$arg1" ] && [[ "$arg1" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] && awk "BEGIN {exit !($arg1 > 0)}"; then
                     local from=0
-                    [ -n "$arg2" ] && from=$((arg2 - 1))
+                    if [ -n "$arg2" ] && [[ "$arg2" =~ ^[0-9]+$ ]]; then
+                        from=$((arg2 - 1))
+                    elif [ -n "$arg2" ]; then
+                        echo "Usage: scale FACTOR [N]"
+                        continue
+                    fi
                     local -a newevents=()
                     local i=0
                     for e in "${events[@]}"; do
