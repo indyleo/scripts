@@ -290,18 +290,17 @@ function get_state() {
     local metadata
     metadata=$(get_player_metadata "$player")
 
-    # FIX: Use awk instead of read so empty tab fields aren't collapsed
-    status=$(echo "$metadata" | awk -F'\t' '{print $1}')
-    title=$(echo "$metadata" | awk -F'\t' '{print $2}')
-    artist=$(echo "$metadata" | awk -F'\t' '{print $3}')
-    album=$(echo "$metadata" | awk -F'\t' '{print $4}')
-    art_url=$(echo "$metadata" | awk -F'\t' '{print $5}')
-    position=$(echo "$metadata" | awk -F'\t' '{print $6}')
-    length=$(echo "$metadata" | awk -F'\t' '{print $7}')
+    # mapfile -d splits on a literal tab byte with no IFS-whitespace
+    # collapsing, so empty fields survive -- same guarantee the old
+    # echo|awk pipeline gave us, but with zero subprocess spawns.
+    local _f
+    mapfile -d $'\t' -t _f <<< "$metadata"
+    status="${_f[0]}"; title="${_f[1]}"; artist="${_f[2]}"; album="${_f[3]}"
+    art_url="${_f[4]}"; position="${_f[5]}"; length="${_f[6]%$'\n'}"
 
     progress_fields=$(compute_progress "$position" "$length")
-    progress=$(echo "$progress_fields" | awk -F'\t' '{print $1}')
-    progress_time=$(echo "$progress_fields" | awk -F'\t' '{print $2}')
+    mapfile -d $'\t' -t _f <<< "$progress_fields"
+    progress="${_f[0]}"; progress_time="${_f[1]%$'\n'}"
 
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$type" "$player" "$status" "$title" "$artist" "$album" "$art_url" "$progress" "$progress_time"
 }
@@ -361,16 +360,19 @@ function cmd_status() { get_state "$SOURCE"; }
 function cmd_title() {
     local cutpoint="${1:-50}"
     local state title
+    local _f
     state=$(get_state "$SOURCE")
-    title=$(echo "$state" | awk -F'\t' '{print $4}')
+    mapfile -d $'\t' -t _f <<< "$state"
+    title="${_f[3]}"
     format_title "$title" "$cutpoint"
 }
 
 function cmd_state() {
     local state type status
+    local _f
     state=$(get_state "$SOURCE")
-    type=$(echo "$state" | awk -F'\t' '{print $1}')
-    status=$(echo "$state" | awk -F'\t' '{print $3}')
+    mapfile -d $'\t' -t _f <<< "$state"
+    type="${_f[0]}"; status="${_f[2]}"
     [[ "$type" == "idle" ]] && { echo "$ICON_IDLE"; return; }
     get_status_icon "$status"
 }
@@ -378,10 +380,10 @@ function cmd_state() {
 function cmd_state_title() {
     local cutpoint="${1:-50}"
     local state type status title icon
+    local _f
     state=$(get_state "$SOURCE")
-    type=$(echo "$state" | awk -F'\t' '{print $1}')
-    status=$(echo "$state" | awk -F'\t' '{print $3}')
-    title=$(echo "$state" | awk -F'\t' '{print $4}')
+    mapfile -d $'\t' -t _f <<< "$state"
+    type="${_f[0]}"; status="${_f[2]}"; title="${_f[3]}"
 
     [[ "$type" == "idle" ]] && { echo "$ICON_IDLE Idle"; return; }
     icon=$(get_status_icon "$status")
@@ -395,8 +397,10 @@ function cmd_previous()   { send_control previous; }
 
 function cmd_art() {
     local state art_url
+    local _f
     state=$(get_state "$SOURCE")
-    art_url=$(echo "$state" | awk -F'\t' '{print $7}')
+    mapfile -d $'\t' -t _f <<< "$state"
+    art_url="${_f[6]}"
     [[ -z "$art_url" ]] && return 0
 
     if [[ "$art_url" == file://* ]]; then
@@ -436,6 +440,7 @@ function cmd_art() {
 
 function cmd_progress_text() {
     local active_info type player metadata position length progress_fields pct time_str
+    local _f
     active_info=$(get_active_player "$SOURCE")
     IFS='|' read -r type player _ <<< "$active_info"
 
@@ -445,11 +450,11 @@ function cmd_progress_text() {
     fi
 
     metadata=$(get_player_metadata "$player")
-    position=$(echo "$metadata" | awk -F'\t' '{print $6}')
-    length=$(echo "$metadata" | awk -F'\t' '{print $7}')
+    mapfile -d $'\t' -t _f <<< "$metadata"
+    position="${_f[5]}"; length="${_f[6]%$'\n'}"
     progress_fields=$(compute_progress "$position" "$length")
-    pct=$(echo "$progress_fields" | awk -F'\t' '{print $1}')
-    time_str=$(echo "$progress_fields" | awk -F'\t' '{print $2}')
+    mapfile -d $'\t' -t _f <<< "$progress_fields"
+    pct="${_f[0]}"; time_str="${_f[1]%$'\n'}"
     [[ -z "$time_str" ]] && time_str="00:00 / 00:00"
 
     # Clamp: a momentarily-off mpris:length or seek edge case can push

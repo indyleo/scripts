@@ -41,15 +41,6 @@ function run_cmd() {
 
 # --- Audio (wpctl) Logic ---
 
-# Get current volume as integer (0-100)
-function get_volume_percent() {
-    local target="$1"
-    # wpctl get-volume output example: "Volume: 0.45 [MUTED]"
-    local vol_float
-    vol_float=$(wpctl get-volume "$target" | awk '{print $2}')
-    echo "$vol_float * 100" | awk '{printf "%d", $0}'
-}
-
 function adjust_volume() {
     local target="$1" # @DEFAULT_AUDIO_SINK@ or @DEFAULT_AUDIO_SOURCE@
     local direction="$2" # "inc" or "dec"
@@ -71,22 +62,11 @@ function adjust_volume() {
     else
         run_cmd wpctl set-volume "$target" "${step}-"
     fi
-
-    # Notify
-    local new_vol
-    new_vol=$(get_volume_percent "$target")
-    local type="Volume"
-    [[ "$target" == "@DEFAULT_AUDIO_SOURCE@" ]] && type="Mic"
 }
 
 function toggle_mute() {
     local target="$1"
     run_cmd wpctl set-mute "$target" toggle
-    local status
-    status=$(wpctl get-volume "$target" | grep -q "MUTED" && echo "Muted" || echo "Unmuted")
-    local type="Audio"
-    [[ "$target" == "@DEFAULT_AUDIO_SOURCE@" ]] && type="Microphone"
-
 }
 
 # --- Brightness Logic ---
@@ -94,13 +74,6 @@ function toggle_mute() {
 function adjust_brightness() {
     local direction="$1" # "+" or "-"
     run_cmd brightnessctl set "${amount}%${direction}"
-
-    # Get new percentage safely
-    local current_max current_val percent
-    current_val=$(brightnessctl get)
-    current_max=$(brightnessctl max)
-    percent=$(( current_val * 100 / current_max ))
-
 }
 
 # Dim/undim toggle: no state file needed, just flips based on current level.
