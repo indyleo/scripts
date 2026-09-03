@@ -22,7 +22,7 @@ function handle_block_click() {
     fi
 
     case "$opt" in
-        volume)     # ACTIVE - wired to signal 24 in BLOCKS()
+        volume)
             case "$BLOCK_BUTTON" in
                 1) "$SYSCTL" vol --toggle >>"$CLICK_LOG" 2>&1 || true ;;   # left:  mute toggle
                 3) echo "togglescratch 3" > "$DWM_FIFO" 2>>"$CLICK_LOG" || true ;;  # right: wiremix mixer scratchpad
@@ -30,21 +30,21 @@ function handle_block_click() {
                 5) "$SYSCTL" vol --dec    >>"$CLICK_LOG" 2>&1 || true ;;   # scroll down: -5%
             esac
             ;;
-        brightness) # ACTIVE - wired to signal 25 in BLOCKS()
+        brightness)
             case "$BLOCK_BUTTON" in
                 1) "$SYSCTL" bri --toggle >>"$CLICK_LOG" 2>&1 || true ;;   # left:  dim/undim toggle (10% <-> 100%)
                 4) "$SYSCTL" bri --inc    >>"$CLICK_LOG" 2>&1 || true ;;   # scroll up:   +5%
                 5) "$SYSCTL" bri --dec    >>"$CLICK_LOG" 2>&1 || true ;;   # scroll down: -5%
             esac
             ;;
-        mic|microphone) # inactive - no BLOCKS() entry calls `sysstats mic` yet
+        mic|microphone)
             case "$BLOCK_BUTTON" in
                 1) "$SYSCTL" mic --toggle >>"$CLICK_LOG" 2>&1 || true ;;   # left:  mute toggle
                 4) "$SYSCTL" mic --inc    >>"$CLICK_LOG" 2>&1 || true ;;   # scroll up:   +5%
                 5) "$SYSCTL" mic --dec    >>"$CLICK_LOG" 2>&1 || true ;;   # scroll down: -5%
             esac
             ;;
-        wifi) # inactive - no BLOCKS() entry calls `sysstats wifi` yet
+        wifi)
             case "$BLOCK_BUTTON" in
                 1) "$SYSCTL" wifi --toggle >>"$CLICK_LOG" 2>&1 || true ;;  # left:  wifi on/off
             esac
