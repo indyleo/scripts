@@ -304,7 +304,7 @@ function _battery_health() {
     # expose this as either energy_* (Wh) or charge_* (Ah) depending on
     # the battery's fuel gauge, so check both.
     local bat_dir full design health="N/A"
-    bat_dir=$(find /sys/class/power_supply/ -maxdepth 1 -name 'BAT*' -print -quit 2>/dev/null)
+    bat_dir=$(find /sys/class/power_supply/ -maxdepth 1 -name 'BAT*' -print -quit 2>/dev/null || true)
     [[ -z "$bat_dir" ]] && { echo "$health"; return; }
     if [[ -f "$bat_dir/energy_full" && -f "$bat_dir/energy_full_design" ]]; then
         full=$(cat "$bat_dir/energy_full" 2>/dev/null || echo 0)
@@ -320,31 +320,52 @@ function _battery_health() {
 }
 
 function notify_battery_details() {
-    local battery_info first_line status time_left health direction body
+    local battery_info valid_batteries active_battery_line
+    local battery_num status percent time_left health body direction
+
     if ! command -v acpi &> /dev/null; then
         notify-send -a sysstats "󰂄 Battery" "acpi not installed" 2>/dev/null || true
         return
     fi
+
     battery_info=$(acpi -b 2>/dev/null || echo "")
-    if [[ -z "$battery_info" ]]; then
+    [[ -z "$battery_info" ]] && {
         notify-send -a sysstats "󰂄 Battery" "No battery detected" 2>/dev/null || true
         return
-    fi
-    first_line=$(echo "$battery_info" | head -n1)
-    status=$(echo "$first_line" | awk -F', ' '{print $1}' | awk -F': ' '{print $2}')
-    time_left=$(echo "$first_line" | grep -oP '\d+:\d+:\d+' | head -n1)
-    [[ -n "$time_left" ]] && time_left=$(echo "$time_left" | awk -F: '{printf "%d:%02d", $1, $2}')
-    health=$(_battery_health)
+    }
 
+    # Filter out bogus lines (same as bbattery)
+    valid_batteries=$(echo "$battery_info" | grep -v "Unknown" | grep -v "rate information unavailable" || true)
+    if [[ -n "$valid_batteries" ]]; then
+        active_battery_line=$(echo "$valid_batteries" | head -n1)
+    else
+        active_battery_line=$(echo "$battery_info" | head -n1)
+    fi
+
+    # Extract battery number
+    battery_num=$(echo "$active_battery_line" | awk -F': ' '{print $1}' | awk '{print $2}' || echo "?")
+
+    # Parse status, percent, time
+    status=$(echo "$active_battery_line" | awk -F', ' '{print $1}' | awk -F': ' '{print $2}' || echo "Unknown")
+    percent=$(echo "$active_battery_line" | grep -o '[0-9]\+%' | tr -d '%' | head -n1 || echo "0")
+    time_left=$(echo "$active_battery_line" | grep -oP '\d+:\d+:\d+' | head -n1 || echo "")
+    [[ -n "$time_left" ]] && time_left=$(echo "$time_left" | awk -F: '{printf "%d:%02d", $1, $2}')
+
+    # Health (from first found battery)
+    health=$(_battery_health || echo "N/A")
+
+    # Build direction string only for Charging/Discharging; omit for Not charging / Full
     case "$status" in
-        Charging) direction="${time_left:-N/A} until full" ;;
+        Charging)    direction="${time_left:-N/A} until full" ;;
         Discharging) direction="${time_left:-N/A} remaining" ;;
-        *) direction="" ;;
+        "Not charging"|"Full") direction="" ;;  # hide third column
+        *)           direction="" ;;
     esac
 
-    body="${status:-Unknown}"
+    # Build body: Battery N | State | [direction if non‑empty] | percent% | health
+    body="Battery ${battery_num} | ${status:-Unknown}"
     [[ -n "$direction" ]] && body+=" | ${direction}"
-    body+=" | health ${health}"
+    body+=" | ${percent:-0}% | health ${health}"
 
     notify-send -a sysstats "󰂄 Battery" "$body" 2>/dev/null || true
 }
