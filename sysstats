@@ -710,10 +710,10 @@ function kbd_backlight() {
     pct=$(( (cur_br * 100 + max_br / 2) / max_br ))
 
     # Choose icon based on percentage
-    if   [[ $pct -eq 0 ]]; then icon="󰌋"   # backlight off
-    elif [[ $pct -le 33 ]]; then icon="󰌌"  # low
-    elif [[ $pct -le 66 ]]; then icon="󰌍"  # medium
-    else                            icon="󰌎"  # high
+    if   [[ $pct -eq 0 ]]; then icon="󰌌 󰃞"   # keyboard + brightness 1 (off/empty)
+    elif [[ $pct -le 33 ]]; then icon="󰌌 󰃝"  # keyboard + brightness 2 (low)
+    elif [[ $pct -le 66 ]]; then icon="󰌌 󰃟"  # keyboard + brightness 3 (medium)
+    else                        icon="󰌌 󰃠"  # keyboard + brightness 4 (high/full)
     fi
 
     echo "${icon} ${pct}%"
