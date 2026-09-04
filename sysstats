@@ -254,26 +254,26 @@ function notify_wifi_details() {
     local iface
     iface=$(_wifi_iface)
     if [[ -z "$iface" ]]; then
-        notify-send -a sysstats "󰤮 Wi-Fi" "Not connected" 2>/dev/null || true
+        notify-send -a sysstats "󰤮 Wi-Fi" "Not connected" >/dev/null 2>&1 &
         return
     fi
-    notify-send -a sysstats "󰤮 Wi-Fi (${iface})" "$(_link_detail_line "$iface")" 2>/dev/null || true
+    notify-send -a sysstats "󰤮 Wi-Fi (${iface})" "$(_link_detail_line "$iface")" >/dev/null 2>&1 &
 }
 
 function notify_ethernet_details() {
     local iface
     iface=$(_eth_iface)
     if [[ -z "$iface" ]]; then
-        notify-send -a sysstats "󰲜 Ethernet" "Not connected" 2>/dev/null || true
+        notify-send -a sysstats "󰲜 Ethernet" "Not connected" >/dev/null 2>&1 &
         return
     fi
-    notify-send -a sysstats "󰈀 Ethernet (${iface})" "$(_link_detail_line "$iface")" 2>/dev/null || true
+    notify-send -a sysstats "󰈀 Ethernet (${iface})" "$(_link_detail_line "$iface")" >/dev/null 2>&1 &
 }
 
 function notify_tailscale_details() {
     local status_out state up down v4 v6 body icon
     if ! command -v tailscale &> /dev/null; then
-        notify-send -a sysstats "󰈂 Tailscale" "not installed" 2>/dev/null || true
+        notify-send -a sysstats "󰈂 Tailscale" "not installed" >/dev/null 2>&1 &
         return
     fi
     status_out=$(tailscale status 2>&1) || true
@@ -296,7 +296,7 @@ function notify_tailscale_details() {
     [[ -n "$v4" ]] && body+=" | ${v4}"
     [[ -n "$v6" ]] && body+=" | ${v6}"
 
-    notify-send -a sysstats "${icon} Tailscale" "$body" 2>/dev/null || true
+    notify-send -a sysstats "${icon} Tailscale" "$body" >/dev/null 2>&1 &
 }
 
 function _battery_health() {
@@ -324,13 +324,13 @@ function notify_battery_details() {
     local battery_num status percent time_left health body direction
 
     if ! command -v acpi &> /dev/null; then
-        notify-send -a sysstats "󰂄 Battery" "acpi not installed" 2>/dev/null || true
+        notify-send -a sysstats "󰂄 Battery" "acpi not installed" >/dev/null 2>&1 &
         return
     fi
 
     battery_info=$(acpi -b 2>/dev/null || echo "")
     [[ -z "$battery_info" ]] && {
-        notify-send -a sysstats "󰂄 Battery" "No battery detected" 2>/dev/null || true
+        notify-send -a sysstats "󰂄 Battery" "No battery detected" >/dev/null 2>&1 &
         return
     }
 
@@ -367,7 +367,7 @@ function notify_battery_details() {
     [[ -n "$direction" ]] && body+=" | ${direction}"
     body+=" | ${percent:-0}% | health ${health}"
 
-    notify-send -a sysstats "󰂄 Battery" "$body" 2>/dev/null || true
+    notify-send -a sysstats "󰂄 Battery" "$body" >/dev/null 2>&1 &
 }
 
 function eethernet() {
