@@ -95,6 +95,16 @@ function toggle_brightness() {
 
 # --- Keyboard Backlight Logic ---
 
+function _read_file() {
+    # Zero-fork read of a single-line file (avoids spawning `cat` just to
+    # read one value) -- matters here specifically because sysctl runs
+    # synchronously under osd.c's blocking runargv_wait(), so every fork
+    # avoided directly shortens how long the WM is frozen per keypress.
+    # Usage: _read_file VARNAME FILE [DEFAULT]
+    local -n _out="$1"
+    { read -r _out < "$2"; } 2>/dev/null || _out="${3:-}"
+}
+
 function find_kbd_device() {
     local d name
     for d in /sys/class/leds/*; do
@@ -118,13 +128,31 @@ function find_kbd_device() {
     return 1
 }
 
+function write_kbd_brightness() {
+    # run_cmd execs "$@" directly (no shell), so it can't express a `>`
+    # redirect -- that's what the `bash -c "echo ... > file"` calls below
+    # used to be for. But sysctl runs synchronously under osd.c's
+    # blocking runargv_wait() (the whole WM freezes until this returns),
+    # and scroll-wheel adjustments can fire many of these a second, so
+    # spawning a full extra bash process just to perform one write is
+    # avoidable latency on every one of them. A plain redirect in the
+    # current shell does the same write with zero forks.
+    local dir="$1" value="$2"
+    if echo "$value" > "$dir/brightness" 2>/dev/null; then
+        echo " Success: keyboard backlight -> ${value}"
+    else
+        echo "󰜺 Failed: could not write $dir/brightness" >&2
+        exit 1
+    fi
+}
+
 function adjust_kbd_brightness() {
     local mode="$1" # "+", "-", or "set"
     local dir cur_br max_br new_br step_raw
 
     dir=$(find_kbd_device) || { echo "Error: No keyboard backlight found" >&2; exit 1; }
-    max_br=$(cat "$dir/max_brightness" 2>/dev/null || echo 0)
-    cur_br=$(cat "$dir/brightness" 2>/dev/null || echo 0)
+    _read_file max_br "$dir/max_brightness" 0
+    _read_file cur_br "$dir/brightness" 0
 
     [[ "$max_br" -eq 0 ]] && { echo "Error: max_brightness is 0" >&2; exit 1; }
 
@@ -148,22 +176,21 @@ function adjust_kbd_brightness() {
     [[ $new_br -gt $max_br ]] && new_br=$max_br
     [[ $new_br -lt 0 ]] && new_br=0
 
-    # Apply using run_cmd
-    run_cmd bash -c "echo '$new_br' > '$dir/brightness'"
+    write_kbd_brightness "$dir" "$new_br"
 }
 
 function toggle_kbd_brightness() {
     local dir cur_br max_br
     dir=$(find_kbd_device) || { echo "Error: No keyboard backlight found" >&2; exit 1; }
-    cur_br=$(cat "$dir/brightness" 2>/dev/null || echo 0)
-    max_br=$(cat "$dir/max_brightness" 2>/dev/null || echo 0)
+    _read_file cur_br "$dir/brightness" 0
+    _read_file max_br "$dir/max_brightness" 0
 
     [[ "$max_br" -eq 0 ]] && exit 1
 
     if [[ "$cur_br" -eq 0 ]]; then
-        run_cmd bash -c "echo '$max_br' > '$dir/brightness'"
+        write_kbd_brightness "$dir" "$max_br"
     else
-        run_cmd bash -c "echo '0' > '$dir/brightness'"
+        write_kbd_brightness "$dir" "0"
     fi
 }
 

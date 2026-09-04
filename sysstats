@@ -169,7 +169,9 @@ function cpu_load() {
             if [[ -f "$hwmon" ]] && grep -q "coretemp\|k10temp\|zenpower" "$hwmon" 2>/dev/null; then
                 local hwmon_dir=$(dirname "$hwmon")
                 if [[ -f "$hwmon_dir/temp1_input" ]]; then
-                    temp=$(cat "$hwmon_dir"/temp1_input 2>/dev/null | awk '{print int($1/1000)}' || echo "")
+                    local temp_milli
+                    _read_file temp_milli "$hwmon_dir/temp1_input" ""
+                    [[ -n "$temp_milli" ]] && temp=$(( temp_milli / 1000 ))
                     break
                 fi
             fi
@@ -253,11 +255,12 @@ function _eth_iface() {
     # Same physical-interface detection as eethernet(), but returns the
     # connected interface's name instead of just a Connected/Disconnected
     # verdict.
-    local dev iface
+    local dev iface carrier
     for dev in /sys/class/net/*; do
         iface=$(basename "$dev")
         if [[ "$iface" != "lo" && ! -d "$dev/wireless" && -d "$dev/device" ]]; then
-            if [[ -f "$dev/carrier" && "$(cat "$dev/carrier" 2>/dev/null)" == "1" ]]; then
+            _read_file carrier "$dev/carrier" ""
+            if [[ "$carrier" == "1" ]]; then
                 echo "$iface"
                 return
             fi
@@ -339,11 +342,11 @@ function _battery_health() {
     bat_dir=$(find /sys/class/power_supply/ -maxdepth 1 -name 'BAT*' -print -quit 2>/dev/null || true)
     [[ -z "$bat_dir" ]] && { echo "$health"; return; }
     if [[ -f "$bat_dir/energy_full" && -f "$bat_dir/energy_full_design" ]]; then
-        full=$(cat "$bat_dir/energy_full" 2>/dev/null || echo 0)
-        design=$(cat "$bat_dir/energy_full_design" 2>/dev/null || echo 0)
+        _read_file full "$bat_dir/energy_full" 0
+        _read_file design "$bat_dir/energy_full_design" 0
     elif [[ -f "$bat_dir/charge_full" && -f "$bat_dir/charge_full_design" ]]; then
-        full=$(cat "$bat_dir/charge_full" 2>/dev/null || echo 0)
-        design=$(cat "$bat_dir/charge_full_design" 2>/dev/null || echo 0)
+        _read_file full "$bat_dir/charge_full" 0
+        _read_file design "$bat_dir/charge_full_design" 0
     fi
     if [[ -n "${full:-}" && -n "${design:-}" && "${design:-0}" -gt 0 ]]; then
         health=$(awk -v f="$full" -v d="$design" 'BEGIN{printf "%.0f%%", (f/d)*100}')
@@ -403,7 +406,7 @@ function notify_battery_details() {
 }
 
 function eethernet() {
-    local interface found=0
+    local interface found=0 carrier
 
     # Iterate through all network interfaces
     for dev in /sys/class/net/*; do
@@ -413,7 +416,8 @@ function eethernet() {
         # Physical interfaces usually have a 'device' symlink in sysfs
         if [[ "$interface" != "lo" && ! -d "$dev/wireless" && -d "$dev/device" ]]; then
             # Check the carrier file: 1 means cable is detected and link is up
-            if [[ -f "$dev/carrier" ]] && [[ "$(cat "$dev/carrier" 2>/dev/null)" == "1" ]]; then
+            _read_file carrier "$dev/carrier" ""
+            if [[ "$carrier" == "1" ]]; then
                 echo "󰈀 Connected"
                 return
             fi
@@ -476,8 +480,8 @@ function is_media() {
     local rec=0 stream=0 icon msg rec_mon stream_mon
     [[ -f "/tmp/recpid" ]] && rec=1
     [[ -f "/tmp/streampid" ]] && stream=1
-    [[ -f "/tmp/recpid.monitor" ]] && rec_mon="$(cat /tmp/recpid.monitor)"
-    [[ -f "/tmp/streampid.monitor" ]] && stream_mon="$(cat /tmp/streampid.monitor)"
+    [[ -f "/tmp/recpid.monitor" ]] && _read_file rec_mon /tmp/recpid.monitor ""
+    [[ -f "/tmp/streampid.monitor" ]] && _read_file stream_mon /tmp/streampid.monitor ""
     if [[ $rec -eq 1 && $stream -eq 1 ]]; then
         icon="󰑊"
         msg="Rec (${rec_mon:-NA}) | Stream (${stream_mon:-NA})"
@@ -609,8 +613,8 @@ function bbrightness() {
         return
     fi
 
-    brightness_raw=$(cat "$backlight_dir/brightness" 2>/dev/null || echo "0")
-    max_brightness=$(cat "$backlight_dir/max_brightness" 2>/dev/null || echo "100")
+    _read_file brightness_raw "$backlight_dir/brightness" 0
+    _read_file max_brightness "$backlight_dir/max_brightness" 100
 
     [[ -z "$brightness_raw" || -z "$max_brightness" || "$max_brightness" -eq 0 ]] && brightness=0 || \
         brightness=$(( (brightness_raw * 100 + max_brightness / 2) / max_brightness ))
@@ -641,6 +645,17 @@ function bbrightness_raw() {
 
 # Find the SysFS directory for the keyboard backlight.
 # Returns the path or empty string (exit 1) if not found.
+function _read_file() {
+    # Reads a single-line file with zero subprocess forks. `$(cat file)`
+    # spawns a whole extra process just to read one line bash can read
+    # itself; this is used ~20 times across the block below (battery,
+    # brightness, kbd, ethernet carrier checks, gpu freq, etc.), several
+    # of which run in loops, so the fork count adds up on every refresh.
+    # Usage: _read_file VARNAME FILE [DEFAULT]
+    local -n _out="$1"
+    { read -r _out < "$2"; } 2>/dev/null || _out="${3:-}"
+}
+
 function _kbd_backlight_dir() {
     local d name
     for d in /sys/class/leds/*; do
@@ -668,8 +683,8 @@ function _kbd_backlight_dir() {
 function _kbd_get_pct() {
     local dir="$1" max_br cur_br pct
     [[ -z "$dir" || ! -f "$dir/max_brightness" ]] && { echo 0; return; }
-    max_br=$(cat "$dir/max_brightness" 2>/dev/null || echo 0)
-    cur_br=$(cat "$dir/brightness" 2>/dev/null || echo 0)
+    _read_file max_br "$dir/max_brightness" 0
+    _read_file cur_br "$dir/brightness" 0
     [[ "$max_br" -eq 0 ]] && { echo 0; return; }
     pct=$(( (cur_br * 100) / max_br ))
     echo "$pct"
@@ -683,7 +698,7 @@ function _kbd_set_pct() {
         echo "$(date '+%F %T') sysstats: keyboard backlight not writable or not found" >> "$CLICK_LOG"
         return 1
     }
-    max_br=$(cat "$dir/max_brightness" 2>/dev/null || echo 0)
+    _read_file max_br "$dir/max_brightness" 0
     [[ "$max_br" -eq 0 ]] && return 1
     new_br=$(( (pct * max_br + 50) / 100 ))
     [[ $new_br -gt $max_br ]] && new_br=$max_br
@@ -699,8 +714,8 @@ function kbd_backlight() {
     local led_dir max_br cur_br pct icon
     led_dir=$(_kbd_backlight_dir) || { echo "󰌌 N/A"; return; }
 
-    max_br=$(cat "$led_dir/max_brightness" 2>/dev/null || echo 0)
-    cur_br=$(cat "$led_dir/brightness" 2>/dev/null || echo 0)
+    _read_file max_br "$led_dir/max_brightness" 0
+    _read_file cur_br "$led_dir/brightness" 0
 
     if [[ "$max_br" -eq 0 ]]; then
         echo "󰌌 N/A"
@@ -723,8 +738,8 @@ function kbd_backlight_raw() {
     local led_dir max_br cur_br pct
     led_dir=$(_kbd_backlight_dir) || { echo "0"; return; }
 
-    max_br=$(cat "$led_dir/max_brightness" 2>/dev/null || echo 0)
-    cur_br=$(cat "$led_dir/brightness" 2>/dev/null || echo 0)
+    _read_file max_br "$led_dir/max_brightness" 0
+    _read_file cur_br "$led_dir/brightness" 0
 
     if [[ "$max_br" -eq 0 ]]; then
         echo "0"
@@ -755,15 +770,15 @@ function ggpu() {
     # 2. Get Temperature (iGPU shares CPU die)
     # Check thermal_zone (most reliable on laptops)
     if [[ -f /sys/class/thermal/thermal_zone0/temp ]]; then
-        temp=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
+        _read_file temp /sys/class/thermal/thermal_zone0/temp 0
         temp=$(( temp / 1000 ))
     fi
 
     # 3. Intel iGPU Logic (Targeting card1)
     if [[ -d "$intel_card" ]]; then
         local cur max
-        cur=$(cat "$intel_card/gt_cur_freq_mhz" 2>/dev/null || echo "0")
-        max=$(cat "$intel_card/gt_max_freq_mhz" 2>/dev/null || echo "0")
+        _read_file cur "$intel_card/gt_cur_freq_mhz" 0
+        _read_file max "$intel_card/gt_max_freq_mhz" 0
 
         if [[ "${max:-0}" -gt 0 ]]; then
             usage=$(( ${cur:-0} * 100 / ${max:-0} ))
