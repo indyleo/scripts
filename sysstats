@@ -30,7 +30,7 @@ function handle_block_click() {
     esac
 
     case "$opt" in
-        volume)     # ACTIVE - wired to signal 24 in BLOCKS()
+        volume)
             case "$BLOCK_BUTTON" in
                 1) "$SYSCTL" vol --toggle >>"$CLICK_LOG" 2>&1 || true ;;   # left:  mute toggle
                 3) echo "togglescratch 3" > "$DWM_FIFO" 2>>"$CLICK_LOG" || true ;;  # right: wiremix mixer scratchpad
@@ -38,44 +38,43 @@ function handle_block_click() {
                 5) "$SYSCTL" vol --dec    >>"$CLICK_LOG" 2>&1 || true ;;   # scroll down: -5%
             esac
             ;;
-        brightness) # ACTIVE - wired to signal 25 in BLOCKS()
+        brightness)
             case "$BLOCK_BUTTON" in
                 1) "$SYSCTL" bri --toggle >>"$CLICK_LOG" 2>&1 || true ;;   # left:  dim/undim toggle (10% <-> 100%)
                 4) "$SYSCTL" bri --inc    >>"$CLICK_LOG" 2>&1 || true ;;   # scroll up:   +5%
                 5) "$SYSCTL" bri --dec    >>"$CLICK_LOG" 2>&1 || true ;;   # scroll down: -5%
             esac
             ;;
-        mic|microphone) # inactive - no BLOCKS() entry calls `sysstats mic` yet
+        mic|microphone)
             case "$BLOCK_BUTTON" in
                 1) "$SYSCTL" mic --toggle >>"$CLICK_LOG" 2>&1 || true ;;   # left:  mute toggle
                 4) "$SYSCTL" mic --inc    >>"$CLICK_LOG" 2>&1 || true ;;   # scroll up:   +5%
                 5) "$SYSCTL" mic --dec    >>"$CLICK_LOG" 2>&1 || true ;;   # scroll down: -5%
             esac
             ;;
-        wifi) # needs config.h's block cmd to `export BLOCK_BUTTON;` -- see notes there
+        wifi)
             case "$BLOCK_BUTTON" in
-                1) # left: open the interactive network picker. Detached
-                   # (setsid -f) so dwm's popen() doesn't block on it.
-                   if command -v wifi >/dev/null 2>&1; then
-                       setsid -f wifi >>"$CLICK_LOG" 2>&1 || true
-                   else
-                       echo "$(date '+%F %T') sysstats: 'wifi' script not found on PATH" >> "$CLICK_LOG"
-                   fi
-                   ;;
-                3) notify_wifi_details ;;  # right: connection details notification
+                1)
+                    if command -v wifi >/dev/null 2>&1; then
+                        setsid -f wifi >>"$CLICK_LOG" 2>&1 || true
+                    else
+                        echo "$(date '+%F %T') sysstats: 'wifi' script not found on PATH" >> "$CLICK_LOG"
+                    fi
+                    ;;
+                3) notify_wifi_details ;;
             esac
             ;;
-        ethernet|eth) # needs config.h's block cmd to `export BLOCK_BUTTON;`
+        ethernet|eth)
             case "$BLOCK_BUTTON" in
                 1) notify_ethernet_details ;;
             esac
             ;;
-        tail|tailscale) # needs config.h's block cmd to `export BLOCK_BUTTON;`
+        tail|tailscale)
             case "$BLOCK_BUTTON" in
                 1) notify_tailscale_details ;;
             esac
             ;;
-        battery) # needs config.h's block cmd to `export BLOCK_BUTTON;`
+        battery)
             case "$BLOCK_BUTTON" in
                 1) notify_battery_details ;;
             esac
@@ -215,7 +214,7 @@ function _public_ipv6() {
 
 function _wifi_iface() {
     nmcli -t -f DEVICE,TYPE,STATE dev status 2>/dev/null |
-        awk -F: '$2=="wifi" && $3=="connected"{print $1; exit}'
+    awk -F: '$2=="wifi" && $3=="connected"{print $1; exit}'
 }
 
 function _eth_iface() {
