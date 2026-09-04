@@ -16,13 +16,21 @@ DWM_FIFO="/tmp/dwm.fifo"
 
 function handle_block_click() {
     [[ -z "${BLOCK_BUTTON:-}" ]] && return 0
-    if ! command -v "$SYSCTL" >/dev/null 2>&1; then
-        echo "$(date '+%F %T') sysstats: '$SYSCTL' not found on PATH" >> "$CLICK_LOG"
-        return 0
-    fi
+
+    # Only volume/brightness/mic route through $SYSCTL; the network/battery
+    # detail notifications below don't need it, so this guard is scoped to
+    # just those instead of gating the whole function.
+    case "$opt" in
+        volume|brightness|mic|microphone)
+            if ! command -v "$SYSCTL" >/dev/null 2>&1; then
+                echo "$(date '+%F %T') sysstats: '$SYSCTL' not found on PATH" >> "$CLICK_LOG"
+                return 0
+            fi
+            ;;
+    esac
 
     case "$opt" in
-        volume)
+        volume)     # ACTIVE - wired to signal 24 in BLOCKS()
             case "$BLOCK_BUTTON" in
                 1) "$SYSCTL" vol --toggle >>"$CLICK_LOG" 2>&1 || true ;;   # left:  mute toggle
                 3) echo "togglescratch 3" > "$DWM_FIFO" 2>>"$CLICK_LOG" || true ;;  # right: wiremix mixer scratchpad
@@ -30,31 +38,52 @@ function handle_block_click() {
                 5) "$SYSCTL" vol --dec    >>"$CLICK_LOG" 2>&1 || true ;;   # scroll down: -5%
             esac
             ;;
-        brightness)
+        brightness) # ACTIVE - wired to signal 25 in BLOCKS()
             case "$BLOCK_BUTTON" in
                 1) "$SYSCTL" bri --toggle >>"$CLICK_LOG" 2>&1 || true ;;   # left:  dim/undim toggle (10% <-> 100%)
                 4) "$SYSCTL" bri --inc    >>"$CLICK_LOG" 2>&1 || true ;;   # scroll up:   +5%
                 5) "$SYSCTL" bri --dec    >>"$CLICK_LOG" 2>&1 || true ;;   # scroll down: -5%
             esac
             ;;
-        mic|microphone)
+        mic|microphone) # inactive - no BLOCKS() entry calls `sysstats mic` yet
             case "$BLOCK_BUTTON" in
                 1) "$SYSCTL" mic --toggle >>"$CLICK_LOG" 2>&1 || true ;;   # left:  mute toggle
                 4) "$SYSCTL" mic --inc    >>"$CLICK_LOG" 2>&1 || true ;;   # scroll up:   +5%
                 5) "$SYSCTL" mic --dec    >>"$CLICK_LOG" 2>&1 || true ;;   # scroll down: -5%
             esac
             ;;
-        wifi)
+        wifi) # needs config.h's block cmd to `export BLOCK_BUTTON;` -- see notes there
             case "$BLOCK_BUTTON" in
-                1) "$SYSCTL" wifi --toggle >>"$CLICK_LOG" 2>&1 || true ;;  # left:  wifi on/off
+                1) # left: open the interactive network picker. Detached
+                   # (setsid -f) so dwm's popen() doesn't block on it.
+                   if command -v wifi >/dev/null 2>&1; then
+                       setsid -f wifi >>"$CLICK_LOG" 2>&1 || true
+                   else
+                       echo "$(date '+%F %T') sysstats: 'wifi' script not found on PATH" >> "$CLICK_LOG"
+                   fi
+                   ;;
+                3) notify_wifi_details ;;  # right: connection details notification
+            esac
+            ;;
+        ethernet|eth) # needs config.h's block cmd to `export BLOCK_BUTTON;`
+            case "$BLOCK_BUTTON" in
+                1) notify_ethernet_details ;;
+            esac
+            ;;
+        tail|tailscale) # needs config.h's block cmd to `export BLOCK_BUTTON;`
+            case "$BLOCK_BUTTON" in
+                1) notify_tailscale_details ;;
+            esac
+            ;;
+        battery) # needs config.h's block cmd to `export BLOCK_BUTTON;`
+            case "$BLOCK_BUTTON" in
+                1) notify_battery_details ;;
             esac
             ;;
     esac
 
     return 0
 }
-
-handle_block_click
 
 function ttime() {
     date +"󰥔  %I:%M %p"
@@ -157,6 +186,168 @@ function memory_usage() {
     total_gb=$(awk -v total="$total_kb" 'BEGIN {printf "%.1f", total/1024/1024}')
     percent=$(awk -v used="$used_kb" -v total="$total_kb" 'BEGIN {printf "%.0f", (used/total)*100}')
     echo "  ${percent}% (${used_gb}G/${total_gb}G)"
+}
+
+# --- Shared helpers for the click-to-notify details below ---
+
+function _iface_ipv4() {
+    ip -4 -o addr show dev "$1" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1
+}
+
+function _iface_ipv6() {
+    ip -6 -o addr show dev "$1" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1
+}
+
+function _ping_via() {
+    # One ICMP ping out a specific interface. Prints "N ms" or "unreachable".
+    local iface="$1" host="${2:-1.1.1.1}" ms
+    ms=$(ping -I "$iface" -c1 -W2 "$host" 2>/dev/null | grep -oP 'time=\K[0-9.]+')
+    [[ -n "$ms" ]] && echo "${ms}ms" || echo "unreachable"
+}
+
+function _public_ipv4() {
+    curl -4 -s --max-time 2 ifconfig.me 2>/dev/null || echo ""
+}
+
+function _public_ipv6() {
+    curl -6 -s --max-time 2 ifconfig.me 2>/dev/null || echo ""
+}
+
+function _wifi_iface() {
+    nmcli -t -f DEVICE,TYPE,STATE dev status 2>/dev/null |
+        awk -F: '$2=="wifi" && $3=="connected"{print $1; exit}'
+}
+
+function _eth_iface() {
+    # Same physical-interface detection as eethernet(), but returns the
+    # connected interface's name instead of just a Connected/Disconnected
+    # verdict.
+    local dev iface
+    for dev in /sys/class/net/*; do
+        iface=$(basename "$dev")
+        if [[ "$iface" != "lo" && ! -d "$dev/wireless" && -d "$dev/device" ]]; then
+            if [[ -f "$dev/carrier" && "$(cat "$dev/carrier" 2>/dev/null)" == "1" ]]; then
+                echo "$iface"
+                return
+            fi
+        fi
+    done
+}
+
+# Builds the "ping | local-v4 -> pub-v4[ | v6]" line shared by the wifi
+# and ethernet notifications. Truncates left-to-right if it doesn't fit
+# NOTIF_W (notifications.c has no wrapping/multi-line support), so
+# field order here doubles as priority order.
+function _link_detail_line() {
+    local iface="$1" ping4 v4 v6 pub4 pub6 line
+    ping4=$(_ping_via "$iface")
+    v4=$(_iface_ipv4 "$iface"); [[ -z "$v4" ]] && v4="N/A"
+    pub4=$(_public_ipv4); [[ -z "$pub4" ]] && pub4="N/A"
+    v6=$(_iface_ipv6 "$iface")
+    pub6=$(_public_ipv6)
+
+    line="${ping4} | ${v4} -> ${pub4}"
+    [[ -n "$v6" || -n "$pub6" ]] && line+=" | v6 ${v6:-none}"
+    echo "$line"
+}
+
+function notify_wifi_details() {
+    local iface
+    iface=$(_wifi_iface)
+    if [[ -z "$iface" ]]; then
+        notify-send -a sysstats "󰤮 Wi-Fi" "Not connected" 2>/dev/null || true
+        return
+    fi
+    notify-send -a sysstats "󰤮 Wi-Fi (${iface})" "$(_link_detail_line "$iface")" 2>/dev/null || true
+}
+
+function notify_ethernet_details() {
+    local iface
+    iface=$(_eth_iface)
+    if [[ -z "$iface" ]]; then
+        notify-send -a sysstats "󰲜 Ethernet" "Not connected" 2>/dev/null || true
+        return
+    fi
+    notify-send -a sysstats "󰈀 Ethernet (${iface})" "$(_link_detail_line "$iface")" 2>/dev/null || true
+}
+
+function notify_tailscale_details() {
+    local status_out state up down v4 v6 body icon
+    if ! command -v tailscale &> /dev/null; then
+        notify-send -a sysstats "󰈂 Tailscale" "not installed" 2>/dev/null || true
+        return
+    fi
+    status_out=$(tailscale status 2>&1) || true
+    if [[ -z "$status_out" ]]; then
+        state="Down (unreachable)"; icon="󰈂"
+    elif echo "$status_out" | grep -q "Logged out"; then
+        state="Down (logged out)"; icon="󰈂"
+    else
+        state="Up"; icon="󰈁"
+        # Peer lines start with an address; "offline" marks a down peer.
+        down=$(echo "$status_out" | awk '$1 ~ /^[0-9a-fA-F:.]+$/ && /offline/' | wc -l)
+        up=$(echo "$status_out" | awk '$1 ~ /^[0-9a-fA-F:.]+$/ && !/offline/' | wc -l)
+    fi
+
+    v4=$(tailscale ip -4 2>/dev/null | head -n1)
+    v6=$(tailscale ip -6 2>/dev/null | head -n1)
+
+    body="$state"
+    [[ -n "${up:-}" || -n "${down:-}" ]] && body+=" (${up:-0} up, ${down:-0} down)"
+    [[ -n "$v4" ]] && body+=" | ${v4}"
+    [[ -n "$v6" ]] && body+=" | ${v6}"
+
+    notify-send -a sysstats "${icon} Tailscale" "$body" 2>/dev/null || true
+}
+
+function _battery_health() {
+    # health% = current full-charge capacity vs. design capacity. Kernels
+    # expose this as either energy_* (Wh) or charge_* (Ah) depending on
+    # the battery's fuel gauge, so check both.
+    local bat_dir full design health="N/A"
+    bat_dir=$(find /sys/class/power_supply/ -maxdepth 1 -name 'BAT*' -print -quit 2>/dev/null)
+    [[ -z "$bat_dir" ]] && { echo "$health"; return; }
+    if [[ -f "$bat_dir/energy_full" && -f "$bat_dir/energy_full_design" ]]; then
+        full=$(cat "$bat_dir/energy_full" 2>/dev/null || echo 0)
+        design=$(cat "$bat_dir/energy_full_design" 2>/dev/null || echo 0)
+    elif [[ -f "$bat_dir/charge_full" && -f "$bat_dir/charge_full_design" ]]; then
+        full=$(cat "$bat_dir/charge_full" 2>/dev/null || echo 0)
+        design=$(cat "$bat_dir/charge_full_design" 2>/dev/null || echo 0)
+    fi
+    if [[ -n "${full:-}" && -n "${design:-}" && "${design:-0}" -gt 0 ]]; then
+        health=$(awk -v f="$full" -v d="$design" 'BEGIN{printf "%.0f%%", (f/d)*100}')
+    fi
+    echo "$health"
+}
+
+function notify_battery_details() {
+    local battery_info first_line status time_left health direction body
+    if ! command -v acpi &> /dev/null; then
+        notify-send -a sysstats "󰂄 Battery" "acpi not installed" 2>/dev/null || true
+        return
+    fi
+    battery_info=$(acpi -b 2>/dev/null || echo "")
+    if [[ -z "$battery_info" ]]; then
+        notify-send -a sysstats "󰂄 Battery" "No battery detected" 2>/dev/null || true
+        return
+    fi
+    first_line=$(echo "$battery_info" | head -n1)
+    status=$(echo "$first_line" | awk -F', ' '{print $1}' | awk -F': ' '{print $2}')
+    time_left=$(echo "$first_line" | grep -oP '\d+:\d+:\d+' | head -n1)
+    [[ -n "$time_left" ]] && time_left=$(echo "$time_left" | awk -F: '{printf "%d:%02d", $1, $2}')
+    health=$(_battery_health)
+
+    case "$status" in
+        Charging) direction="${time_left:-N/A} until full" ;;
+        Discharging) direction="${time_left:-N/A} remaining" ;;
+        *) direction="" ;;
+    esac
+
+    body="${status:-Unknown}"
+    [[ -n "$direction" ]] && body+=" | ${direction}"
+    body+=" | health ${health}"
+
+    notify-send -a sysstats "󰂄 Battery" "$body" 2>/dev/null || true
 }
 
 function eethernet() {
@@ -297,16 +488,31 @@ function bbattery() {
     [[ -n "$time_left" ]] && echo "${icon} ${percent}% (${time_left})" || echo "${icon} ${percent}%"
 }
 
+function _wpctl_pct_muted() {
+    # Shared parser for vvolume()/mmicrophone(): one `wpctl get-volume`
+    # call, prints "PCT MUTED" (MUTED is 1 or 0). Same wpctl output
+    # format ("Volume: 0.NN" / "Volume: 0.NN [MUTED]") that sysctl and
+    # osd.c's fastget already parse -- kept in sync with those rather
+    # than going through pamixer, which isn't part of this system's
+    # audio stack (sysctl's own DEPS=(... wpctl ...) has no pamixer).
+    local target="$1" line pct muted
+    line=$(wpctl get-volume "$target" 2>/dev/null) || { echo "0 0"; return 1; }
+    pct=$(awk '{printf "%d", $2 * 100 + 0.5}' <<< "$line")
+    (( pct > 100 )) && pct=100
+    (( pct < 0 )) && pct=0
+    [[ "$line" == *MUTED* ]] && muted=1 || muted=0
+    echo "$pct $muted"
+}
+
 function vvolume() {
     local vol muted icon msg
-    if ! command -v pamixer &> /dev/null; then
+    if ! command -v wpctl &> /dev/null; then
         echo "󰝟 No tool"; return
     fi
-    vol="$(pamixer --get-volume 2>/dev/null || echo "0")"
-    muted=$(pamixer --get-mute 2>/dev/null || echo "false")
-    if [[ "$muted" == "true" || "$vol" -eq 0 ]]; then
+    read -r vol muted < <(_wpctl_pct_muted @DEFAULT_AUDIO_SINK@)
+    if [[ "$muted" == "1" || "$vol" -eq 0 ]]; then
         icon="󰝟"; msg="Muted"
-    elif [[ "$vol" -eq 100 ]]; then icon="󰶬"; msg="${vol}%"
+    elif [[ "$vol" -ge 100 ]]; then icon="󰶬"; msg="${vol}%"
     elif [[ "$vol" -ge 75 ]]; then icon="󰕾"; msg="${vol}%"
     elif [[ "$vol" -ge 25 ]]; then icon="󰖀"; msg="${vol}%"
 else icon="󰕿"; msg="${vol}%"; fi
@@ -322,12 +528,11 @@ function vvolume_raw() {
 
 function mmicrophone() {
     local vol muted icon msg
-    if ! command -v pamixer &> /dev/null; then
+    if ! command -v wpctl &> /dev/null; then
         echo " No tool"; return
     fi
-    vol="$(pamixer --default-source --get-volume 2>/dev/null || echo 0)"
-    muted="$(pamixer --default-source --get-mute 2>/dev/null || echo false)"
-    if [[ "$muted" == "false" && "$vol" -gt 0 ]]; then
+    read -r vol muted < <(_wpctl_pct_muted @DEFAULT_AUDIO_SOURCE@)
+    if [[ "$muted" == "0" && "$vol" -gt 0 ]]; then
         icon=""; msg="${vol}%"
     else
         icon=""; msg="Muted"
@@ -520,6 +725,12 @@ Help:
     -h, --help     Show this menu
 EOF
 }
+
+# Moved here (after every function definition) so handle_block_click can
+# call notify_wifi_details() etc. -- bash executes top to bottom, and this
+# used to run right after its own definition, before those functions
+# further down in the file existed yet.
+handle_block_click
 
 case "$opt" in
     cpu) cpu_load ;;
