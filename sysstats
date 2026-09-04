@@ -45,6 +45,38 @@ function handle_block_click() {
                 5) "$SYSCTL" bri --dec    >>"$CLICK_LOG" 2>&1 || true ;;   # scroll down: -5%
             esac
             ;;
+            # --- Keyboard backlight click handling ---
+        kbd|keyboard|kbd_backlight)
+            local kbd_dir
+            kbd_dir=$(_kbd_backlight_dir)
+            if [[ -z "$kbd_dir" ]]; then
+                echo "$(date '+%F %T') sysstats: no keyboard backlight found" >> "$CLICK_LOG"
+                return 0
+            fi
+
+            case "$BLOCK_BUTTON" in
+                1)  # left click: toggle on/off
+                    cur_pct=$(_kbd_get_pct "$kbd_dir")
+                    if [[ "$cur_pct" -eq 0 ]]; then
+                        _kbd_set_pct "$kbd_dir" 100
+                    else
+                        _kbd_set_pct "$kbd_dir" 0
+                    fi
+                    ;;
+                4)  # scroll up: +10%
+                    cur_pct=$(_kbd_get_pct "$kbd_dir")
+                    new_pct=$(( cur_pct + 10 ))
+                    [[ $new_pct -gt 100 ]] && new_pct=100
+                    _kbd_set_pct "$kbd_dir" "$new_pct"
+                    ;;
+                5)  # scroll down: -10%
+                    cur_pct=$(_kbd_get_pct "$kbd_dir")
+                    new_pct=$(( cur_pct - 10 ))
+                    [[ $new_pct -lt 0 ]] && new_pct=0
+                    _kbd_set_pct "$kbd_dir" "$new_pct"
+                    ;;
+            esac
+            ;;
         mic|microphone)
             case "$BLOCK_BUTTON" in
                 1) "$SYSCTL" mic --toggle >>"$CLICK_LOG" 2>&1 || true ;;   # left:  mute toggle
@@ -397,7 +429,6 @@ function eethernet() {
     fi
 }
 
-
 function wifi_status() {
     local current icon msg quality
     if command -v nmcli &> /dev/null; then
@@ -606,6 +637,88 @@ function bbrightness_raw() {
     brightnessctl -m | awk -F, '{print $4}' | tr -d '%'
 }
 
+# --- Keyboard backlight additions (display + helpers) ---
+
+# Find the SysFS directory for the keyboard backlight.
+# Returns the path or empty string (exit 1) if not found.
+function _kbd_backlight_dir() {
+    local d name
+    for d in /sys/class/leds/*; do
+        [[ -d "$d" ]] || continue
+        name=$(basename "$d")
+        if [[ "$name" == *kbd* || "$name" == *keyboard* ]]; then
+            if [[ -f "$d/brightness" && -f "$d/max_brightness" ]]; then
+                echo "$d"
+                return 0
+            fi
+        fi
+    done
+
+    # Fallback to common names
+    for name in "kbd_backlight" "platform::kbd_backlight" "tpacpi::kbd_backlight" "dell::kbd_backlight"; do
+        if [[ -d "/sys/class/leds/$name" && -f "/sys/class/leds/$name/brightness" ]]; then
+            echo "/sys/class/leds/$name"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Get current keyboard backlight percentage (0-100).
+function _kbd_get_pct() {
+    local dir="$1" max_br cur_br pct
+    [[ -z "$dir" || ! -f "$dir/max_brightness" ]] && { echo 0; return; }
+    max_br=$(cat "$dir/max_brightness" 2>/dev/null || echo 0)
+    cur_br=$(cat "$dir/brightness" 2>/dev/null || echo 0)
+    [[ "$max_br" -eq 0 ]] && { echo 0; return; }
+    pct=$(( (cur_br * 100) / max_br ))
+    echo "$pct"
+}
+
+# Set keyboard backlight to a percentage (0-100).
+# Returns 0 on success, 1 on failure.
+function _kbd_set_pct() {
+    local dir="$1" pct="$2" max_br new_br
+    [[ -z "$dir" || ! -f "$dir/max_brightness" || ! -w "$dir/brightness" ]] && {
+        echo "$(date '+%F %T') sysstats: keyboard backlight not writable or not found" >> "$CLICK_LOG"
+        return 1
+    }
+    max_br=$(cat "$dir/max_brightness" 2>/dev/null || echo 0)
+    [[ "$max_br" -eq 0 ]] && return 1
+    new_br=$(( (pct * max_br + 50) / 100 ))
+    [[ $new_br -gt $max_br ]] && new_br=$max_br
+    [[ $new_br -lt 0 ]] && new_br=0
+    echo "$new_br" > "$dir/brightness" 2>>"$CLICK_LOG" || {
+        echo "$(date '+%F %T') sysstats: failed to write keyboard backlight" >> "$CLICK_LOG"
+        return 1
+    }
+    return 0
+}
+
+function kbd_backlight() {
+    local led_dir max_br cur_br pct icon
+    led_dir=$(_kbd_backlight_dir) || { echo "󰌌 N/A"; return; }
+
+    max_br=$(cat "$led_dir/max_brightness" 2>/dev/null || echo 0)
+    cur_br=$(cat "$led_dir/brightness" 2>/dev/null || echo 0)
+
+    if [[ "$max_br" -eq 0 ]]; then
+        echo "󰌌 N/A"
+        return
+    fi
+
+    pct=$(( (cur_br * 100 + max_br / 2) / max_br ))
+
+    # Choose icon based on percentage
+    if   [[ $pct -eq 0 ]]; then icon="󰌋"   # backlight off
+    elif [[ $pct -le 33 ]]; then icon="󰌌"  # low
+    elif [[ $pct -le 66 ]]; then icon="󰌍"  # medium
+    else                            icon="󰌎"  # high
+    fi
+
+    echo "${icon} ${pct}%"
+}
+
 function ggpu() {
     local usage="" temp=""
     local intel_card="/sys/class/drm/card1"
@@ -703,7 +816,7 @@ function all_stats() {
     local w=$(weather)
     [[ -n "$u" ]] && echo -n "$u | "
     [[ -n "$w" ]] && echo -n "$w | "
-    echo "$(is_media) | $(cpu_load) | $(ggpu) | $(memory_usage) | $(disk_usage) | $(vvolume) | $(bbattery) | $(network_ips) | $(wifi_status) | $(date_time)"
+    echo "$(is_media) | $(cpu_load) | $(ggpu) | $(memory_usage) | $(disk_usage) | $(vvolume) | $(kbd_backlight) | $(bbattery) | $(network_ips) | $(wifi_status) | $(date_time)"
 }
 
 function help_menu() {
@@ -719,6 +832,7 @@ Monitoring Options:
     disk           Root partition usage and remaining space
     battery        Battery level, status, and time remaining
     brightness     Backlight intensity percentage
+    kbd            Keyboard backlight level
     volume         Audio output level and mute status
     mic            Microphone input level and mute status
 
@@ -764,6 +878,7 @@ case "$opt" in
     mic_raw) mmicrophone_raw ;;         # <-- Added for OSD
     brightness) bbrightness ;;
     bri_raw) bbrightness_raw ;;         # <-- Added for OSD
+    kbd|keyboard|kbd_backlight) kbd_backlight ;;
     wifi) wifi_status ;;
     eth|ethernet) eethernet ;;
     tail) tail_status ;;

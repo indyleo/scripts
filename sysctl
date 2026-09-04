@@ -38,7 +38,6 @@ function run_cmd() {
     fi
 }
 
-
 # --- Audio (wpctl) Logic ---
 
 function adjust_volume() {
@@ -91,6 +90,78 @@ function toggle_brightness() {
     fi
 }
 
+# --- Keyboard Backlight Logic (new) ---
+
+# Find the keyboard backlight device directory in sysfs.
+function find_kbd_device() {
+    local d name
+    for d in /sys/class/leds/*; do
+        [[ -d "$d" ]] || continue
+        name=$(basename "$d")
+        if [[ "$name" == *kbd* || "$name" == *keyboard* ]]; then
+            if [[ -f "$d/brightness" && -f "$d/max_brightness" ]]; then
+                echo "$d"
+                return 0
+            fi
+        fi
+    done
+
+    # Fallback to common names
+    for name in "kbd_backlight" "platform::kbd_backlight" "tpacpi::kbd_backlight" "dell::kbd_backlight"; do
+        if [[ -d "/sys/class/leds/$name" && -f "/sys/class/leds/$name/brightness" ]]; then
+            echo "/sys/class/leds/$name"
+            return 0
+        fi
+    done
+    return 1
+}
+
+function get_kbd_pct() {
+    local dir="$1" max_br cur_br pct
+    max_br=$(cat "$dir/max_brightness" 2>/dev/null || echo 0)
+    cur_br=$(cat "$dir/brightness" 2>/dev/null || echo 0)
+    [[ "$max_br" -eq 0 ]] && { echo 0; return; }
+    pct=$(( (cur_br * 100) / max_br ))
+    echo "$pct"
+}
+
+function set_kbd_pct() {
+    local dir="$1" pct="$2" max_br new_br
+    max_br=$(cat "$dir/max_brightness" 2>/dev/null || echo 0)
+    [[ "$max_br" -eq 0 ]] && return 1
+    new_br=$(( (pct * max_br + 50) / 100 ))
+    [[ $new_br -gt $max_br ]] && new_br=$max_br
+    [[ $new_br -lt 0 ]] && new_br=0
+    echo "$new_br" > "$dir/brightness" 2>/dev/null || return 1
+    return 0
+}
+
+function adjust_kbd_brightness() {
+    local direction="$1" # "+" or "-"
+    local dir current_pct new_pct
+    dir=$(find_kbd_device) || { echo "Error: No keyboard backlight found" >&2; exit 1; }
+    current_pct=$(get_kbd_pct "$dir")
+    if [[ "$direction" == "+" ]]; then
+        new_pct=$(( current_pct + amount ))
+        [[ $new_pct -gt 100 ]] && new_pct=100
+    else
+        new_pct=$(( current_pct - amount ))
+        [[ $new_pct -lt 0 ]] && new_pct=0
+    fi
+    set_kbd_pct "$dir" "$new_pct" && echo "Keyboard backlight set to ${new_pct}%"
+}
+
+function toggle_kbd_brightness() {
+    local dir current_pct
+    dir=$(find_kbd_device) || { echo "Error: No keyboard backlight found" >&2; exit 1; }
+    current_pct=$(get_kbd_pct "$dir")
+    if [[ "$current_pct" -eq 0 ]]; then
+        set_kbd_pct "$dir" 100 && echo "Keyboard backlight turned on (100%)"
+    else
+        set_kbd_pct "$dir" 0 && echo "Keyboard backlight turned off"
+    fi
+}
+
 # --- Network/Radio Logic ---
 
 function wifi_toggle() {
@@ -139,6 +210,7 @@ Usage: $SCRIPT_NAME SUBSYSTEM ACTION [AMOUNT]
 
 Subsystems:
   bri, brightness     Screen brightness
+  kbd, keyboard       Keyboard backlight
   vol, volume         System volume
   mic                 Microphone volume
   wifi                Wi-Fi toggle
@@ -148,6 +220,8 @@ Subsystems:
 Examples:
   $SCRIPT_NAME vol --inc 5
   $SCRIPT_NAME bri -d 10
+  $SCRIPT_NAME kbd --toggle
+  $SCRIPT_NAME kbd --inc 10
   $SCRIPT_NAME wifi --toggle
 EOF
 }
@@ -162,6 +236,15 @@ case "$subsys" in
             --toggle) toggle_brightness ;;
             --help|-h) global_help ;;
             *) echo "Invalid brightness action. Use --inc, --dec, or --toggle." >&2; exit 1 ;;
+        esac
+        ;;
+    kbd|keyboard|kbd_backlight)
+        case "$action" in
+            --inc|-i) adjust_kbd_brightness "+" ;;
+            --dec|-d) adjust_kbd_brightness "-" ;;
+            --toggle) toggle_kbd_brightness ;;
+            --help|-h) global_help ;;
+            *) echo "Invalid keyboard backlight action. Use --inc, --dec, or --toggle." >&2; exit 1 ;;
         esac
         ;;
     vol|volume)
