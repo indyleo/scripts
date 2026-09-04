@@ -21,7 +21,7 @@ function handle_block_click() {
     # detail notifications below don't need it, so this guard is scoped to
     # just those instead of gating the whole function.
     case "$opt" in
-        volume|brightness|mic|microphone)
+        volume|brightness|mic|microphone|kbd_backlight|kbd|keyboard|vol|bri)
             if ! command -v "$SYSCTL" >/dev/null 2>&1; then
                 echo "$(date '+%F %T') sysstats: '$SYSCTL' not found on PATH" >> "$CLICK_LOG"
                 return 0
@@ -30,7 +30,7 @@ function handle_block_click() {
     esac
 
     case "$opt" in
-        volume)
+        volume|vol)
             case "$BLOCK_BUTTON" in
                 1) "$SYSCTL" vol --toggle >>"$CLICK_LOG" 2>&1 || true ;;   # left:  mute toggle
                 3) echo "togglescratch 3" > "$DWM_FIFO" 2>>"$CLICK_LOG" || true ;;  # right: wiremix mixer scratchpad
@@ -38,7 +38,7 @@ function handle_block_click() {
                 5) "$SYSCTL" vol --dec    >>"$CLICK_LOG" 2>&1 || true ;;   # scroll down: -5%
             esac
             ;;
-        brightness)
+        brightness|bri)
             case "$BLOCK_BUTTON" in
                 1) "$SYSCTL" bri --toggle >>"$CLICK_LOG" 2>&1 || true ;;   # left:  dim/undim toggle (10% <-> 100%)
                 4) "$SYSCTL" bri --inc    >>"$CLICK_LOG" 2>&1 || true ;;   # scroll up:   +5%
@@ -719,6 +719,23 @@ function kbd_backlight() {
     echo "${icon} ${pct}%"
 }
 
+function kbd_backlight_raw() {
+    local led_dir max_br cur_br pct
+    led_dir=$(_kbd_backlight_dir) || { echo "0"; return; }
+
+    max_br=$(cat "$led_dir/max_brightness" 2>/dev/null || echo 0)
+    cur_br=$(cat "$led_dir/brightness" 2>/dev/null || echo 0)
+
+    if [[ "$max_br" -eq 0 ]]; then
+        echo "0"
+        return
+    fi
+
+    # Calculate percentage with rounding
+    pct=$(( (cur_br * 100 + max_br / 2) / max_br ))
+    echo "$pct"
+}
+
 function ggpu() {
     local usage="" temp=""
     local intel_card="/sys/class/drm/card1"
@@ -834,7 +851,7 @@ Monitoring Options:
     brightness     Backlight intensity percentage
     kbd            Keyboard backlight level
     volume         Audio output level and mute status
-    mic            Microphone input level and mute status
+    microphone     Microphone input level and mute status
 
 Network Options:
     wifi           SSID and signal strength
@@ -879,6 +896,7 @@ case "$opt" in
     brightness) bbrightness ;;
     bri_raw) bbrightness_raw ;;         # <-- Added for OSD
     kbd|keyboard|kbd_backlight) kbd_backlight ;;
+    kbd_raw) kbd_backlight_raw ;;       # <-- Added for OSD
     wifi) wifi_status ;;
     eth|ethernet) eethernet ;;
     tail) tail_status ;;
