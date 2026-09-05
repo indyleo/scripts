@@ -477,7 +477,7 @@ mode_record() {
             local pair dx dy
             # Extract only the numeric motion pair; libinput may append
             # "unaccelerated" inside the parentheses.
-            pair=$(echo "$raw" | grep -oE '\\([-+]?[0-9]+([.][0-9]+)?[[:space:]]*/[[:space:]]*[-+]?[0-9]+([.][0-9]+)?' | head -1 || true)
+						pair=$(echo "$raw" | grep -oE '\([-+]?[0-9]+([.][0-9]+)?[[:space:]]*/[[:space:]]*[-+]?[0-9]+([.][0-9]+)?' | head -1 || true)
             pair="${pair#(}"
             dx=$(echo "$pair" | cut -d/ -f1 | tr -d '[:space:]')
             dy=$(echo "$pair" | cut -d/ -f2 | tr -d '[:space:]')
