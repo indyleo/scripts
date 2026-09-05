@@ -622,7 +622,7 @@ mode_play() {
         local prev_ts=0
         while IFS=$'\t' read -r ts type a b; do
             local wait_s
-            wait_s=$(awk "BEGIN {d=($ts-$prev_ts)/$SPEED; if (d<0) d=0; printf \"%.3f\", d}")
+						wait_s=$(awk -v ts="$ts" -v prev="$prev_ts" -v speed="$SPEED" 'BEGIN {d=(ts-prev)/speed; if (d<0) d=0; printf "%.3f", d}')
             sleep "$wait_s"
             prev_ts="$ts"
 
