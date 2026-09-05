@@ -423,7 +423,7 @@ mode_record() {
     # a permission error silently kill the script via `set -e`.
     local preflight_err
     preflight_err="$(timeout 1 libinput debug-events --show-keycodes 2>&1 >/dev/null || true)"
-    if echo "$preflight_err" | grep -qiE 'permission denied|failed to.*seat|not part of|must be run as root'; then
+    if echo "$preflight_err" | grep -qiE 'permission denied|failed to.*seat|not part of|must be run as root|insufficient permissions|operation not permitted'; then
         echo "Couldn't open input devices for recording:"
         echo "  $preflight_err" | head -3
         echo
@@ -453,7 +453,7 @@ mode_record() {
 
         if echo "$raw" | grep -q "POINTER_BUTTON"; then
             local btn state
-            btn=$(echo "$raw" | grep -oE 'BTN_[A-Z]+' || true)
+            btn=$(echo "$raw" | grep -m1 -oE 'BTN_[A-Z]+' || true)
             state=$(echo "$raw" | grep -qE 'pressed' && echo press || echo release)
             case "$btn" in
                 BTN_LEFT)   btn="left" ;;
@@ -490,7 +490,7 @@ mode_record() {
             fi
         elif echo "$raw" | grep -q "KEYBOARD_KEY"; then
             local code state
-            code=$(echo "$raw" | grep -oE '\(-?[0-9]+\)' | tr -d '()' || true)
+            code=$(echo "$raw" | grep -m1 -oE '\(-?[0-9]+\)' | tr -d '()' || true)
             state=$(echo "$raw" | grep -qE 'pressed' && echo press || echo release)
             if [ -n "$code" ] && [ "$code" != "-1" ]; then
                 if [ "$FORMAT" = "json" ]; then
@@ -752,11 +752,12 @@ mode_trim() {
         exit 1
     fi
 
+    # Sort by timestamp before filtering to avoid negative relative times
     if [ -z "$END" ]; then
-        jq -c --argjson s "$START" 'select(.t >= $s) | .t = (.t - $s)' "$IN" > "$OUT"
+        jq -c 'sort_by(.t) | .[] | select(.t >= $s) | .t = (.t - $s)' --argjson s "$START" "$IN" > "$OUT"
     else
-        jq -c --argjson s "$START" --argjson e "$END" \
-            'select(.t >= $s and .t <= $e) | .t = (.t - $s)' "$IN" > "$OUT"
+        jq -c 'sort_by(.t) | .[] | select(.t >= $s and .t <= $e) | .t = (.t - $s)' \
+            --argjson s "$START" --argjson e "$END" "$IN" > "$OUT"
     fi
     local count; count=$(wc -l < "$OUT")
     echo "Trimmed to [$START, ${END:-end}] -> '$OUT' ($count events)."
@@ -863,10 +864,8 @@ mode_edit() {
             shift)
                 if [ -n "$arg1" ] && [ -n "$arg2" ] && [[ "$arg1" =~ ^[0-9]+$ ]] && [[ "$arg2" =~ ^[-+]?[0-9]+([.][0-9]+)?$ ]]; then
                     local from=$((arg1 - 1))
-                    local i=0
-                    for e in "${!events[@]}"; do :; done # no-op, keeps shellcheck quiet
                     local -a newevents=()
-                    i=0
+                    local i=0
                     for e in "${events[@]}"; do
                         if [ "$i" -ge "$from" ]; then
                             e="$(echo "$e" | jq -c --argjson d "$arg2" '.t = (.t + $d)')"
@@ -886,6 +885,11 @@ mode_edit() {
                     local from=0
                     if [ -n "$arg2" ] && [[ "$arg2" =~ ^[0-9]+$ ]]; then
                         from=$((arg2 - 1))
+                        # Bounds check
+                        if [ "$from" -ge "${#events[@]}" ]; then
+                            echo "No such event: $arg2"
+                            continue
+                        fi
                     elif [ -n "$arg2" ]; then
                         echo "Usage: scale FACTOR [N]"
                         continue
