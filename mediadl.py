@@ -129,7 +129,18 @@ class Config:
                 if isinstance(current, Path):
                     val = Path(v)
                 elif isinstance(current, bool):
-                    val = bool(v)
+                    # NOTE: plain bool(v) on a *string* is a classic footgun
+                    # - bool("false") is True in Python, since any non-empty
+                    # string is truthy. Proper JSON (`"embed_thumbnails":
+                    # false`, unquoted) already parses to a native Python
+                    # bool via json.load and is unaffected; this only
+                    # matters if someone hand-edits the config with a
+                    # quoted "false"/"true" string, which is an easy mistake
+                    # coming from shell/ini-style config files.
+                    if isinstance(v, str):
+                        val = v.strip().lower() in ("1", "true", "yes", "on")
+                    else:
+                        val = bool(v)
                 elif isinstance(current, int):
                     val = int(v)
                 elif isinstance(current, str):
@@ -230,6 +241,16 @@ class MediaDownloader:
         """Run command with retry logic."""
         if max_retries == 0:
             max_retries = self.config.max_retries
+
+        # NOTE: 0 doubles as "use the configured default" above. If the
+        # user's *configured* max_retries is also legitimately 0 (a
+        # reasonable setting meaning "just try once, don't retry"), the two
+        # meanings collide: max_retries stays 0, `range(0)` never executes
+        # the loop body, and the download silently never runs at all - no
+        # exception is raised, so the task gets reported as "Completed" and
+        # written to the metadata DB despite nothing having been
+        # downloaded. Always allow at least one real attempt.
+        max_retries = max(1, max_retries)
 
         for attempt in range(max_retries):
             if self.stop_event.is_set():
