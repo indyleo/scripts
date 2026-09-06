@@ -1,4 +1,4 @@
-#!/bin/env bash
+#!/usr/bin/env bash
 function sw() {
     local BEGIN=$(date +%s)
     echo Starting Stopwatch...
@@ -6,8 +6,12 @@ function sw() {
     while true; do
         local NOW=$(date +%s)
         local DIFF=$(($NOW - $BEGIN))
-        local MINS=$(($DIFF / 60))
         local SECS=$(($DIFF % 60))
+        # NOTE: this used to be `MINS=$((DIFF / 60))`, i.e. TOTAL minutes
+        # elapsed rather than minutes-within-the-current-hour. Past one
+        # hour that shows nonsense like "01:61:40" instead of "01:01:40" in
+        # the %02d:%02d:%02d display below.
+        local MINS=$(($DIFF % 3600 / 60))
         local HOURS=$(($DIFF / 3600))
         local DAYS=$(($DIFF / 86400))
 

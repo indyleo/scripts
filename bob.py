@@ -156,10 +156,15 @@ def fetch_tag(channel: str = "stable") -> str:
 # === CONSTRUCT DOWNLOAD URL ===
 def construct_download_url(tag: str, os_name: str, arch: str) -> str:
     """Build download URL for given version and platform"""
+    # NOTE: current neovim releases publish "nvim-linux-<arch>.appimage"
+    # (lowercase extension) and "nvim-macos-<arch>.tar.gz" (arch-specific,
+    # no generic "nvim-macos.tar.gz" asset exists anymore). GitHub release
+    # asset URLs are case-sensitive, so the old ".AppImage" (capitalized)
+    # and generic "nvim-macos.tar.gz" names 404 against current releases.
     if os_name == "linux":
-        return f"https://github.com/{REPO}/releases/download/{tag}/nvim-linux-{arch}.AppImage"
+        return f"https://github.com/{REPO}/releases/download/{tag}/nvim-linux-{arch}.appimage"
     if os_name == "darwin":
-        return f"https://github.com/{REPO}/releases/download/{tag}/nvim-macos.tar.gz"
+        return f"https://github.com/{REPO}/releases/download/{tag}/nvim-macos-{arch}.tar.gz"
     die(f"Unsupported OS: {os_name}")
     return ""  # Unreachable but satisfies type checker
 
@@ -207,9 +212,18 @@ def install_nvim(channel: str = "stable", specific: str = "") -> None:
             with tarfile.open(tmp_path, "r:gz") as tar:
                 tar.extractall(install_path)
 
-            nvim_path = install_path / "bin" / "nvim"
+            # NOTE: the macOS tarball extracts into its own top-level
+            # directory (e.g. "nvim-macos-arm64/bin/nvim"), not flat
+            # "bin/nvim" directly under install_path. Search for the
+            # binary instead of hardcoding the path, so this keeps working
+            # even if that inner directory name changes again in the
+            # future (it already has once).
+            found = next(install_path.rglob("nvim"), None)
+            if found is None or not found.is_file():
+                die(f"Could not locate 'nvim' binary after extracting {tag}")
+            nvim_path = found
         else:
-            nvim_path = INSTALL_DIR / f"{tag}.AppImage"
+            nvim_path = INSTALL_DIR / f"{tag}.appimage"
             shutil.move(str(tmp_path), str(nvim_path))
             nvim_path.chmod(0o755)
 
@@ -241,12 +255,19 @@ def use_nvim(req: str) -> None:
     else:
         tag = req
 
-    # Find installed version
-    candidates = list(INSTALL_DIR.glob(f"{tag}*"))
-    if not candidates:
-        die(f"Version {tag} not installed. Run 'install {tag}' first.")
-
-    target = candidates[0]
+    # Find installed version. Prefer an exact match; only fall back to a
+    # prefix match (sorted deterministically) if there isn't one - picking
+    # candidates[0] straight from glob() is filesystem-order-dependent, so
+    # with two installs sharing a prefix (e.g. "v0.10.0" and
+    # "v0.10.0-dev") it could non-deterministically activate the wrong one.
+    exact = INSTALL_DIR / tag
+    if exact.exists():
+        target = exact
+    else:
+        candidates = sorted(INSTALL_DIR.glob(f"{tag}*"))
+        if not candidates:
+            die(f"Version {tag} not installed. Run 'install {tag}' first.")
+        target = candidates[0]
     nvim_bin = target / "bin" / "nvim" if target.is_dir() else target
 
     BIN_DIR.mkdir(parents=True, exist_ok=True)
@@ -296,12 +317,16 @@ def uninstall_nvim(tag: str = "") -> None:
         msg(Colors.GREEN, "✅ All versions removed.")
         return
 
-    # Find and remove specific version
-    candidates = list(INSTALL_DIR.glob(f"{tag}*"))
-    if not candidates:
-        die(f"Version '{tag}' not found in {INSTALL_DIR}")
-
-    target = candidates[0]
+    # Find and remove specific version (see the same note in use_nvim about
+    # preferring an exact match over an arbitrarily-ordered glob result)
+    exact = INSTALL_DIR / tag
+    if exact.exists():
+        target = exact
+    else:
+        candidates = sorted(INSTALL_DIR.glob(f"{tag}*"))
+        if not candidates:
+            die(f"Version '{tag}' not found in {INSTALL_DIR}")
+        target = candidates[0]
     if target.is_dir():
         shutil.rmtree(target)
     else:
@@ -397,8 +422,11 @@ def update_nvim(channel: str = "stable") -> None:
     # Check if already installed
     if INSTALL_DIR.exists():
         installed = [item.name for item in INSTALL_DIR.iterdir()]
-        # Check if this version already exists
-        already_installed = any(latest_tag in name for name in installed)
+        # Check if this version already exists. Prefix match (consistent
+        # with the glob(f"{tag}*") lookups used elsewhere), not a bare
+        # substring check - "in" would also match e.g. tag "0.9" against an
+        # unrelated "1.0.9-beta" install since "0.9" occurs mid-string.
+        already_installed = any(name.startswith(latest_tag) for name in installed)
 
         if already_installed:
             msg(Colors.GREEN, f"✅ Already on latest {channel} version: {latest_tag}")

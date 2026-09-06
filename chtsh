@@ -113,10 +113,13 @@ fi
 # fetch master topic list once
 topics_raw=$(fetch_list "$CHEAT_BASE/:list")
 
+# curated language list (keeps the interactive set smaller, and also tells
+# us which topics actually live in cheat.sh's per-language namespaces where
+# ":list" is meaningful - see the note further down)
+languages_regex='^(c|cpp|python|go|rust|java|javascript|typescript|bash|zsh|lua|git|perl|ruby|haskell|kotlin|swift|powershell|scala|clojure|r|elixir|dart|php|make|docker|ansible|terraform|sql|html|css|json|yaml|xml)$'
+
 # optionally filter to languages
 if [[ "$topic_constraint" == "lang" ]]; then
-    # curated language list (keeps the interactive set smaller)
-    languages_regex='^(c|cpp|python|go|rust|java|javascript|typescript|bash|zsh|lua|git|perl|ruby|haskell|kotlin|swift|powershell|scala|clojure|r|elixir|dart|php|make|docker|ansible|terraform|sql|html|css|json|yaml|xml)$'
     topics_filtered=$(printf '%s\n' "$topics_raw" | grep -E -i "$languages_regex" || true)
 else
     topics_filtered="$topics_raw"
@@ -142,7 +145,18 @@ if [[ -z "${topic:-}" ]]; then
 fi
 
 # fetch available sheets for selected topic
-sheets_list=$(fetch_list "$CHEAT_BASE/$topic/:list" || true)
+# NOTE: cheat.sh's ":list" query only has meaning inside a programming-
+# language namespace (e.g. "go/:list", "python/:list") - it's not defined
+# for plain UNIX/Linux command topics like "tar" or "curl", which are the
+# majority of the master topic list. Calling it unconditionally meant every
+# non-language topic hit a 404 and printed a spurious "Failed to fetch"
+# message before falling back to the main page anyway. Only try it for
+# topics that are actually in the language namespace.
+if [[ "$topic" =~ $languages_regex ]]; then
+    sheets_list=$(fetch_list "$CHEAT_BASE/$topic/:list" || true)
+else
+    sheets_list=""
+fi
 
 # If no sheets or only info, display the topic directly
 if [[ -z "${sheets_list:-}" ]]; then
@@ -159,4 +173,3 @@ if [[ -z "${sheet:-}" ]]; then
 else
     "$CURL_CMD" -fsS "$CHEAT_BASE/$topic/$sheet?style=rrt" | "$LESS_CMD" -R
 fi
-

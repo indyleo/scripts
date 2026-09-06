@@ -305,13 +305,18 @@ case "$subsys" in
         esac
         ;;
     wifi)
-        [[ "$action" == "--toggle" ]] && wifi_toggle || global_help
+        # NOTE: `A && B || C` isn't if/then/else - if wifi_toggle itself
+        # fails partway through (e.g. nmcli errors), C (global_help) would
+        # ALSO run, dumping the full help text on top of whatever error
+        # wifi_toggle already printed, even though the action was
+        # correctly identified and attempted.
+        if [[ "$action" == "--toggle" ]]; then wifi_toggle; else global_help; fi
         ;;
     bt)
-        [[ "$action" == "--toggle" ]] && bt_toggle || global_help
+        if [[ "$action" == "--toggle" ]]; then bt_toggle; else global_help; fi
         ;;
     airplane)
-        [[ "$action" == "--toggle" ]] && airplane_toggle || global_help
+        if [[ "$action" == "--toggle" ]]; then airplane_toggle; else global_help; fi
         ;;
     help|-h|"")
         global_help

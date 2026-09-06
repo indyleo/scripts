@@ -41,6 +41,41 @@ function extract() {
         exit 1
     fi
 
+    # NOTE: .gz/.bz2/.Z are single-stream compressors, not archives - they
+    # never have a "top-level directory" to detect, and the code below that
+    # tried to synthesize one (`dir_name="${base_name%.*}"`, e.g.
+    # "sample.txt.gz" -> "sample.txt") collides head-on with the original
+    # uncompressed file that almost always sits right next to its .gz/.bz2/.Z
+    # copy - mkdir fails because a *file* of that name already exists.
+    # These formats always contain exactly one member, so just decompress
+    # them in place, matching what gunzip/bunzip2/uncompress do by default.
+    case "$file" in
+        # IMPORTANT: .tar.gz/.tgz/.tar.bz2/.tbz2/.tar.xz/.tar.zst must fall
+        # through to the real archive-handling logic below, not the
+        # single-stream case underneath - a bare `*.gz)` pattern would also
+        # match "project.tar.gz" and try to gunzip it into "project.tar"
+        # instead of actually extracting the tarball.
+        *.tar.gz|*.tar.bz2|*.tar.xz|*.tar.zst|*.tgz|*.tbz2) : ;;
+        *.gz)
+            if gunzip -k -- "$file"; then
+                echo "✅ Extracted: ${file%.gz}"
+            fi
+            return
+            ;;
+        *.bz2)
+            if bunzip2 -k -- "$file"; then
+                echo "✅ Extracted: ${file%.bz2}"
+            fi
+            return
+            ;;
+        *.Z)
+            if uncompress -c -- "$file" > "${file%.Z}"; then
+                echo "✅ Extracted: ${file%.Z}"
+            fi
+            return
+            ;;
+    esac
+
     # Determine a target directory
     local base_name
     base_name=$(basename "$file")
@@ -69,32 +104,56 @@ function extract() {
         *.rar)
             unrar lb "$file" | head -1 > "$temp_dir/first_entry.txt"
             ;;
+        *.deb)
+            # .deb (ar) archives are flat (debian-binary, control.tar.*,
+            # data.tar.*) - there's never a shared top-level directory, so
+            # always take the "create a wrapper dir" branch below. Leaving
+            # first_entry.txt unwritten already achieves that (empty
+            # first_entry fails the `-d` test), this just documents why.
+            ;;
         *)
             echo "Warning: Cannot determine archive structure for '$file'"
             ;;
     esac
 
-    local first_entry
-    first_entry=$(cat "$temp_dir/first_entry.txt" | cut -d/ -f1)
+    local first_entry_raw=""
+    [[ -f "$temp_dir/first_entry.txt" ]] && first_entry_raw=$(head -1 "$temp_dir/first_entry.txt")
 
     rm -rf "$temp_dir"
 
-    # If the first entry is not a directory, create one
-    if [[ ! -d "$first_entry" ]]; then
+    # NOTE: this used to check `[[ ! -d "$first_entry" ]]` - i.e. whether a
+    # directory of that name already exists ON DISK. That's the wrong
+    # question: right before extracting, that directory almost never exists
+    # yet (that's the point of extracting!), so this always concluded "no
+    # wrapper directory" and created one anyway - for a well-formed archive
+    # like "proj.tar.gz" containing "proj/inner/file.txt", that meant
+    # extracting into "proj/" on top of an archive that already wraps
+    # everything in "proj/", producing double-nested "proj/proj/inner/...".
+    # What actually matters is the ARCHIVE'S OWN structure: does its first
+    # entry live inside a subdirectory (contains a "/"), or is it a loose
+    # file at the archive root?
+    if [[ "$first_entry_raw" != */* ]]; then
         mkdir -p "$dir_name"
         case "$file" in
             *.tar.bz2) tar xjf "$file" -C "$dir_name" ;;
             *.tar.gz)  tar xzf "$file" -C "$dir_name" ;;
-            *.bz2)     bunzip2 -c "$file" > "$dir_name/$dir_name" ;;
             *.rar)     unrar x "$file" "$dir_name/" ;;
-            *.gz)      gunzip -c "$file" > "$dir_name/$dir_name" ;;
             *.tar)     tar xf "$file" -C "$dir_name" ;;
             *.tbz2)    tar xjf "$file" -C "$dir_name" ;;
             *.tgz)     tar xzf "$file" -C "$dir_name" ;;
             *.zip)     unzip "$file" -d "$dir_name" ;;
-            *.Z)       uncompress -c "$file" > "$dir_name/$dir_name" ;;
             *.7z)      7z x "$file" -o"$dir_name" ;;
-            *.deb)     ar x "$file" -C "$dir_name" ;;
+            *.deb)
+                # NOTE: `ar` has no `-C`/target-directory flag (unlike tar/
+                # unzip) - passing one is a silent no-op at best or an
+                # "invalid option" error at worst. `ar` always extracts to
+                # the current directory, so cd into the target instead and
+                # resolve the source to an absolute path first, since it's
+                # relative to the directory we're about to leave.
+                local abs_file
+                abs_file=$(realpath "$file")
+                (cd "$dir_name" && ar x "$abs_file")
+                ;;
             *.tar.xz)  tar xf "$file" -C "$dir_name" ;;
             *.tar.zst) unzstd -c "$file" | tar xf - -C "$dir_name" ;;
             *)         echo "Error: '$file' cannot be extracted via this script." ;;
@@ -105,14 +164,11 @@ function extract() {
         case "$file" in
             *.tar.bz2) tar xjf "$file" ;;
             *.tar.gz)  tar xzf "$file" ;;
-            *.bz2)     bunzip2 "$file" ;;
             *.rar)     unrar x "$file" ;;
-            *.gz)      gunzip "$file" ;;
             *.tar)     tar xf "$file" ;;
             *.tbz2)    tar xjf "$file" ;;
             *.tgz)     tar xzf "$file" ;;
             *.zip)     unzip "$file" ;;
-            *.Z)       uncompress "$file" ;;
             *.7z)      7z x "$file" ;;
             *.deb)     ar x "$file" ;;
             *.tar.xz)  tar xf "$file" ;;
@@ -180,4 +236,3 @@ case "$command" in
         usage
         ;;
 esac
-

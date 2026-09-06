@@ -1,4 +1,4 @@
-#!/bin/env bash
+#!/usr/bin/env bash
 
 set -euo pipefail
 
@@ -34,6 +34,12 @@ function fbopen() {
     fi
 
     if [[ "$TERMINAL" == "wezterm" ]]; then
+        # NOTE: this branch checks for "wezterm" but was launching
+        # "footclient" (foot terminal's client) - a copy/paste mismatch.
+        # wezterm's actual CLI spawns new windows via `wezterm start`.
+        wezterm start -- "$SHELL" -c "${EDITOR:-nvim} \"$file\""
+
+    elif [[ "$TERMINAL" == "foot" ]]; then
         footclient -e "$SHELL" -c "${EDITOR:-nvim} \"$file\""
 
     elif [[ "$TERMINAL" == "st" ]]; then

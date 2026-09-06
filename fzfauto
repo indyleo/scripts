@@ -30,20 +30,35 @@ FMENU="fzf --header=$(basename "$0") \
            --prompt"
 
 autostart_files=()
-for dir in $HOME/.config/autostart/; do
+for dir in "$HOME/.config/autostart/"; do
     if [ -d "$dir" ]; then
         # Using -printf "%f\n" to get filenames without full path.
-        autostart_files+=("$(find "$dir" -type f -printf "%f\n")")
+        # NOTE: this used to be `autostart_files+=("$(find ... )")`, which
+        # wraps find's entire (possibly multi-line) output as a SINGLE
+        # array element rather than one element per file - see the same
+        # bug pattern fixed below in addauto()/rmauto().
+        while IFS= read -r f; do
+            autostart_files+=("$f")
+        done < <(find "$dir" -type f -printf "%f\n")
     fi
 done
 
 desktop_files=()
-dirs=$(echo "$XDG_DATA_DIRS" | sed 's/:/\/applications /g')
-for dir in ${dirs}; do
+# NOTE: the old `sed 's/:/\/applications /g'` only inserts "/applications"
+# at each ":" separator, so it's appended after every directory EXCEPT the
+# last one (there's no trailing ":" to trigger it there). Any .desktop
+# files that only exist in the final XDG_DATA_DIRS entry's applications/
+# subdir were silently never searched. Split on ":" properly instead and
+# append "/applications" to every entry.
+IFS=':' read -ra _xdg_dirs <<< "$XDG_DATA_DIRS"
+for dir in "${_xdg_dirs[@]}"; do
+    dir="$dir/applications"
     if [ -d "$dir" ]; then
         # The -print is the default for 'find' so not needed.
         # The -print contains the full path which is needed for later.
-        desktop_files+=("$(find "$dir" -type f -print)")
+        while IFS= read -r f; do
+            desktop_files+=("$f")
+        done < <(find "$dir" -type f -print)
     fi
 done
 
@@ -63,7 +78,14 @@ function addauto() {
 
     selected_file=$($FMENU "Add program to autostart: " < <(printf "%s\n" "${desktop_files[@]}"))
     if [[ -n "$selected_file" ]]; then
-        selected_array=$selected_file
+        # NOTE: `selected_array=$selected_file` was a plain scalar
+        # assignment, not an array split - with fzf's --multi, selecting
+        # more than one file (via SHIFT+TAB, as the help text advertises)
+        # produced a multi-line string that got treated as ONE array
+        # element, so `cp` received a single argument containing embedded
+        # newlines instead of separate file paths. mapfile splits on
+        # newlines into real array elements.
+        mapfile -t selected_array <<< "$selected_file"
         for i in "${selected_array[@]}"; do
             tput setaf 5 bold
             printf "%s" "✓ "
@@ -83,7 +105,8 @@ function rmauto() {
     selected_file=$($FMENU "Remove program from autostart: " < <(printf "%s\n" "${autostart_files[@]}"))
 
     if [[ -n "$selected_file" ]]; then
-        selected_array=$selected_file
+        # See the same note in addauto() above - this needs a real array.
+        mapfile -t selected_array <<< "$selected_file"
         for i in "${selected_array[@]}"; do
             tput setaf 9 bold
             printf "%s" "✗ "

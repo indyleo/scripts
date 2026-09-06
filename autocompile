@@ -18,7 +18,12 @@ if [[ ! -f "$FILE" ]]; then
 fi
 
 # Determine the command based on file
-case "$FILE" in
+# NOTE: match on the basename, not the raw path - if $FILE was passed as
+# e.g. "./config.def.h" or an absolute path, the old literal-string case
+# below would miss it and silently fall through to the generic
+# "make clean install" (skipping the required "cp config.def.h config.h"
+# step), producing a stale build from whatever config.h already existed.
+case "$(basename "$FILE")" in
     config.def.h)
         COMMAND="sudo cp config.def.h config.h && sudo make clean install"
         ;;
@@ -52,4 +57,3 @@ while true; do
         fi
     fi
 done
-
