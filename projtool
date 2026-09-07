@@ -422,7 +422,8 @@ set -euo pipefail
 CC="${cc}"
 CFLAGS="-Wall -Wextra -g"
 TARGET="bin/${name}"
-SRC=(\$(ls src/*.${ext} 2>/dev/null))
+SRC=(src/*.${ext})
+[[ -e "\${SRC[0]}" ]] || { echo "No .${ext} sources found in src/"; exit 1; }
 
 case "\${1:-build}" in
     build)
@@ -499,7 +500,8 @@ EOF
 set -euo pipefail
 
 TARGET="bin/${name}"
-SRC=(\$(ls src/*.go 2>/dev/null))
+SRC=(src/*.go)
+[[ -e "\${SRC[0]}" ]] || { echo "No .go sources found in src/"; exit 1; }
 
 case "\${1:-build}" in
     build)
@@ -1087,4 +1089,3 @@ case "${1:-}" in
     setupdocs) shift; setupdocs "${1:-}" "${2:-}" ;;
     *)         usage ;;
 esac
-

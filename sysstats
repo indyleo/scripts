@@ -810,9 +810,17 @@ function updates() {
 function weather() {
     local weather_data icon code temp
 
-    # 1. Fetch data. We use %k and %t separately to avoid splitting issues.
+    # 1. Fetch data. We use %C and %t separately to avoid splitting issues.
     # We use || true to ensure 'set -e' doesn't kill the script if the net is down.
-    code=$(curl -4 -sL --max-time 3 "wttr.in?format=%k" 2>/dev/null || echo "")
+    # NOTE: this used to fetch %k, which is NOT a documented wttr.in format
+    # specifier (the real ones are %c/%C/%t/%f/%h/%w/%l/... - see
+    # https://github.com/chubin/wttr.in#one-line-output). Since wttr.in
+    # doesn't recognize %k, `code` never matched any of the numeric WWO
+    # condition codes below, so the icon silently defaulted to the generic
+    # cloud glyph for every single request regardless of actual weather -
+    # no error, just always wrong. %C returns the actual condition text
+    # (e.g. "Sunny", "Light rain", "Partly cloudy"), matched below instead.
+    code=$(curl -4 -sL --max-time 3 "wttr.in?format=%C" 2>/dev/null || echo "")
     temp=$(curl -4 -sL --max-time 3 "wttr.in?format=%t" 2>/dev/null || echo "")
 
     # 2. If we have no temperature, exit silently
@@ -821,15 +829,16 @@ function weather() {
     # 3. Clean the temperature string (remove + and spaces)
     temp=$(echo "$temp" | tr -d '+ ')
 
-    # 4. Map codes to Nerd Font Icons
-    case "$code" in
-        113) icon="󰖙" ;; # Sunny
-        116) icon="󰖕" ;; # Partly Cloudy
-        119|122) icon="󰖐" ;; # Cloudy
-        143|248|260) icon="󰖑" ;; # Fog
-        176|263|266|293|296|299|302|305|308) icon="󰖗" ;; # Rain
-        200|386|389|392|395) icon="󰙾" ;; # Storm
-        179|182|185|227|230|323|326|329|332|335|338) icon="󰼶" ;; # Snow
+    # 4. Map condition text to Nerd Font icons (case-insensitive substring
+    # match against wttr.in's standard WorldWeatherOnline condition vocabulary)
+    case "${code,,}" in
+        *sunny*|*clear*) icon="󰖙" ;;
+        *partly*cloud*) icon="󰖕" ;;
+        *fog*|*mist*|*haze*) icon="󰖑" ;;
+        *thunder*|*storm*) icon="󰙾" ;;
+        *snow*|*sleet*|*ice*|*blizzard*) icon="󰼶" ;;
+        *rain*|*drizzle*|*shower*) icon="󰖗" ;;
+        *cloud*|*overcast*) icon="󰖐" ;;
         *) icon="󰖐" ;; # Default Cloud
     esac
 

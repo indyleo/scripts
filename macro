@@ -467,18 +467,24 @@ mode_record() {
                 printf '%s\tBUTTON\t%s\t%s\n' "$elapsed" "$btn" "$state" >> "$OUT"
             fi
         elif echo "$raw" | grep -q "POINTER_MOTION"; then
+            # libinput's actual output format (confirmed against upstream
+            # source, tools/libinput-debug-events.c: print_motion_event)
+            # is: printf("%6.2f/%6.2f (%+6.2f/%+6.2f)", x, y, ux, uy) -
+            # i.e. the FIRST, UNPARENTHESIZED pair is the ACCELERATED
+            # (on-screen pixel) delta, and the SECOND, parenthesized pair
+            # is the raw UNACCELERATED (sub-pixel, device-native-resolution)
+            # delta. This used to extract the *parenthesized* pair, which
+            # is backwards from the stated intent below: unaccelerated
+            # deltas for an ordinary mouse move are typically well under 1
+            # pixel and round away to 0/0 in the %.0f truncation further
+            # down, silently dropping essentially all recorded cursor
+            # movement. Match the first pair instead.
+            local pair dx dy
             # Columns are right-justified for display, so there's often
             # whitespace between the '/' and the second number (e.g.
             # "  0.88/  0.00"), which a plain [0-9.-]+/[0-9.-]+ regex can't
-            # match. Pull the pair out of the parens instead — it's also
-            # the *accelerated*, already-integer delta (the actual on-screen
-            # cursor movement), rather than sub-pixel hardware deltas that
-            # would round away to 0/0 when truncated below.
-            local pair dx dy
-            # Extract only the numeric motion pair; libinput may append
-            # "unaccelerated" inside the parentheses.
-						pair=$(echo "$raw" | grep -oE '\([-+]?[0-9]+([.][0-9]+)?[[:space:]]*/[[:space:]]*[-+]?[0-9]+([.][0-9]+)?' | head -1 || true)
-            pair="${pair#(}"
+            # match handle without allowing whitespace around the '/'.
+            pair=$(echo "$raw" | grep -oE '[-+]?[0-9]+([.][0-9]+)?[[:space:]]*/[[:space:]]*[-+]?[0-9]+([.][0-9]+)?' | head -1 || true)
             dx=$(echo "$pair" | cut -d/ -f1 | tr -d '[:space:]')
             dy=$(echo "$pair" | cut -d/ -f2 | tr -d '[:space:]')
             if [ -n "$dx" ] && [ -n "$dy" ]; then
