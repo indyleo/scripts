@@ -118,11 +118,49 @@ function colorpicker() {
     fi
 }
 
+# --- New QR scan function ---
+function qr_scan() {
+    # Check for zbarimg
+    if ! command -v zbarimg &>/dev/null; then
+        echo "Missing dependency: zbarimg (install zbar-tools)."
+        exit 1
+    fi
+
+    # Temporary file for the captured region
+    temp_file=$(mktemp /tmp/screenshot_qr_XXXX.png)
+
+    # Capture selection
+    if [ "$IS_WAYLAND" -eq 1 ]; then
+        grim -g "$(slurp -b '#00000044' -c '#ffffff' -s '#ffffff11')" "$temp_file"
+    else
+        import "$temp_file"
+    fi
+
+    # Decode QR code
+    result=$(zbarimg --quiet --raw "$temp_file" 2>/dev/null)
+
+    if [ -n "$result" ]; then
+        # Copy decoded text to clipboard
+        if [ "$IS_WAYLAND" -eq 1 ]; then
+            echo -n "$result" | wl-copy
+        else
+            echo -n "$result" | xsel --clipboard --input
+        fi
+        notify-send "QR Code Scanned" "Link copied to clipboard: $result"
+    else
+        notify-send "QR Scan Failed" "No QR code detected in selection."
+    fi
+
+    # Clean up
+    rm -f "$temp_file"
+}
+
 case "$1" in
     --select|-s)      selection ;;
     --window|-w)      window ;;
     --full|-f)        full ;;
     --screen|-sc)     screen ;;
     --colorpicker|-c) colorpicker ;;
-    *) echo "Usage: $0 {--select|--window|--full|--screen|--colorpicker}" ;;
+    --qr|-q)          qr_scan ;;
+    *) echo "Usage: $0 {--select|--window|--full|--screen|--colorpicker|--qr}" ;;
 esac
