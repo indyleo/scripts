@@ -42,8 +42,16 @@ GRABBER_BIN="/tmp/.mouse_mode_grabber"
 # Helpers
 # ---------------------------------------------------------------------------
 
+icon() {
+    if [[ "$1" == "ENABLED" ]]; then
+        echo "checkmark"
+    else
+        echo "vm_clone_wizard"
+    fi
+}
+
 notify() {
-    command -v notify-send >/dev/null 2>&1 && notify-send "Mouse Mode" "$1"
+    command -v notify-send >/dev/null 2>&1 && notify-send -i "$(icon "$1")" "Mouse Mode" "$1"
 }
 
 die() {
