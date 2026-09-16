@@ -1,0 +1,355 @@
+#!/usr/bin/env bash
+#
+# mouse_move — Toggleable keyboard-driven "Mouse Mode" for Linux
+# Works on both X11 and Wayland because it never talks to the display
+# server: input is read directly from the raw evdev device
+# (/dev/input/eventX) and mouse actions are injected with `ydotool`,
+# which writes through the uinput kernel driver (compositor-agnostic).
+#
+# IMPORTANT: while Mouse Mode is ON, the keys h/j/k/l/f/d are grabbed
+# *exclusively* (EVIOCGRAB) by a tiny helper program compiled from the
+# embedded C source below. That helper re-emits every OTHER key
+# through a virtual passthrough keyboard, so normal typing keeps
+# working everywhere — only h/j/k/l/f/d stop reaching applications
+# while active, since they're being consumed as mouse commands.
+#
+# Run once to turn Mouse Mode ON (background listener starts).
+# Run again to turn it OFF (listener is killed, lock file removed,
+# grab released, and normal key delivery resumes automatically).
+#
+# Keys while active:
+#   h / j / k / l  -> move mouse left / down / up / right
+#   f              -> left click   (ydotool click 0xC0)
+#   d              -> right click  (ydotool click 0xC1)
+#
+# Requirements: ydotool, ydotoold, a C compiler (gcc or cc), and your
+# user must be in the "input" group (for /dev/uinput and
+# /dev/input/eventX access).
+#
+set -uo pipefail
+
+# ---------------------------------------------------------------------------
+# Configuration (override via environment variables if you like)
+# ---------------------------------------------------------------------------
+PID_FILE="/tmp/ydotool_mouse_mode.pid"
+LOG_FILE="/tmp/ydotool_mouse_mode.log"
+MOVE_STEP="${MOUSE_MODE_STEP:-20}"                  # pixels per keypress
+KEYBOARD_EVENT_DEVICE="${KEYBOARD_EVENT_DEVICE:-}"  # e.g. /dev/input/event3
+GRABBER_SRC="/tmp/.mouse_mode_grabber.c"
+GRABBER_BIN="/tmp/.mouse_mode_grabber"
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+notify() {
+    command -v notify-send >/dev/null 2>&1 && notify-send "Mouse Mode" "$1"
+}
+
+die() {
+    echo "ERROR: $1" >&2
+    exit 1
+}
+
+check_command() {
+    command -v "$1" >/dev/null 2>&1 || die "'$1' is not installed or not in PATH."
+}
+
+# Confirm the user is in the "input" group, which grants access to
+# /dev/uinput (needed by ydotoold and our grabber) and
+# /dev/input/eventX (needed by our grabber to read the keyboard).
+check_input_group() {
+    if ! id -nG "$USER" | tr ' ' '\n' | grep -qx "input"; then
+        cat >&2 <<EOF
+You are not in the 'input' group, so /dev/uinput and
+/dev/input/eventX may not be accessible.
+
+Fix it with:
+    sudo usermod -aG input "$USER"
+
+Then log out and back in (group membership only applies to new
+sessions) and re-run this script.
+EOF
+        exit 1
+    fi
+}
+
+check_uinput_perms() {
+    [ -e /dev/uinput ] || die "/dev/uinput does not exist — is the uinput kernel module loaded? Try: sudo modprobe uinput"
+    [ -w /dev/uinput ] || die "/dev/uinput is not writable by $USER. Check its group is 'input' and that you're a member."
+}
+
+ensure_ydotoold() {
+    check_command ydotool
+    check_command ydotoold
+
+    export YDOTOOL_SOCKET="${YDOTOOL_SOCKET:-${XDG_RUNTIME_DIR:-/tmp}/.ydotool_socket}"
+
+    if ! pgrep -x ydotoold >/dev/null 2>&1; then
+        echo "Starting ydotoold..."
+        nohup ydotoold --socket-path="$YDOTOOL_SOCKET" >>"$LOG_FILE" 2>&1 &
+        disown
+
+        for _ in $(seq 1 30); do
+            [ -S "$YDOTOOL_SOCKET" ] && break
+            sleep 0.1
+        done
+        [ -S "$YDOTOOL_SOCKET" ] || die "ydotoold did not create its socket at $YDOTOOL_SOCKET"
+    fi
+}
+
+# Auto-detect a keyboard's /dev/input/eventX node, unless the user
+# already set KEYBOARD_EVENT_DEVICE.
+find_keyboard_device() {
+    if [ -n "$KEYBOARD_EVENT_DEVICE" ]; then
+        echo "$KEYBOARD_EVENT_DEVICE"
+        return
+    fi
+
+    awk '
+        /^N: Name=/ { name=$0 }
+        /^H: Handlers=/ { handlers=$0 }
+        /^B: EV=/ {
+            ev=$0
+            if (ev ~ /EV=120013/) {
+                match(handlers, /event[0-9]+/)
+                if (RSTART) {
+                    print "/dev/input/" substr(handlers, RSTART, RLENGTH)
+                    exit
+                }
+            }
+        }
+    ' /proc/bus/input/devices
+}
+
+# ---------------------------------------------------------------------------
+# Embedded C helper: grabs the keyboard exclusively, forwards every key
+# EXCEPT h/j/k/l/f/d to a virtual passthrough keyboard (so normal
+# typing keeps working), and dispatches ydotool for the mapped keys.
+# Compiled once and cached at $GRABBER_BIN.
+# ---------------------------------------------------------------------------
+write_grabber_source() {
+    cat > "$GRABBER_SRC" <<'EOF_C'
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <string.h>
+#include <signal.h>
+#include <sys/ioctl.h>
+#include <sys/wait.h>
+#include <linux/uinput.h>
+#include <linux/input.h>
+
+static int dev_fd = -1;
+static int uinput_fd = -1;
+
+static void cleanup_and_exit(int sig) {
+    (void)sig;
+    if (uinput_fd >= 0) {
+        ioctl(uinput_fd, UI_DEV_DESTROY);
+        close(uinput_fd);
+    }
+    if (dev_fd >= 0) {
+        ioctl(dev_fd, EVIOCGRAB, 0);
+        close(dev_fd);
+    }
+    _exit(0);
+}
+
+/* Run ydotool with the given argv in a child process, don't wait
+ * (SIGCHLD is ignored so children are auto-reaped, no zombies). */
+static void run_ydotool(char *const argv[]) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        execvp("ydotool", argv);
+        _exit(127); /* only reached if exec fails */
+    }
+}
+
+int main(int argc, char **argv) {
+    if (argc < 3) {
+        fprintf(stderr, "usage: %s <event-device> <move-step>\n", argv[0]);
+        return 1;
+    }
+    const char *devpath = argv[1];
+    int step = atoi(argv[2]);
+    char step_pos[16], step_neg[16];
+    snprintf(step_pos, sizeof(step_pos), "%d", step);
+    snprintf(step_neg, sizeof(step_neg), "-%d", step);
+
+    signal(SIGTERM, cleanup_and_exit);
+    signal(SIGINT, cleanup_and_exit);
+    signal(SIGCHLD, SIG_IGN);
+
+    dev_fd = open(devpath, O_RDONLY);
+    if (dev_fd < 0) { perror("open device"); return 1; }
+
+    if (ioctl(dev_fd, EVIOCGRAB, 1) < 0) {
+        perror("EVIOCGRAB (exclusive grab failed)");
+        return 1;
+    }
+
+    uinput_fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
+    if (uinput_fd < 0) { perror("open /dev/uinput"); return 1; }
+
+    ioctl(uinput_fd, UI_SET_EVBIT, EV_KEY);
+    ioctl(uinput_fd, UI_SET_EVBIT, EV_SYN);
+    ioctl(uinput_fd, UI_SET_EVBIT, EV_MSC);
+    ioctl(uinput_fd, UI_SET_MSCBIT, MSC_SCAN);
+    for (int i = 0; i < KEY_MAX; i++) ioctl(uinput_fd, UI_SET_KEYBIT, i);
+
+    struct uinput_setup usetup;
+    memset(&usetup, 0, sizeof(usetup));
+    usetup.id.bustype = BUS_USB;
+    usetup.id.vendor = 0x1d6b;
+    usetup.id.product = 0x0100;
+    strncpy(usetup.name, "mouse-mode-passthrough-kbd", sizeof(usetup.name) - 1);
+
+    ioctl(uinput_fd, UI_DEV_SETUP, &usetup);
+    ioctl(uinput_fd, UI_DEV_CREATE);
+    usleep(200000); /* let udev settle before events start flowing */
+
+    struct input_event ev;
+    while (read(dev_fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
+        if (ev.type == EV_KEY) {
+            int swallow = 0;
+
+            switch (ev.code) {
+                case KEY_H:
+                    swallow = 1;
+                    if (ev.value == 1 || ev.value == 2) {
+                        char *a[] = {"ydotool", "mousemove", "--", step_neg, "0", NULL};
+                        run_ydotool(a);
+                    }
+                    break;
+                case KEY_L:
+                    swallow = 1;
+                    if (ev.value == 1 || ev.value == 2) {
+                        char *a[] = {"ydotool", "mousemove", "--", step_pos, "0", NULL};
+                        run_ydotool(a);
+                    }
+                    break;
+                case KEY_K:
+                    swallow = 1;
+                    if (ev.value == 1 || ev.value == 2) {
+                        char *a[] = {"ydotool", "mousemove", "--", "0", step_neg, NULL};
+                        run_ydotool(a);
+                    }
+                    break;
+                case KEY_J:
+                    swallow = 1;
+                    if (ev.value == 1 || ev.value == 2) {
+                        char *a[] = {"ydotool", "mousemove", "--", "0", step_pos, NULL};
+                        run_ydotool(a);
+                    }
+                    break;
+                case KEY_F:
+                    swallow = 1;
+                    if (ev.value == 1) {
+                        char *a[] = {"ydotool", "click", "0xC0", NULL};
+                        run_ydotool(a);
+                    }
+                    break;
+                case KEY_D:
+                    swallow = 1;
+                    if (ev.value == 1) {
+                        char *a[] = {"ydotool", "click", "0xC1", NULL};
+                        run_ydotool(a);
+                    }
+                    break;
+                default:
+                    break;
+            }
+
+            if (swallow) continue; /* don't forward this key event */
+        }
+
+        /* Forward everything else (including SYN/MSC) untouched, so
+         * the rest of your keyboard behaves completely normally. */
+        struct input_event out = ev;
+        out.time.tv_sec = 0;
+        out.time.tv_usec = 0;
+        write(uinput_fd, &out, sizeof(out));
+    }
+
+    cleanup_and_exit(0);
+    return 0;
+}
+EOF_C
+}
+
+ensure_grabber_binary() {
+    write_grabber_source
+
+    # (Re)compile only if the binary is missing or older than the source.
+    if [ ! -x "$GRABBER_BIN" ] || [ "$GRABBER_SRC" -nt "$GRABBER_BIN" ]; then
+        local cc_bin
+        cc_bin="$(command -v cc || command -v gcc || true)"
+        [ -n "$cc_bin" ] || die "No C compiler found. Install one (e.g. 'sudo apt install gcc') to build the key-grabbing helper."
+        echo "Compiling key-grab helper..."
+        "$cc_bin" -O2 -o "$GRABBER_BIN" "$GRABBER_SRC" || die "Failed to compile the grabber helper."
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Toggle logic
+# ---------------------------------------------------------------------------
+
+is_active() {
+    [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
+}
+
+turn_off() {
+    local pid
+    pid="$(cat "$PID_FILE")"
+
+    kill -TERM "$pid" 2>/dev/null
+
+    rm -f "$PID_FILE"
+    notify "Mouse Mode DISABLED"
+    echo "Mouse Mode disabled. Normal key delivery restored."
+}
+
+turn_on() {
+    ensure_ydotoold
+    check_input_group
+    check_uinput_perms
+    ensure_grabber_binary
+
+    local device
+    device="$(find_keyboard_device)"
+    [ -n "$device" ] || die "Could not auto-detect a keyboard event device. Set KEYBOARD_EVENT_DEVICE=/dev/input/eventN and retry."
+    [ -r "$device" ] || die "$device is not readable by $USER (check the 'input' group membership)."
+
+    "$GRABBER_BIN" "$device" "$MOVE_STEP" >>"$LOG_FILE" 2>&1 &
+    local listener_pid=$!
+    disown
+
+    # Confirm it actually stayed up (grab or uinput setup can fail fast).
+    sleep 0.3
+    if ! kill -0 "$listener_pid" 2>/dev/null; then
+        die "Grabber helper exited immediately — check $LOG_FILE for details."
+    fi
+
+    echo "$listener_pid" > "$PID_FILE"
+    notify "Mouse Mode ENABLED"
+    echo "Mouse Mode enabled (listening on $device, PID $listener_pid)."
+    echo "Keys: h/j/k/l = move, f = left click, d = right click."
+    echo "These keys will NOT be typed into text boxes while active."
+    echo "Run this script again to disable."
+}
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+main() {
+    if is_active; then
+        turn_off
+    else
+        [ -f "$PID_FILE" ] && rm -f "$PID_FILE"
+        turn_on
+    fi
+}
+
+main "$@"
