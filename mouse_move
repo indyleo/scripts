@@ -45,30 +45,30 @@ GRABBER_BIN="/tmp/.mouse_mode_grabber"
 # Helpers
 # ---------------------------------------------------------------------------
 
-notify() {
+function notify() {
     command -v notify-send >/dev/null 2>&1 && notify-send -i "input-mouse" "Mouse Mode" "$1"
 }
 
-die() {
+function die() {
     echo "ERROR: $1" >&2
     exit 1
 }
 
-check_command() {
+function check_command() {
     command -v "$1" >/dev/null 2>&1 || die "'$1' is not installed or not in PATH."
 }
 
 # Confirm the user is in the "input" group, which grants access to
 # /dev/uinput (needed by ydotoold and our grabber) and
 # /dev/input/eventX (needed by our grabber to read the keyboard).
-check_input_group() {
-    if ! id -nG "$USER" | tr ' ' '\n' | grep -qx "input"; then
+function check_input_group() {
+    if ! id -nG | tr ' ' '\n' | grep -qx "input"; then
         cat >&2 <<EOF
 You are not in the 'input' group, so /dev/uinput and
 /dev/input/eventX may not be accessible.
 
 Fix it with:
-    sudo usermod -aG input "$USER"
+    sudo usermod -aG input "$(id -un)"
 
 Then log out and back in (group membership only applies to new
 sessions) and re-run this script.
@@ -77,12 +77,12 @@ EOF
     fi
 }
 
-check_uinput_perms() {
+function check_uinput_perms() {
     [ -e /dev/uinput ] || die "/dev/uinput does not exist — is the uinput kernel module loaded? Try: sudo modprobe uinput"
-    [ -w /dev/uinput ] || die "/dev/uinput is not writable by $USER. Check its group is 'input' and that you're a member."
+    [ -w /dev/uinput ] || die "/dev/uinput is not writable by $(id -un). Check its group is 'input' and that you're a member."
 }
 
-ensure_ydotoold() {
+function ensure_ydotoold() {
     check_command ydotool
     check_command ydotoold
 
@@ -103,18 +103,36 @@ ensure_ydotoold() {
 
 # Auto-detect a keyboard's /dev/input/eventX node, unless the user
 # already set KEYBOARD_EVENT_DEVICE.
-find_keyboard_device() {
+#
+# We no longer require an exact EV bitmask match (e.g. "120013"): that
+# bitmask depends on which optional capabilities (LEDs, autorepeat,
+# misc scancodes) the specific keyboard reports, so it varies from
+# device to device and caused real keyboards to go undetected. Instead
+# we require the EV_KEY bit to be set and prefer devices whose kernel
+# "Handlers" line contains a "kbd" handler (the standard marker for a
+# keyboard-class input device), while skipping obvious non-keyboard
+# nodes such as power/sleep buttons and video-bus toggles that also
+# expose a "kbd" handler but have almost no keys.
+function find_keyboard_device() {
     if [ -n "$KEYBOARD_EVENT_DEVICE" ]; then
         echo "$KEYBOARD_EVENT_DEVICE"
         return
     fi
 
     awk '
-        /^N: Name=/ { name=$0 }
+        function is_keyboard_ev(ev,    n) {
+            # EV is a hex bitmask; bit 1 (value 2) is EV_KEY.
+            n = strtonum("0x" ev)
+            return and(n, 2) == 2
+        }
+        /^N: Name=/ { name=$0; sub(/^N: Name=/, "", name); gsub(/"/, "", name) }
         /^H: Handlers=/ { handlers=$0 }
         /^B: EV=/ {
             ev=$0
-            if (ev ~ /EV=120013/) {
+            sub(/^B: EV=/, "", ev)
+            has_kbd_handler = (handlers ~ /(^|[[:space:]])kbd[0-9]*([[:space:]]|$)/)
+            skip = (name ~ /Power Button|Sleep Button|Video Bus|Consumer Control/)
+            if (is_keyboard_ev(ev) && has_kbd_handler && !skip) {
                 match(handlers, /event[0-9]+/)
                 if (RSTART) {
                     print "/dev/input/" substr(handlers, RSTART, RLENGTH)
@@ -131,8 +149,8 @@ find_keyboard_device() {
 # normal typing keeps working), and dispatches ydotool for the mapped keys.
 # Compiled once and cached at $GRABBER_BIN.
 # ---------------------------------------------------------------------------
-write_grabber_source() {
-    cat > "$GRABBER_SRC" <<'EOF_C'
+function write_grabber_source() {
+    cat > "$1" <<'EOF_C'
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -146,9 +164,31 @@ write_grabber_source() {
 
 static int dev_fd = -1;
 static int uinput_fd = -1;
+/* Tracks whether we've told ydotool to press the left button down (the
+ * 'g' key) without a matching 's' (button up) yet. If Mouse Mode gets
+ * toggled off (or the process is killed) while a drag is in progress,
+ * the virtual mouse button would otherwise stay stuck down forever,
+ * since ydotoold's virtual pointer is a separate, persistent uinput
+ * device that outlives this process. */
+static volatile sig_atomic_t left_button_held = 0;
+
+static void release_stuck_button(void) {
+    if (left_button_held) {
+        char *a[] = {"ydotool", "click", "0x80", NULL};
+        pid_t pid = fork();
+        if (pid == 0) {
+            execvp("ydotool", a);
+            _exit(127);
+        } else if (pid > 0) {
+            waitpid(pid, NULL, 0); /* make sure it actually runs before we exit */
+        }
+        left_button_held = 0;
+    }
+}
 
 static void cleanup_and_exit(int sig) {
     (void)sig;
+function release_stuck_button();
     if (uinput_fd >= 0) {
         ioctl(uinput_fd, UI_DEV_DESTROY);
         close(uinput_fd);
@@ -183,6 +223,7 @@ int main(int argc, char **argv) {
 
     signal(SIGTERM, cleanup_and_exit);
     signal(SIGINT, cleanup_and_exit);
+    signal(SIGHUP, cleanup_and_exit);  /* controlling terminal closing shouldn't leave the grab/click stuck */
     signal(SIGCHLD, SIG_IGN);
 
     dev_fd = open(devpath, O_RDONLY);
@@ -298,6 +339,7 @@ int main(int argc, char **argv) {
                     if (ev.value == 1) {
                         char *a[] = {"ydotool", "click", "0x40", NULL};
                         run_ydotool(a);
+                        left_button_held = 1;
                     }
                     break;
                 case KEY_S:
@@ -305,6 +347,7 @@ int main(int argc, char **argv) {
                     if (ev.value == 1) {
                         char *a[] = {"ydotool", "click", "0x80", NULL};
                         run_ydotool(a);
+                        left_button_held = 0;
                     }
                     break;
                 default:
@@ -328,10 +371,23 @@ int main(int argc, char **argv) {
 EOF_C
 }
 
-ensure_grabber_binary() {
-    write_grabber_source
+function ensure_grabber_binary() {
+    # Only touch/recompile the cached binary if the source actually
+    # changed. Previously the source file was unconditionally
+    # rewritten before the "-nt" (newer-than) staleness check, which
+    # bumped its mtime on every single invocation and made the check
+    # always true — forcing a full recompile every time Mouse Mode was
+    # toggled, even when nothing had changed.
+    local tmp_src
+    tmp_src="$(mktemp)"
+    write_grabber_source "$tmp_src"
 
-    # (Re)compile only if the binary is missing or older than the source.
+    if [ ! -f "$GRABBER_SRC" ] || ! cmp -s "$tmp_src" "$GRABBER_SRC"; then
+        mv "$tmp_src" "$GRABBER_SRC"
+    else
+        rm -f "$tmp_src"
+    fi
+
     if [ ! -x "$GRABBER_BIN" ] || [ "$GRABBER_SRC" -nt "$GRABBER_BIN" ]; then
         local cc_bin
         cc_bin="$(command -v cc || command -v gcc || true)"
@@ -345,16 +401,28 @@ ensure_grabber_binary() {
 # Toggle logic
 # ---------------------------------------------------------------------------
 
-is_active() {
+function is_active() {
     [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
 }
 
-turn_off() {
+function turn_off() {
     local pid
     pid="$(cat "$PID_FILE" 2>/dev/null || true)"
 
     if [[ "$pid" =~ ^[0-9]+$ ]]; then
         kill -TERM "$pid" 2>/dev/null || true
+
+        # Give the helper a moment to run its cleanup handler (release
+        # the exclusive grab, destroy the passthrough uinput device,
+        # and release any stuck-down mouse button) before we return.
+        # Without this wait, immediately re-running the script to turn
+        # Mouse Mode back on could race the still-exiting old process
+        # for the same keyboard grab.
+        for _ in $(seq 1 20); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.1
+        done
+        kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
     fi
 
     rm -f "$PID_FILE"
@@ -362,7 +430,7 @@ turn_off() {
     echo "Mouse Mode disabled. Normal key delivery restored."
 }
 
-turn_on() {
+function turn_on() {
     ensure_ydotoold
     check_input_group
     check_uinput_perms
@@ -371,7 +439,7 @@ turn_on() {
     local device
     device="$(find_keyboard_device)"
     [ -n "$device" ] || die "Could not auto-detect a keyboard event device. Set KEYBOARD_EVENT_DEVICE=/dev/input/eventN and retry."
-    [ -r "$device" ] || die "$device is not readable by $USER (check the 'input' group membership)."
+    [ -r "$device" ] || die "$device is not readable by $(id -un) (check the 'input' group membership)."
 
     "$GRABBER_BIN" "$device" "$MOVE_STEP" >>"$LOG_FILE" 2>&1 &
     local listener_pid=$!
@@ -395,7 +463,7 @@ turn_on() {
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
-main() {
+function main() {
     if is_active; then
         turn_off
     else
