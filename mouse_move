@@ -6,11 +6,11 @@
 # (/dev/input/eventX) and mouse actions are injected with `ydotool`,
 # which writes through the uinput kernel driver (compositor-agnostic).
 #
-# IMPORTANT: while Mouse Mode is ON, the keys h/j/k/l/f/d are grabbed
-# *exclusively* (EVIOCGRAB) by a tiny helper program compiled from the
-# embedded C source below. That helper re-emits every OTHER key
+# IMPORTANT: while Mouse Mode is ON, the keys h/j/k/l/f/d/Space/g/s are
+# grabbed *exclusively* (EVIOCGRAB) by a tiny helper program compiled from
+# the embedded C source below. That helper re-emits every OTHER key
 # through a virtual passthrough keyboard, so normal typing keeps
-# working everywhere — only h/j/k/l/f/d stop reaching applications
+# working everywhere — only those keys stop reaching applications
 # while active, since they're being consumed as mouse commands.
 #
 # Run once to turn Mouse Mode ON (background listener starts).
@@ -21,6 +21,9 @@
 #   h / j / k / l  -> move mouse left / down / up / right
 #   f              -> left click   (ydotool click 0xC0)
 #   d              -> right click  (ydotool click 0xC1)
+#   Space          -> middle click (ydotool click 0xC2)
+#   g              -> left button DOWN (ydotool click 0x40)  # for drag
+#   s              -> left button UP   (ydotool click 0x80)  # for drop
 #
 # Requirements: ydotool, ydotoold, a C compiler (gcc or cc), and your
 # user must be in the "input" group (for /dev/uinput and
@@ -42,16 +45,8 @@ GRABBER_BIN="/tmp/.mouse_mode_grabber"
 # Helpers
 # ---------------------------------------------------------------------------
 
-icon() {
-    if [[ "$1" == "ENABLED" ]]; then
-        echo "checkmark"
-    else
-        echo "vm_clone_wizard"
-    fi
-}
-
 notify() {
-    command -v notify-send >/dev/null 2>&1 && notify-send -i "$(icon "$1")" "Mouse Mode" "$1"
+    command -v notify-send >/dev/null 2>&1 && notify-send -i "input-mouse" "Mouse Mode" "$1"
 }
 
 die() {
@@ -132,8 +127,8 @@ find_keyboard_device() {
 
 # ---------------------------------------------------------------------------
 # Embedded C helper: grabs the keyboard exclusively, forwards every key
-# EXCEPT h/j/k/l/f/d to a virtual passthrough keyboard (so normal
-# typing keeps working), and dispatches ydotool for the mapped keys.
+# EXCEPT h/j/k/l/f/d/Space/g/s to a virtual passthrough keyboard (so
+# normal typing keeps working), and dispatches ydotool for the mapped keys.
 # Compiled once and cached at $GRABBER_BIN.
 # ---------------------------------------------------------------------------
 write_grabber_source() {
@@ -195,17 +190,34 @@ int main(int argc, char **argv) {
 
     if (ioctl(dev_fd, EVIOCGRAB, 1) < 0) {
         perror("EVIOCGRAB (exclusive grab failed)");
+        close(dev_fd);
+        dev_fd = -1;
         return 1;
     }
 
     uinput_fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
-    if (uinput_fd < 0) { perror("open /dev/uinput"); return 1; }
+    if (uinput_fd < 0) {
+        perror("open /dev/uinput");
+        ioctl(dev_fd, EVIOCGRAB, 0);
+        close(dev_fd);
+        dev_fd = -1;
+        return 1;
+    }
 
-    ioctl(uinput_fd, UI_SET_EVBIT, EV_KEY);
-    ioctl(uinput_fd, UI_SET_EVBIT, EV_SYN);
-    ioctl(uinput_fd, UI_SET_EVBIT, EV_MSC);
-    ioctl(uinput_fd, UI_SET_MSCBIT, MSC_SCAN);
-    for (int i = 0; i < KEY_MAX; i++) ioctl(uinput_fd, UI_SET_KEYBIT, i);
+    if (ioctl(uinput_fd, UI_SET_EVBIT, EV_KEY) < 0 ||
+        ioctl(uinput_fd, UI_SET_EVBIT, EV_SYN) < 0 ||
+        ioctl(uinput_fd, UI_SET_EVBIT, EV_MSC) < 0 ||
+        ioctl(uinput_fd, UI_SET_MSCBIT, MSC_SCAN) < 0) {
+        perror("configuring uinput device");
+        cleanup_and_exit(0);
+    }
+
+    for (int i = 0; i < KEY_MAX; i++) {
+        if (ioctl(uinput_fd, UI_SET_KEYBIT, i) < 0) {
+            perror("UI_SET_KEYBIT");
+            cleanup_and_exit(0);
+        }
+    }
 
     struct uinput_setup usetup;
     memset(&usetup, 0, sizeof(usetup));
@@ -214,8 +226,16 @@ int main(int argc, char **argv) {
     usetup.id.product = 0x0100;
     strncpy(usetup.name, "mouse-mode-passthrough-kbd", sizeof(usetup.name) - 1);
 
-    ioctl(uinput_fd, UI_DEV_SETUP, &usetup);
-    ioctl(uinput_fd, UI_DEV_CREATE);
+    if (ioctl(uinput_fd, UI_DEV_SETUP, &usetup) < 0) {
+        perror("UI_DEV_SETUP");
+        cleanup_and_exit(0);
+    }
+
+    if (ioctl(uinput_fd, UI_DEV_CREATE) < 0) {
+        perror("UI_DEV_CREATE");
+        cleanup_and_exit(0);
+    }
+
     usleep(200000); /* let udev settle before events start flowing */
 
     struct input_event ev;
@@ -266,6 +286,27 @@ int main(int argc, char **argv) {
                         run_ydotool(a);
                     }
                     break;
+                case KEY_SPACE:
+                    swallow = 1;
+                    if (ev.value == 1) {
+                        char *a[] = {"ydotool", "click", "0xC2", NULL};
+                        run_ydotool(a);
+                    }
+                    break;
+                case KEY_G:
+                    swallow = 1;
+                    if (ev.value == 1) {
+                        char *a[] = {"ydotool", "click", "0x40", NULL};
+                        run_ydotool(a);
+                    }
+                    break;
+                case KEY_S:
+                    swallow = 1;
+                    if (ev.value == 1) {
+                        char *a[] = {"ydotool", "click", "0x80", NULL};
+                        run_ydotool(a);
+                    }
+                    break;
                 default:
                     break;
             }
@@ -310,9 +351,11 @@ is_active() {
 
 turn_off() {
     local pid
-    pid="$(cat "$PID_FILE")"
+    pid="$(cat "$PID_FILE" 2>/dev/null || true)"
 
-    kill -TERM "$pid" 2>/dev/null
+    if [[ "$pid" =~ ^[0-9]+$ ]]; then
+        kill -TERM "$pid" 2>/dev/null || true
+    fi
 
     rm -f "$PID_FILE"
     notify "Mouse Mode DISABLED"
@@ -343,7 +386,8 @@ turn_on() {
     echo "$listener_pid" > "$PID_FILE"
     notify "Mouse Mode ENABLED"
     echo "Mouse Mode enabled (listening on $device, PID $listener_pid)."
-    echo "Keys: h/j/k/l = move, f = left click, d = right click."
+    echo "Keys: h/j/k/l = move, f = L-click, d = R-click, Space = M-click,"
+    echo "      g = L-button down, s = L-button up (for dragging)."
     echo "These keys will NOT be typed into text boxes while active."
     echo "Run this script again to disable."
 }
