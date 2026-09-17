@@ -188,7 +188,7 @@ static void release_stuck_button(void) {
 
 static void cleanup_and_exit(int sig) {
     (void)sig;
-function release_stuck_button();
+release_stuck_button();
     if (uinput_fd >= 0) {
         ioctl(uinput_fd, UI_DEV_DESTROY);
         close(uinput_fd);
