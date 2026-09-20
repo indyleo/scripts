@@ -1,0 +1,1750 @@
+#!/usr/bin/env python3
+"""mocktail-multi - run several Mocktail (Roblox on Linux) instances side by side.
+
+How it works
+    Mocktail takes an flock on /run/user/<uid>/mocktail.<hash>.instance.lock, where
+    <hash> is derived from the path of the AppImage it was started from. So every
+    instance here gets:
+      * its own copy of the AppImage            -> its own lock
+      * its own MOCKTAIL_{CONFIG,DATA,CACHE,STATE}_ROOT -> its own login, config,
+                                                  Roblox payload and logs
+
+Layout (override the root with $MOCKTAIL_MULTI_HOME)
+    ~/.local/share/mocktail-multi/appimages/Mocktail-<ver>-x86_64.AppImage
+    ~/.local/share/mocktail-multi/instances/<name>/{Mocktail.AppImage,config,data,
+                                                    cache,state,meta.json,console.log}
+
+Python 3.8+, standard library only (the GUI additionally needs PyGObject + GTK 3).
+Run with no arguments to open the GUI, or the TUI when there is no display.
+"""
+from __future__ import annotations
+
+import argparse
+import curses
+import hashlib
+import json
+import os
+import re
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+REPO = "komaruworld/mocktail"
+DEFAULT_VERSION = "1.0.4"
+ARCH = "x86_64"
+UA = "mocktail-multi/1.0"
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$")
+ASSET_RE = re.compile(r"^Mocktail-(.+)-%s\.AppImage$" % ARCH)
+
+
+def _root() -> Path:
+    override = os.environ.get("MOCKTAIL_MULTI_HOME")
+    if override:
+        return Path(override).expanduser()
+    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share")
+    return Path(base) / "mocktail-multi"
+
+
+ROOT = _root()
+APPIMAGES = ROOT / "appimages"
+INSTANCES = ROOT / "instances"
+
+
+class Error(Exception):
+    pass
+
+
+# --------------------------------------------------------------------------- utils
+
+def paint(text: str, code: str) -> str:
+    if sys.stdout.isatty() and not os.environ.get("NO_COLOR"):
+        return f"\033[{code}m{text}\033[0m"
+    return text
+
+
+def human(n: float) -> str:
+    n = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if n < 1024:
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TiB"
+
+
+def vkey(version: str):
+    return tuple(int(x) for x in re.findall(r"\d+", version))
+
+
+def rmtree_force(path: Path) -> None:
+    """rmtree that copes with the read-only dirs Mocktail's payload store creates."""
+    for dirpath, _dirs, _files in os.walk(path):
+        try:
+            os.chmod(dirpath, 0o700)
+        except OSError:
+            pass
+    shutil.rmtree(path)
+
+
+def clone_or_copy(src, dst, *, follow_symlinks=True):
+    """Reflink (instant, no extra disk on btrfs/xfs) when possible, else plain copy."""
+    try:
+        import fcntl
+        with open(src, "rb") as s, open(dst, "wb") as d:
+            fcntl.ioctl(d.fileno(), 0x40049409, s.fileno())  # FICLONE
+        shutil.copystat(src, dst)
+        return dst
+    except (OSError, ImportError):
+        return shutil.copy2(src, dst)
+
+
+def tail_lines(path: Path, n: int = 200, max_bytes: int = 262144):
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - max_bytes))
+            data = f.read()
+    except OSError:
+        return []
+    text = data.decode("utf-8", "replace")
+    text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
+    text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", text.replace("\r", "\n"))
+    return text.splitlines()[-n:]
+
+
+# ----------------------------------------------------------------- process / locks
+
+def proc_start(pid: int):
+    """Start time (clock ticks) of a live, non-zombie process, else None."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            rest = f.read().rsplit(")", 1)[1].split()
+        if rest[0] in ("Z", "X"):
+            return None
+        return int(rest[19])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def fnv1a64(data: bytes) -> int:
+    h = 14695981039346656037
+    for b in data:
+        h ^= b
+        h = (h * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+def lock_path(appimage: Path) -> Path:
+    """Where Mocktail keeps the single-instance lock for this AppImage path."""
+    key = f"{fnv1a64(os.fsencode(os.path.realpath(appimage))):016x}"
+    uid = os.getuid()
+    run = Path("/run/user") / str(uid)
+    try:
+        st = run.stat()
+        if stat.S_ISDIR(st.st_mode) and st.st_uid == uid:
+            return run / f"mocktail.{key}.instance.lock"
+    except OSError:
+        pass
+    return Path("/tmp") / f"mocktail-{uid}.{key}.instance.lock"
+
+
+def lock_holder(lockfile: Path):
+    """PID holding an flock on lockfile, read from /proc/locks (never touches the lock)."""
+    try:
+        ino = os.stat(lockfile).st_ino
+        with open("/proc/locks") as f:
+            for line in f:
+                p = line.split()
+                if len(p) >= 6 and p[1] == "FLOCK":
+                    parts = p[5].split(":")
+                    if len(parts) == 3 and parts[2].isdigit() and int(parts[2]) == ino:
+                        return int(p[4])
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+_CHILDREN: dict = {}
+
+
+def reap():
+    """Poll children we spawned (prevents zombies). Returns [(name, exit_code)] that ended."""
+    ended = []
+    for name, proc in list(_CHILDREN.items()):
+        code = proc.poll()
+        if code is not None:
+            ended.append((name, code))
+            del _CHILDREN[name]
+    return ended
+
+
+# ------------------------------------------------------------------ AppImage fetch
+
+def asset_name(version: str) -> str:
+    return f"Mocktail-{version}-{ARCH}.AppImage"
+
+
+def asset_url(version: str) -> str:
+    return f"https://github.com/{REPO}/releases/download/{version}/{asset_name(version)}"
+
+
+def is_appimage(path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            head = f.read(16)
+    except OSError:
+        return False
+    return head[:4] == b"\x7fELF" and head[8:10] == b"AI"
+
+
+def cached() -> dict:
+    out = {}
+    for p in APPIMAGES.glob("Mocktail-*.AppImage"):
+        m = ASSET_RE.match(p.name)
+        if m and is_appimage(p):
+            out[m.group(1)] = p
+    return dict(sorted(out.items(), key=lambda kv: vkey(kv[0])))
+
+
+def newest_cached():
+    versions = list(cached())
+    return versions[-1] if versions else None
+
+
+def latest_release():
+    req = urllib.request.Request(
+        f"https://api.github.com/repos/{REPO}/releases/latest",
+        headers={"User-Agent": UA, "Accept": "application/vnd.github+json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = json.load(r)
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise Error(f"could not ask GitHub for the latest release: {e}")
+    for asset in data.get("assets", []):
+        m = ASSET_RE.match(asset.get("name", ""))
+        if m:
+            return m.group(1), asset["browser_download_url"]
+    raise Error("the latest release has no x86_64 AppImage asset")
+
+
+def fetch(version=None, latest=False, force=False, progress=None):
+    """Download an AppImage into the cache. Returns (version, path, sha256-or-None)."""
+    if latest:
+        version, url = latest_release()
+    else:
+        version = version or DEFAULT_VERSION
+        url = asset_url(version)
+    dest = APPIMAGES / asset_name(version)
+    if not force and dest.exists() and is_appimage(dest):
+        return version, dest, None
+
+    APPIMAGES.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp = dest.with_name(dest.name + ".part")
+    digest = hashlib.sha256()
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=30) as resp, open(tmp, "wb") as out:
+            total = int(resp.headers.get("Content-Length") or 0)
+            done = 0
+            while True:
+                chunk = resp.read(1 << 16)
+                if not chunk:
+                    break
+                out.write(chunk)
+                digest.update(chunk)
+                done += len(chunk)
+                if progress:
+                    progress(done, total)
+    except (urllib.error.URLError, OSError) as e:
+        tmp.unlink(missing_ok=True)
+        hint = " (is that a real release tag?)" if getattr(e, "code", None) == 404 else ""
+        raise Error(f"download failed: {url}: {e}{hint}")
+    if not is_appimage(tmp):
+        tmp.unlink(missing_ok=True)
+        raise Error(f"{url} did not return an AppImage")
+    tmp.chmod(0o755)
+    os.replace(tmp, dest)
+    return version, dest, digest.hexdigest()
+
+
+def ensure_appimage(version=None, latest=False, progress=None):
+    """Return (version, path) of a cached AppImage, downloading if needed."""
+    if latest:
+        ver, path, _ = fetch(latest=True, progress=progress)
+        return ver, path
+    if version:
+        ver, path, _ = fetch(version, progress=progress)
+        return ver, path
+    ver = newest_cached()
+    if ver:
+        return ver, cached()[ver]
+    ver, path, _ = fetch(DEFAULT_VERSION, progress=progress)
+    return ver, path
+
+
+# ---------------------------------------------------------------------- instances
+
+class Instance:
+    def __init__(self, name: str):
+        self.name = name
+        self.dir = INSTANCES / name
+        self.appimage = self.dir / "Mocktail.AppImage"
+        self.meta_file = self.dir / "meta.json"
+        self.pidfile = self.dir / "pid"
+        self.log = self.dir / "console.log"
+
+    def exists(self) -> bool:
+        return self.meta_file.exists()
+
+    def meta(self) -> dict:
+        try:
+            return json.loads(self.meta_file.read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def save_meta(self, meta: dict) -> None:
+        tmp = self.meta_file.with_name("meta.json.tmp")
+        tmp.write_text(json.dumps(meta, indent=2) + "\n")
+        os.replace(tmp, self.meta_file)
+
+    @property
+    def version(self) -> str:
+        return self.meta().get("version", "?")
+
+    def env(self) -> dict:
+        env = os.environ.copy()
+        for k in ("APPIMAGE", "APPDIR", "ARGV0", "OWD"):
+            env.pop(k, None)
+        env.update({
+            "MOCKTAIL_CONFIG_ROOT": str(self.dir / "config"),
+            "MOCKTAIL_DATA_ROOT": str(self.dir / "data"),
+            "MOCKTAIL_CACHE_ROOT": str(self.dir / "cache"),
+            "MOCKTAIL_STATE_ROOT": str(self.dir / "state"),
+        })
+        env.update({str(k): str(v) for k, v in self.meta().get("env", {}).items()})
+        return env
+
+    def lockfile(self) -> Path:
+        return lock_path(self.appimage)
+
+    def leader(self):
+        """PID of the process we launched, if it is still the same live process."""
+        try:
+            pid_s, start_s = self.pidfile.read_text().split()
+            pid = int(pid_s)
+        except (OSError, ValueError):
+            return None
+        return pid if str(proc_start(pid)) == start_s else None
+
+    def holder(self):
+        return lock_holder(self.lockfile())
+
+    def running(self) -> bool:
+        return self.leader() is not None or self.holder() is not None
+
+    def status(self):
+        """(label, pid, seconds-up)"""
+        holder, leader = self.holder(), self.leader()
+        if holder is None and leader is None:
+            return "stopped", None, None
+        try:
+            age = time.time() - self.pidfile.stat().st_mtime
+        except OSError:
+            age = None
+        if holder is None and age is not None and age < 30:
+            return "starting", leader, age
+        return "running", holder or leader, age
+
+    def has_payload(self) -> bool:
+        return (self.dir / "data" / "current.json").exists()
+
+
+def get_instance(name: str) -> Instance:
+    inst = Instance(name)
+    if not NAME_RE.match(name) or not inst.exists():
+        raise Error(f"no such instance: {name}")
+    return inst
+
+
+def list_instances():
+    if not INSTANCES.is_dir():
+        return []
+    return [Instance(p.name) for p in sorted(INSTANCES.iterdir())
+            if p.is_dir() and (p / "meta.json").exists()]
+
+
+def seed_payloads(donor: Instance, target: Instance) -> None:
+    """Copy the donor's downloaded Roblox payload so the new instance skips the download.
+
+    Best-effort: if Mocktail decides the copy is not valid it will simply download again.
+    """
+    if donor.running():
+        raise Error(f"stop '{donor.name}' first (its payload store may be mid-write)")
+    src = donor.dir / "data"
+    if not (src / "current.json").exists():
+        raise Error(f"'{donor.name}' has no downloaded payload yet (launch it once first)")
+    dst = target.dir / "data"
+    for item in ("payloads", "current.json", "previous_good.json"):
+        s = src / item
+        if s.is_dir():
+            shutil.copytree(s, dst / item, symlinks=True, copy_function=clone_or_copy)
+        elif s.exists():
+            clone_or_copy(s, dst / item)
+
+
+def create_instance(name, version=None, env=None, seed=None, progress=None) -> Instance:
+    if not NAME_RE.match(name):
+        raise Error(f"bad name '{name}' (letters, digits, . _ -; max 32 chars)")
+    inst = Instance(name)
+    if inst.dir.exists():
+        raise Error(f"instance '{name}' already exists")
+    donor = get_instance(seed) if seed else None
+    ver, src = ensure_appimage(version, progress=progress)
+
+    INSTANCES.mkdir(parents=True, exist_ok=True, mode=0o700)
+    inst.dir.mkdir(mode=0o700)
+    try:
+        for sub in ("config", "data", "cache", "state"):
+            (inst.dir / sub).mkdir(mode=0o700)
+        clone_or_copy(src, inst.appimage)
+        inst.appimage.chmod(0o755)
+        if donor:
+            seed_payloads(donor, inst)
+        inst.save_meta({"name": name, "version": ver, "env": env or {},
+                        "created": time.strftime("%Y-%m-%dT%H:%M:%S")})
+    except BaseException:
+        rmtree_force(inst.dir)
+        raise
+    return inst
+
+
+def upgrade_instance(inst: Instance, version=None, latest=False, progress=None) -> str:
+    if inst.running():
+        raise Error(f"stop '{inst.name}' before upgrading it")
+    ver, src = ensure_appimage(version, latest=latest, progress=progress)
+    tmp = inst.dir / "Mocktail.AppImage.new"
+    clone_or_copy(src, tmp)
+    tmp.chmod(0o755)
+    os.replace(tmp, inst.appimage)  # same path => same lock key
+    meta = inst.meta()
+    meta["version"] = ver
+    inst.save_meta(meta)
+    return ver
+
+
+def start(inst: Instance):
+    if inst.running():
+        raise Error(f"{inst.name} is already running")
+    if not inst.appimage.exists():
+        raise Error(f"{inst.name}: AppImage is missing (try: upgrade {inst.name})")
+    if inst.log.exists() and inst.log.stat().st_size > 5 * 1024 * 1024:
+        os.replace(inst.log, inst.log.with_name("console.log.1"))
+    with open(inst.log, "ab") as logf:
+        logf.write(f"\n=== {time.strftime('%F %T')} starting {inst.name} ===\n".encode())
+        logf.flush()
+        proc = subprocess.Popen(
+            [str(inst.appimage)], cwd=inst.dir, env=inst.env(),
+            stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    started = proc_start(proc.pid)
+    if started is not None:
+        inst.pidfile.write_text(f"{proc.pid} {started}\n")
+    _CHILDREN[inst.name] = proc
+    return proc
+
+
+def stop(inst: Instance, timeout: float = 8.0) -> bool:
+    leader, holder = inst.leader(), inst.holder()
+    if leader is None and holder is None:
+        return False
+
+    def send(sig):
+        if leader is not None:
+            try:
+                os.killpg(leader, sig)  # we launched it with setsid, so pgid == pid
+            except OSError:
+                pass
+        if holder is not None:
+            try:
+                os.kill(holder, sig)
+            except OSError:
+                pass
+
+    send(signal.SIGTERM)
+    deadline = time.time() + timeout
+    while time.time() < deadline and inst.running():
+        reap()
+        time.sleep(0.2)
+    if inst.running():
+        send(signal.SIGKILL)
+        deadline = time.time() + 3
+        while time.time() < deadline and inst.running():
+            reap()
+            time.sleep(0.2)
+    reap()
+    inst.pidfile.unlink(missing_ok=True)
+    return True
+
+
+def failure_hint(log_text: str) -> str:
+    t = log_text.lower()
+    if "already running" in t:
+        return "another process holds this instance's lock - stop it first"
+    if "libfuse" in t or ("fuse" in t and "mount" in t):
+        return ("the AppImage needs FUSE 2 - install libfuse2, or create the instance "
+                "with -e APPIMAGE_EXTRACT_AND_RUN=1 (or add it under \"env\" in meta.json)")
+    return ""
+
+
+# -------------------------------------------------------------------------- CLI
+
+def cmd_fetch(args):
+    def progress(done, total):
+        if sys.stdout.isatty():
+            pct = f" {done * 100 // total}%" if total else ""
+            print(f"\r  {human(done)} / {human(total) if total else '?'}{pct}   ",
+                  end="", flush=True)
+    ver, path, sha = fetch(args.version, latest=args.latest, force=args.force,
+                           progress=progress)
+    if sys.stdout.isatty() and sha:
+        print()
+    if sha:
+        print(f"downloaded {path.name}  sha256 {sha}")
+    else:
+        print(f"already cached: {path}")
+
+
+def cmd_new(args):
+    env = {}
+    for item in args.env or []:
+        if "=" not in item:
+            raise Error(f"--env expects KEY=VALUE, got '{item}'")
+        k, v = item.split("=", 1)
+        env[k] = v
+    seed = args.seed_from
+    if args.seed and not seed:
+        donors = [i for i in list_instances() if i.has_payload() and not i.running()]
+        if not donors:
+            raise Error("--seed: no stopped instance with a downloaded payload to copy from")
+        seed = donors[0].name
+
+    def progress(done, total):
+        if sys.stdout.isatty():
+            print(f"\r  downloading AppImage: {human(done)} / "
+                  f"{human(total) if total else '?'}   ", end="", flush=True)
+
+    for name in args.names:
+        inst = create_instance(name, version=args.version, env=env, seed=seed,
+                               progress=progress)
+        if sys.stdout.isatty():
+            print()
+        extra = f", payload seeded from {seed}" if seed else ""
+        print(f"created {inst.name} (Mocktail {inst.version}{extra}) -> {inst.dir}")
+
+
+def _pick(args):
+    if args.all:
+        return list_instances()
+    if not args.names:
+        raise Error("give instance name(s) or --all")
+    return [get_instance(n) for n in args.names]
+
+
+def _start_checked(inst: Instance, settle: float = 2.5) -> str:
+    proc = start(inst)
+    end = time.time() + settle
+    while time.time() < end and proc.poll() is None:
+        time.sleep(0.1)
+    if proc.poll() is not None:
+        # It may have handed off to another process (memory-limit re-exec); give the lock a moment.
+        end = time.time() + 3
+        while time.time() < end and not inst.running():
+            time.sleep(0.2)
+        if not inst.running():
+            tail = "\n".join(tail_lines(inst.log, 12))
+            hint = failure_hint(tail)
+            raise Error(f"{inst.name} exited immediately (code {proc.returncode}); last output:\n"
+                        f"{tail}\n" + (f"hint: {hint}\n" if hint else ""))
+    return f"started {inst.name} (pid {proc.pid})"
+
+
+def cmd_start(args):
+    failed = 0
+    for inst in _pick(args):
+        try:
+            print(_start_checked(inst))
+        except Error as e:
+            print(paint(f"error: {e}", "31"), file=sys.stderr)
+            failed += 1
+    return 1 if failed else 0
+
+
+def cmd_stop(args):
+    for inst in _pick(args):
+        print(f"stopped {inst.name}" if stop(inst) else f"{inst.name} was not running")
+
+
+def cmd_restart(args):
+    for inst in _pick(args):
+        stop(inst)
+        print(_start_checked(inst))
+
+
+def cmd_upgrade(args):
+    for inst in _pick(args):
+        old = inst.version
+        ver = upgrade_instance(inst, version=args.version, latest=args.latest)
+        print(f"{inst.name}: {old} -> {ver}")
+
+
+def cmd_rm(args):
+    for inst in [get_instance(n) for n in args.names]:
+        if inst.running():
+            raise Error(f"{inst.name} is running - stop it first")
+        if not args.yes:
+            ans = input(f"delete '{inst.name}' including its login session and data? [y/N] ")
+            if ans.strip().lower() != "y":
+                print("skipped", inst.name)
+                continue
+        rmtree_force(inst.dir)
+        print(f"removed {inst.name}")
+
+
+def cmd_list(_args):
+    insts = list_instances()
+    if not insts:
+        print(f"no instances yet. Create one with:  {os.path.basename(sys.argv[0])} new NAME")
+        return
+    width = max(8, max(len(i.name) for i in insts))
+    print(paint(f"{'NAME':<{width}}  {'VERSION':<8}  {'STATUS':<9}  PID", "1"))
+    for inst in insts:
+        label, pid, _ = inst.status()
+        color = {"running": "32", "starting": "33"}.get(label, "2")
+        print(f"{inst.name:<{width}}  {inst.version:<8}  {paint(f'{label:<9}', color)}  "
+              f"{pid or '-'}")
+
+
+def cmd_logs(args):
+    inst = get_instance(args.name)
+    for line in tail_lines(inst.log, args.lines):
+        print(line)
+    if not args.follow:
+        return
+    try:
+        with open(inst.log, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            while True:
+                data = f.read()
+                if data:
+                    sys.stdout.write(data.decode("utf-8", "replace"))
+                    sys.stdout.flush()
+                else:
+                    time.sleep(0.4)
+    except (OSError, KeyboardInterrupt):
+        pass
+
+
+def cmd_path(args):
+    print(get_instance(args.name).dir)
+
+
+# -------------------------------------------------------------------------- TUI
+
+class Job:
+    """Runs fn(progress) in a thread so the UI keeps redrawing."""
+
+    def __init__(self, label, fn):
+        self.label = label
+        self.done = 0
+        self.total = 0
+        self.error = None
+        self.result = ""
+        self.finished = False
+        threading.Thread(target=self._run, args=(fn,), daemon=True).start()
+
+    def _run(self, fn):
+        try:
+            self.result = fn(self.progress) or ""
+        except Error as e:
+            self.error = str(e)
+        except Exception as e:  # keep the TUI alive whatever happens
+            self.error = f"{type(e).__name__}: {e}"
+        finally:
+            self.finished = True
+
+    def progress(self, done, total):
+        self.done, self.total = done, total
+
+
+class UI:
+    def __init__(self):
+        self.sel = 0
+        self.job = None
+        self.flash = ""
+        self.flash_bad = False
+        self.flash_until = 0.0
+
+    def say(self, text, bad=False, secs=6):
+        self.flash, self.flash_bad, self.flash_until = text, bad, time.time() + secs
+
+
+def _put(scr, y, x, text, attr=0):
+    h, w = scr.getmaxyx()
+    if 0 <= y < h and 0 <= x < w - 1:
+        try:
+            scr.addnstr(y, x, text, w - x - 1, attr)
+        except curses.error:
+            pass
+
+
+def _prompt(scr, label, default=""):
+    h, w = scr.getmaxyx()
+    buf = list(default)
+    scr.timeout(-1)
+    try:
+        curses.curs_set(1)
+    except curses.error:
+        pass
+    try:
+        while True:
+            line = f" {label}: {''.join(buf)}"
+            scr.move(h - 2, 0)
+            scr.clrtoeol()
+            _put(scr, h - 2, 0, line, curses.A_BOLD)
+            scr.move(h - 2, min(len(line), w - 2))
+            scr.refresh()
+            ch = scr.get_wch()
+            if ch in ("\n", "\r") or ch == curses.KEY_ENTER:
+                return "".join(buf).strip()
+            if ch == "\x1b":
+                return None
+            if ch in (curses.KEY_BACKSPACE, "\x7f", "\b"):
+                if buf:
+                    buf.pop()
+            elif isinstance(ch, str) and ch.isprintable():
+                buf.append(ch)
+    finally:
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+
+
+def _confirm(scr, question) -> bool:
+    h, _w = scr.getmaxyx()
+    scr.timeout(-1)
+    scr.move(h - 2, 0)
+    scr.clrtoeol()
+    _put(scr, h - 2, 0, f" {question} [y/N] ", curses.A_BOLD)
+    scr.refresh()
+    return scr.getch() in (ord("y"), ord("Y"))
+
+
+def _view_log(scr, inst: Instance):
+    follow, top = True, 0
+    while True:
+        lines = tail_lines(inst.log, 3000)
+        h, w = scr.getmaxyx()
+        view = max(1, h - 2)
+        top = max(0, len(lines) - view) if follow else max(0, min(top, len(lines) - view))
+        scr.erase()
+        _put(scr, 0, 0, f" log: {inst.name}   q back | arrows/PgUp/PgDn scroll | g top | "
+                        f"G/f follow ({'on' if follow else 'off'})".ljust(w), curses.A_REVERSE)
+        for i, line in enumerate(lines[top:top + view]):
+            _put(scr, 1 + i, 0, line.expandtabs(4))
+        scr.refresh()
+        scr.timeout(500)
+        ch = scr.getch()
+        if ch in (ord("q"), 27):
+            return
+        if ch == curses.KEY_UP:
+            follow, top = False, top - 1
+        elif ch == curses.KEY_DOWN:
+            top += 1
+            follow = top >= len(lines) - view
+        elif ch == curses.KEY_PPAGE:
+            follow, top = False, top - view
+        elif ch == curses.KEY_NPAGE:
+            top += view
+            follow = top >= len(lines) - view
+        elif ch == ord("g"):
+            follow, top = False, 0
+        elif ch in (ord("G"), ord("f")):
+            follow = not follow if ch == ord("f") else True
+
+
+def _draw(scr, ui: UI, insts, colors):
+    green, yellow, red, cyan = colors
+    scr.erase()
+    h, w = scr.getmaxyx()
+    _put(scr, 0, 0, " mocktail-multi ".ljust(w), curses.A_REVERSE)
+    have = cached()
+    if have:
+        newest = list(have)[-1]
+        _put(scr, 1, 1, "AppImages: " + "  ".join(
+            f"{v}{' (newest)' if v == newest else ''}" for v in have), cyan)
+    else:
+        _put(scr, 1, 1, "No AppImage downloaded yet - press f (or n, which fetches one).", yellow)
+
+    nw = min(24, max(8, max((len(i.name) for i in insts), default=8)))
+    _put(scr, 3, 1, f"{'NAME':<{nw}}  {'VERSION':<8}  {'STATUS':<9}  {'PID':>7}  UP",
+         curses.A_BOLD | curses.A_UNDERLINE)
+    if not insts:
+        _put(scr, 5, 1, "No instances yet. Press n to create one.")
+    for row, inst in enumerate(insts):
+        y = 4 + row
+        if y >= h - 3:
+            break
+        label, pid, age = inst.status()
+        up = ""
+        if label != "stopped" and age is not None:
+            up = f"{int(age // 3600)}h{int(age % 3600 // 60):02d}m" if age >= 3600 \
+                else f"{int(age // 60)}m{int(age % 60):02d}s"
+        base = curses.A_REVERSE if row == ui.sel else 0
+        _put(scr, y, 1, f"{inst.name:<{nw}}  {inst.version:<8}  ".ljust(w - 2), base)
+        color = {"running": green, "starting": yellow}.get(label, 0)
+        _put(scr, y, 1 + nw + 2 + 8 + 2, f"{label:<9}", color | base)
+        _put(scr, y, 1 + nw + 2 + 8 + 2 + 11, f"{pid or '-':>7}  {up}", base)
+
+    if ui.job and not ui.job.finished:
+        j = ui.job
+        if j.total:
+            frac = min(1.0, j.done / j.total)
+            bar = "#" * int(frac * 24) + "-" * (24 - int(frac * 24))
+            text = f" {j.label} [{bar}] {int(frac * 100)}%  {human(j.done)}/{human(j.total)}"
+        else:
+            text = f" {j.label} ..." + ("." * (int(time.time() * 3) % 4))
+        _put(scr, h - 2, 0, text, yellow | curses.A_BOLD)
+    elif ui.flash and time.time() < ui.flash_until:
+        _put(scr, h - 2, 0, " " + ui.flash, (red if ui.flash_bad else green) | curses.A_BOLD)
+    hints = (" n new | enter start/stop | s start | x stop | r restart | l log | f fetch | "
+             "u upgrade | d delete | A/X all | q quit")
+    _put(scr, h - 1, 0, hints.ljust(w), curses.A_REVERSE)
+    scr.refresh()
+
+
+def _tui(scr):
+    os.environ.setdefault("ESCDELAY", "25")
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
+    colors = (0, 0, 0, 0)
+    if curses.has_colors():
+        curses.start_color()
+        curses.use_default_colors()
+        for i, c in enumerate((curses.COLOR_GREEN, curses.COLOR_YELLOW,
+                               curses.COLOR_RED, curses.COLOR_CYAN), 1):
+            curses.init_pair(i, c, -1)
+        colors = tuple(curses.color_pair(i) for i in range(1, 5))
+
+    ui = UI()
+    while True:
+        for name, code in reap():
+            inst = Instance(name)
+            if code != 0 and not inst.running():
+                ui.say(f"{name} exited with code {code} - press l to read its log", bad=True, secs=15)
+        if ui.job and ui.job.finished:
+            if ui.job.error:
+                ui.say(ui.job.error.splitlines()[0], bad=True, secs=12)
+            else:
+                ui.say(ui.job.result or "done")
+            ui.job = None
+
+        insts = list_instances()
+        ui.sel = max(0, min(ui.sel, len(insts) - 1))
+        _draw(scr, ui, insts, colors)
+        scr.timeout(120 if ui.job else 1000)
+        ch = scr.getch()
+        if ch == -1 or ch == curses.KEY_RESIZE or ui.job:
+            continue
+
+        key = chr(ch) if 0 <= ch < 256 else ""
+        cur = insts[ui.sel] if insts else None
+        if key == "q":
+            break
+        elif ch == curses.KEY_DOWN or key == "j":
+            ui.sel = min(len(insts) - 1, ui.sel + 1)
+        elif ch == curses.KEY_UP or key == "k":
+            ui.sel = max(0, ui.sel - 1)
+        elif ch == curses.KEY_HOME or key == "g":
+            ui.sel = 0
+        elif ch == curses.KEY_END or key == "G":
+            ui.sel = max(0, len(insts) - 1)
+        elif key == "n":
+            name = _prompt(scr, "new instance name")
+            if not name:
+                continue
+            if not NAME_RE.match(name):
+                ui.say("bad name (letters, digits, . _ -; max 32)", bad=True)
+                continue
+            if Instance(name).exists():
+                ui.say(f"'{name}' already exists", bad=True)
+                continue
+            seed = None
+            donors = [i for i in insts if i.has_payload() and not i.running()]
+            if donors and _confirm(scr, f"copy the Roblox payload from '{donors[0].name}' "
+                                        f"(skips a big download, best-effort)?"):
+                seed = donors[0].name
+            ui.job = Job(f"creating {name}", lambda p, n=name, s=seed: (
+                create_instance(n, seed=s, progress=p) and f"created {n}"))
+        elif key == "f":
+            ver = _prompt(scr, "AppImage version to download (tag, or 'latest')", DEFAULT_VERSION)
+            if ver is None:
+                continue
+            ver = ver or DEFAULT_VERSION
+
+            def do_fetch(p, v=ver):
+                got, _path, sha = fetch(None if v == "latest" else v, latest=(v == "latest"),
+                                        progress=p)
+                return f"downloaded Mocktail {got}" if sha else f"Mocktail {got} already cached"
+            ui.job = Job(f"downloading {ver}", do_fetch)
+        elif key == "A":
+            todo = [i for i in insts if not i.running()]
+
+            def start_all(_p, items=todo):
+                for i in items:
+                    start(i)
+                    time.sleep(1.0)
+                return f"started {len(items)} instance(s)"
+            if todo:
+                ui.job = Job("starting all", start_all)
+        elif key == "X":
+            todo = [i for i in insts if i.running()]
+            if todo:
+                ui.job = Job("stopping all", lambda p, items=todo: (
+                    [stop(i) for i in items], f"stopped {len(items)} instance(s)")[1])
+        elif cur is None:
+            continue
+        elif ch in (10, 13, curses.KEY_ENTER):
+            if cur.running():
+                ui.job = Job(f"stopping {cur.name}", lambda p, i=cur: stop(i) and f"stopped {i.name}")
+            else:
+                try:
+                    start(cur)
+                    ui.say(f"starting {cur.name} ...")
+                except Error as e:
+                    ui.say(str(e), bad=True)
+        elif key == "s":
+            try:
+                start(cur)
+                ui.say(f"starting {cur.name} ...")
+            except Error as e:
+                ui.say(str(e), bad=True)
+        elif key == "x":
+            if cur.running():
+                ui.job = Job(f"stopping {cur.name}", lambda p, i=cur: stop(i) and f"stopped {i.name}")
+            else:
+                ui.say(f"{cur.name} is not running")
+        elif key == "r":
+            def restart(_p, i=cur):
+                stop(i)
+                start(i)
+                return f"restarted {i.name}"
+            ui.job = Job(f"restarting {cur.name}", restart)
+        elif key == "l":
+            _view_log(scr, cur)
+        elif key == "u":
+            newest = newest_cached()
+            if cur.running():
+                ui.say("stop it first", bad=True)
+            elif newest is None or newest == cur.version:
+                ui.say(f"{cur.name} already has the newest downloaded AppImage "
+                       f"({cur.version}); press f to fetch another version")
+            else:
+                ui.job = Job(f"upgrading {cur.name}", lambda p, i=cur, v=newest: (
+                    upgrade_instance(i, version=v, progress=p) and f"{i.name} -> {v}"))
+        elif key == "d":
+            if cur.running():
+                ui.say("stop it first", bad=True)
+            elif _confirm(scr, f"delete '{cur.name}' and its login session/data?"):
+                ui.job = Job(f"deleting {cur.name}", lambda p, i=cur: (
+                    rmtree_force(i.dir), f"removed {i.name}")[1])
+
+
+def cmd_tui(_args=None):
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise Error("the TUI needs a terminal; use `list`, `start`, `stop`, ... instead")
+    curses.wrapper(_tui)
+    running = [i.name for i in list_instances() if i.running()]
+    if running:
+        print(f"still running (detached): {', '.join(running)}   -> `{os.path.basename(sys.argv[0])} stop --all` to close them")
+
+
+# ------------------------------------------------------------------------ GUI (GTK 3)
+
+def _fmt_age(age) -> str:
+    if age is None:
+        return ""
+    age = int(age)
+    if age >= 3600:
+        return f"{age // 3600}h {age % 3600 // 60:02d}m"
+    return f"{age // 60}m {age % 60:02d}s"
+
+
+def _parse_env_text(text: str) -> dict:
+    env = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line or not line.split("=", 1)[0].strip():
+            raise Error(f"bad environment line: {line}")
+        k, v = line.split("=", 1)
+        env[k.strip()] = v.strip()
+    return env
+
+
+def _gui_classes(Gtk, GLib, Gio, Pango, Gdk):
+    """Build the GTK 3 classes (done lazily so the CLI never needs PyGObject)."""
+
+    def dim(widget):
+        widget.get_style_context().add_class("dim-label")
+        return widget
+
+    def install_status_css():
+        """Green/amber status dots taken from the active theme's palette when it defines one."""
+        provider = Gtk.CssProvider()
+        try:
+            provider.load_from_data(b".mm-running { color: @success_color; } "
+                                    b".mm-starting { color: @warning_color; }")
+        except GLib.Error:
+            provider.load_from_data(b".mm-running { color: #26a269; } "
+                                    b".mm-starting { color: #e5a50a; }")
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+    def icon_or_text(names, fallback):
+        """First icon the current theme actually has, else a text label (never a broken image)."""
+        theme = Gtk.IconTheme.get_default()
+        for name in names:
+            if theme.lookup_icon(name, 16, 0) is not None:
+                return Gtk.Image.new_from_icon_name(name, Gtk.IconSize.BUTTON)
+        return Gtk.Label(label=fallback)
+
+    def make_popover(items):
+        """items: [(text, callback) | None]; None is a separator. Standard GTK 3 popover menu."""
+        pop = Gtk.Popover()
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        box.set_border_width(6)
+        for item in items:
+            if item is None:
+                box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
+                               False, False, 4)
+                continue
+            text, callback = item
+            btn = Gtk.ModelButton()
+            btn.set_property("text", text)
+            btn.connect("clicked", lambda _b, cb=callback: (pop.popdown(), cb()))
+            box.pack_start(btn, False, False, 0)
+        box.show_all()
+        pop.add(box)
+        return pop
+
+    def icon_menu_button(icon, items, tooltip):
+        btn = Gtk.MenuButton()
+        btn.add(icon_or_text(icon, "\u22ee" if "more" in icon[0] else "\u2261"))
+        btn.set_popover(make_popover(items))
+        btn.set_tooltip_text(tooltip)
+        return btn
+
+    def version_combo(default_text=None):
+        combo = Gtk.ComboBoxText.new_with_entry()
+        have = list(cached())[::-1]
+        for v in have:
+            combo.append_text(v)
+        if DEFAULT_VERSION not in have:
+            combo.append_text(DEFAULT_VERSION)
+        if have:
+            combo.set_active(0)
+        else:
+            combo.get_child().set_text(default_text or DEFAULT_VERSION)
+        return combo
+
+    class VersionDialog(Gtk.Dialog):
+        """Pick an AppImage version (or 'latest'); downloaded on demand."""
+
+        def __init__(self, parent, title, accept):
+            super().__init__(title=title, transient_for=parent, modal=True, use_header_bar=True)
+            self.add_button("Cancel", Gtk.ResponseType.CANCEL)
+            ok = self.add_button(accept, Gtk.ResponseType.OK)
+            ok.get_style_context().add_class("suggested-action")
+            self.set_default_response(Gtk.ResponseType.OK)
+            area = self.get_content_area()
+            area.set_border_width(16)
+            area.set_spacing(10)
+            self.combo = version_combo()
+            self.combo.get_child().set_activates_default(True)
+            self.latest = Gtk.CheckButton(label="Use the latest GitHub release instead")
+            self.hint = dim(Gtk.Label(xalign=0))
+            area.pack_start(Gtk.Label(label="Mocktail version", xalign=0), False, False, 0)
+            area.pack_start(self.combo, False, False, 0)
+            area.pack_start(self.latest, False, False, 0)
+            area.pack_start(self.hint, False, False, 0)
+            self.combo.connect("changed", lambda *_: self.update_hint())
+            self.latest.connect("toggled", lambda *_: self.update_hint())
+            self.update_hint()
+            area.show_all()
+
+        def text(self):
+            return (self.combo.get_active_text() or "").strip()
+
+        def update_hint(self):
+            self.combo.set_sensitive(not self.latest.get_active())
+            if self.latest.get_active():
+                self.hint.set_text("Asks GitHub which release is newest.")
+            elif self.text() in cached():
+                self.hint.set_text("Already downloaded.")
+            else:
+                self.hint.set_text("Will be downloaded from GitHub (~160 MB).")
+
+        def result(self):
+            return (self.text() or None), self.latest.get_active()
+
+    class InstanceRow(Gtk.ListBoxRow):
+        def __init__(self, win, name):
+            super().__init__()
+            self.win, self.name = win, name
+            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+            box.set_margin_top(8)
+            box.set_margin_bottom(8)
+            box.set_margin_start(14)
+            box.set_margin_end(10)
+
+            self.dot = Gtk.Label(label="\u25cf")
+            box.pack_start(self.dot, False, False, 0)
+
+            text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            title = Gtk.Label(xalign=0)
+            title.set_markup(f"<b>{GLib.markup_escape_text(name)}</b>")
+            self.sub = dim(Gtk.Label(xalign=0))
+            self.sub.set_ellipsize(Pango.EllipsizeMode.END)
+            text.pack_start(title, False, False, 0)
+            text.pack_start(self.sub, False, False, 0)
+            box.pack_start(text, True, True, 0)
+
+            self.toggle = Gtk.Button(label="Start")
+            self.toggle.set_size_request(72, -1)
+            self.toggle.connect("clicked", lambda *_: win.toggle(name))
+            logs = Gtk.Button(label="Logs")
+            logs.connect("clicked", lambda *_: win.show_log(name))
+            self.menu = icon_menu_button(("view-more-symbolic", "view-more-horizontal-symbolic"), [
+                ("Upgrade AppImage\u2026", lambda: win.upgrade_dialog(name)),
+                ("Open folder", lambda: win.open_folder(Instance(name).dir)),
+                None,
+                ("Delete\u2026", lambda: win.delete_dialog(name)),
+            ], "More")
+            for w in (self.toggle, logs, self.menu):
+                box.pack_start(w, False, False, 0)
+            self.add(box)
+            self.show_all()
+            self._dot_class = None
+
+        def update(self, inst, busy):
+            label, pid, age = inst.status()
+            cls = {"running": "mm-running", "starting": "mm-starting"}.get(label, "dim-label")
+            ctx = self.dot.get_style_context()
+            if cls != self._dot_class:
+                if self._dot_class:
+                    ctx.remove_class(self._dot_class)
+                ctx.add_class(cls)
+                self._dot_class = cls
+            bits = [f"Mocktail {inst.version}", label]
+            if pid:
+                bits.append(f"pid {pid}")
+            if label != "stopped" and age is not None:
+                bits.append(f"up {_fmt_age(age)}")
+            self.sub.set_text(" \u00b7 ".join(bits))
+            self.toggle.set_label("Stop" if label != "stopped" else "Start")
+            sc = self.toggle.get_style_context()
+            if label == "stopped":
+                sc.add_class("suggested-action")
+            else:
+                sc.remove_class("suggested-action")
+            self.toggle.set_sensitive(not busy)
+            self.menu.set_sensitive(not busy)
+            return label
+
+    class LogWindow(Gtk.Window):
+        def __init__(self, parent, inst):
+            super().__init__(title=f"Log \u2014 {inst.name}", transient_for=parent)
+            self.inst, self.last, self.alive = inst, None, True
+            self.set_default_size(780, 500)
+            self.set_destroy_with_parent(True)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            bar.set_border_width(6)
+            self.follow = Gtk.CheckButton(label="Follow output")
+            self.follow.set_active(True)
+            bar.pack_start(self.follow, False, False, 0)
+            box.pack_start(bar, False, False, 0)
+            sw = Gtk.ScrolledWindow()
+            sw.set_shadow_type(Gtk.ShadowType.IN)
+            self.view = Gtk.TextView()
+            self.view.set_editable(False)
+            self.view.set_cursor_visible(False)
+            self.view.set_monospace(True)
+            self.view.set_left_margin(8)
+            self.view.set_right_margin(8)
+            self.buf = self.view.get_buffer()
+            sw.add(self.view)
+            box.pack_start(sw, True, True, 0)
+            self.add(box)
+            self.connect("destroy", lambda *_: setattr(self, "alive", False))
+            self.refresh()
+            GLib.timeout_add(500, self.refresh)
+            self.show_all()
+
+        def refresh(self):
+            if not self.alive:
+                return False
+            text = "\n".join(tail_lines(self.inst.log, 3000)) or "(no output yet)"
+            if text != self.last:
+                self.last = text
+                self.buf.set_text(text)
+                if self.follow.get_active():
+                    GLib.idle_add(self.scroll_end)
+            return True
+
+        def scroll_end(self):
+            mark = self.buf.get_mark("end") or self.buf.create_mark(
+                "end", self.buf.get_end_iter(), False)
+            self.buf.move_mark(mark, self.buf.get_end_iter())
+            self.view.scroll_to_mark(mark, 0.0, False, 0.0, 0.0)
+            return False
+
+    class MainWindow(Gtk.ApplicationWindow):
+        def __init__(self, app):
+            super().__init__(application=app, title="Mocktail Multi")
+            self.set_default_size(700, 480)
+            self.rows, self.busy, self.jobs, self.logwins = {}, set(), 0, {}
+            self.have_progress = False
+
+            hb = Gtk.HeaderBar()
+            hb.set_show_close_button(True)
+            hb.set_title("Mocktail Multi")
+            self.hb = hb
+            self.set_titlebar(hb)
+            add = Gtk.Button()
+            add.add(icon_or_text(("list-add-symbolic", "list-add"), "+"))
+            add.set_tooltip_text("New instance (Ctrl+N)")
+            add.connect("clicked", lambda *_: self.new_dialog())
+            hb.pack_start(add)
+            hb.pack_end(icon_menu_button(("open-menu-symbolic", "open-menu"), [
+                ("Download AppImage\u2026", self.fetch_dialog),
+                None,
+                ("Start all", self.start_all),
+                ("Stop all", self.stop_all),
+                None,
+                ("Open data folder", lambda: self.open_folder(ROOT)),
+            ], "Menu"))
+
+            act = Gio.SimpleAction.new("new", None)
+            act.connect("activate", lambda *_: self.new_dialog())
+            self.add_action(act)
+            app.set_accels_for_action("win.new", ["<Primary>n"])
+
+            root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            self.bars = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            root.pack_start(self.bars, False, False, 0)
+
+            sw = Gtk.ScrolledWindow()
+            self.listbox = Gtk.ListBox()
+            self.listbox.set_selection_mode(Gtk.SelectionMode.NONE)
+            self.listbox.set_sort_func(
+                lambda a, b: (a.name.lower() > b.name.lower()) - (a.name.lower() < b.name.lower()))
+            self.listbox.set_header_func(self._header)
+            empty = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+            empty.set_valign(Gtk.Align.CENTER)
+            title = Gtk.Label()
+            title.set_markup("<big><b>No instances yet</b></big>")
+            empty.pack_start(title, False, False, 0)
+            empty.pack_start(dim(Gtk.Label(label="Each instance has its own login and settings.")),
+                             False, False, 0)
+            btn = Gtk.Button(label="New instance")
+            btn.set_halign(Gtk.Align.CENTER)
+            btn.get_style_context().add_class("suggested-action")
+            btn.connect("clicked", lambda *_: self.new_dialog())
+            empty.pack_start(btn, False, False, 6)
+            empty.show_all()
+            self.listbox.set_placeholder(empty)
+            sw.add(self.listbox)
+            root.pack_start(sw, True, True, 0)
+
+            self.rev = Gtk.Revealer()
+            self.rev.set_transition_type(Gtk.RevealerTransitionType.SLIDE_UP)
+            pbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+            pbox.set_border_width(8)
+            self.plabel = Gtk.Label(xalign=0)
+            self.pbar = Gtk.ProgressBar()
+            self.pbar.set_valign(Gtk.Align.CENTER)
+            pbox.pack_start(self.plabel, False, False, 0)
+            pbox.pack_start(self.pbar, True, True, 0)
+            self.rev.add(pbox)
+            root.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
+            root.pack_start(self.rev, False, False, 0)
+            self.add(root)
+            self.show_all()
+            self.tick()
+            GLib.timeout_add(1000, self.tick)
+            GLib.timeout_add(150, self.pulse)
+
+        @staticmethod
+        def _header(row, before):
+            if before is not None and row.get_header() is None:
+                row.set_header(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+
+        # ---- periodic refresh
+        def tick(self):
+            try:
+                for name, code in reap():
+                    if code != 0 and not Instance(name).running():
+                        tail = "\n".join(tail_lines(Instance(name).log, 30))
+                        hint = failure_hint(tail)
+                        self.notify(f"{name} exited with code {code}." + (f"\n{hint}" if hint else ""),
+                                    error=True, button=("View log", lambda n=name: self.show_log(n)))
+                insts = list_instances()
+                names = {i.name for i in insts}
+                for n in list(self.rows):
+                    if n not in names:
+                        self.listbox.remove(self.rows.pop(n))
+                running = 0
+                for inst in insts:
+                    row = self.rows.get(inst.name)
+                    if row is None:
+                        row = self.rows[inst.name] = InstanceRow(self, inst.name)
+                        self.listbox.add(row)
+                    if row.update(inst, inst.name in self.busy) != "stopped":
+                        running += 1
+                self.hb.set_subtitle(f"{running} running \u00b7 {len(insts)} instance"
+                                     f"{'' if len(insts) == 1 else 's'}" if insts else "")
+            except Exception:
+                import traceback
+                traceback.print_exc()
+            return True
+
+        def pulse(self):
+            if self.jobs > 0 and not self.have_progress:
+                self.pbar.pulse()
+            return True
+
+        # ---- notifications
+        def notify(self, text, error=False, button=None, secs=6):
+            bar = Gtk.InfoBar()
+            bar.set_message_type(Gtk.MessageType.ERROR if error else Gtk.MessageType.INFO)
+            bar.set_show_close_button(True)
+            label = Gtk.Label(label=text[:700], xalign=0)
+            label.set_line_wrap(True)
+            label.set_selectable(True)
+            bar.get_content_area().add(label)
+            if button:
+                bar.add_button(button[0], 1)
+            bar.connect("response", lambda _b, resp, cb=(button[1] if button else None): (
+                cb() if (cb and resp == 1) else None, bar.destroy()))
+            self.bars.pack_start(bar, False, False, 0)
+            bar.show_all()
+            kids = self.bars.get_children()
+            for old in kids[:-3]:
+                old.destroy()
+            if not error:
+                GLib.timeout_add_seconds(secs, lambda: (bar.destroy() if bar.get_parent() else None, False)[1])
+
+        # ---- background jobs
+        def run_job(self, label, fn, busy=()):
+            self.jobs += 1
+            self.have_progress = False
+            self.busy.update(busy)
+            self.plabel.set_text(label + "\u2026")
+            self.pbar.set_fraction(0)
+            self.rev.set_reveal_child(True)
+            last = [0.0]
+
+            def on_progress(done, total):
+                if total:
+                    self.have_progress = True
+                    self.pbar.set_fraction(min(1.0, done / total))
+                    self.plabel.set_text(f"{label}  {human(done)} / {human(total)}")
+                return False
+
+            def progress(done, total):
+                now = time.time()
+                if now - last[0] > 0.1 or (total and done >= total):
+                    last[0] = now
+                    GLib.idle_add(on_progress, done, total)
+
+            def finished(result, error):
+                self.jobs -= 1
+                self.busy.difference_update(busy)
+                if self.jobs <= 0:
+                    self.jobs = 0
+                    self.rev.set_reveal_child(False)
+                if error:
+                    self.notify(error, error=True)
+                elif result:
+                    self.notify(result)
+                self.tick()
+                return False
+
+            def worker():
+                result = error = None
+                try:
+                    result = fn(progress)
+                except Error as e:
+                    error = str(e)
+                except Exception as e:
+                    error = f"{type(e).__name__}: {e}"
+                GLib.idle_add(finished, result, error)
+
+            threading.Thread(target=worker, daemon=True).start()
+            self.tick()
+
+        # ---- actions
+        def toggle(self, name):
+            inst = Instance(name)
+            if inst.running():
+                self.run_job(f"Stopping {name}", lambda p: stop(inst) and f"Stopped {name}",
+                             busy=(name,))
+                return
+            try:
+                start(inst)
+            except Error as e:
+                self.notify(str(e), error=True)
+            self.tick()
+
+        def start_all(self):
+            todo = [i for i in list_instances() if not i.running()]
+            if not todo:
+                self.notify("Everything is already running.")
+                return
+
+            def work(_p):
+                for i in todo:
+                    start(i)
+                    time.sleep(1.0)
+                return f"Started {len(todo)} instance(s)"
+            self.run_job("Starting all", work, busy=[i.name for i in todo])
+
+        def stop_all(self):
+            todo = [i for i in list_instances() if i.running()]
+            if not todo:
+                self.notify("Nothing is running.")
+                return
+
+            def work(_p):
+                for i in todo:
+                    stop(i)
+                return f"Stopped {len(todo)} instance(s)"
+            self.run_job("Stopping all", work, busy=[i.name for i in todo])
+
+        def show_log(self, name):
+            existing = self.logwins.get(name)
+            if existing:
+                existing.present()
+                return
+            win = self.logwins[name] = LogWindow(self, Instance(name))
+            win.connect("destroy", lambda *_: self.logwins.pop(name, None))
+
+        def open_folder(self, path):
+            path = Path(path)
+            path.mkdir(parents=True, exist_ok=True)
+            try:
+                Gio.AppInfo.launch_default_for_uri(path.as_uri(), None)
+            except GLib.Error as e:
+                self.notify(f"Could not open {path}: {e.message}", error=True)
+
+        def fetch_dialog(self):
+            dlg = VersionDialog(self, "Download AppImage", "Download")
+            resp = dlg.run()
+            version, latest = dlg.result()
+            dlg.destroy()
+            if resp != Gtk.ResponseType.OK:
+                return
+
+            def work(p):
+                ver, _path, sha = fetch(version, latest=latest, progress=p)
+                return f"Downloaded Mocktail {ver}" if sha else f"Mocktail {ver} is already downloaded"
+            self.run_job("Downloading AppImage", work)
+
+        def upgrade_dialog(self, name):
+            inst = Instance(name)
+            if inst.running():
+                self.notify(f"Stop {name} before upgrading it.", error=True)
+                return
+            dlg = VersionDialog(self, f"Upgrade {name}", "Upgrade")
+            resp = dlg.run()
+            version, latest = dlg.result()
+            dlg.destroy()
+            if resp != Gtk.ResponseType.OK:
+                return
+            self.run_job(f"Upgrading {name}", lambda p: "{} is now on Mocktail {}".format(
+                name, upgrade_instance(inst, version=version, latest=latest, progress=p)),
+                busy=(name,))
+
+        def delete_dialog(self, name):
+            inst = Instance(name)
+            if inst.running():
+                self.notify(f"Stop {name} before deleting it.", error=True)
+                return
+            dlg = Gtk.MessageDialog(transient_for=self, modal=True,
+                                    message_type=Gtk.MessageType.WARNING,
+                                    text=f"Delete \u201c{name}\u201d?")
+            dlg.format_secondary_text(
+                "This removes its login session, settings and downloaded Roblox data. "
+                "It can't be undone.")
+            dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
+            btn = dlg.add_button("Delete", Gtk.ResponseType.OK)
+            btn.get_style_context().add_class("destructive-action")
+            resp = dlg.run()
+            dlg.destroy()
+            if resp == Gtk.ResponseType.OK:
+                self.run_job(f"Deleting {name}",
+                             lambda p: (rmtree_force(inst.dir), f"Deleted {name}")[1],
+                             busy=(name,))
+
+        def new_dialog(self):
+            dlg = Gtk.Dialog(title="New instance", transient_for=self, modal=True,
+                             use_header_bar=True)
+            dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
+            ok = dlg.add_button("Create", Gtk.ResponseType.OK)
+            ok.get_style_context().add_class("suggested-action")
+            dlg.set_default_response(Gtk.ResponseType.OK)
+            area = dlg.get_content_area()
+            area.set_border_width(16)
+            area.set_spacing(10)
+
+            grid = Gtk.Grid()
+            grid.set_row_spacing(8)
+            grid.set_column_spacing(12)
+            name_entry = Gtk.Entry()
+            name_entry.set_hexpand(True)
+            name_entry.set_activates_default(True)
+            name_entry.set_placeholder_text("acc1   (or several: acc1, acc2, acc3)")
+            combo = version_combo()
+            grid.attach(Gtk.Label(label="Name", xalign=1), 0, 0, 1, 1)
+            grid.attach(name_entry, 1, 0, 1, 1)
+            grid.attach(Gtk.Label(label="Mocktail", xalign=1), 0, 1, 1, 1)
+            grid.attach(combo, 1, 1, 1, 1)
+            hint = dim(Gtk.Label(xalign=0))
+            grid.attach(hint, 1, 2, 1, 1)
+            area.pack_start(grid, False, False, 0)
+
+            donors = [i for i in list_instances() if i.has_payload() and not i.running()]
+            seed_check = Gtk.CheckButton(
+                label=(f"Copy the Roblox download from \u201c{donors[0].name}\u201d "
+                       "(skips a big download; best-effort)") if donors
+                else "Copy the Roblox download from another instance")
+            seed_check.set_sensitive(bool(donors))
+            if not donors:
+                seed_check.set_tooltip_text("Launch an instance once first, then stop it.")
+            area.pack_start(seed_check, False, False, 0)
+
+            expander = Gtk.Expander(label="Advanced")
+            eb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            eb.set_margin_top(6)
+            eb.pack_start(Gtk.Label(label="Extra environment variables, one KEY=VALUE per line",
+                                    xalign=0), False, False, 0)
+            envview = Gtk.TextView()
+            envview.set_monospace(True)
+            esw = Gtk.ScrolledWindow()
+            esw.set_shadow_type(Gtk.ShadowType.IN)
+            esw.set_min_content_height(70)
+            esw.add(envview)
+            eb.pack_start(esw, True, True, 0)
+            expander.add(eb)
+            area.pack_start(expander, False, False, 0)
+
+            err = Gtk.Label(xalign=0)
+            err.get_style_context().add_class("error")
+            err.set_line_wrap(True)
+            area.pack_start(err, False, False, 0)
+
+            def names_from_entry():
+                return [n for n in re.split(r"[,\s]+", name_entry.get_text().strip()) if n]
+
+            def env_text():
+                b = envview.get_buffer()
+                return b.get_text(b.get_start_iter(), b.get_end_iter(), False)
+
+            def validate(*_):
+                problem = ""
+                names = names_from_entry()
+                for n in names:
+                    if not NAME_RE.match(n):
+                        problem = f"\u201c{n}\u201d isn't a valid name (letters, digits, . _ -; max 32)."
+                        break
+                    if Instance(n).dir.exists():
+                        problem = f"\u201c{n}\u201d already exists."
+                        break
+                if not problem and len(set(names)) != len(names):
+                    problem = "Names must be unique."
+                if not problem:
+                    try:
+                        _parse_env_text(env_text())
+                    except Error as e:
+                        problem = str(e)
+                v = (combo.get_active_text() or "").strip()
+                hint.set_text("" if not v else ("Already downloaded." if v in cached()
+                              else "Will be downloaded from GitHub (~160 MB)."))
+                err.set_text(problem)
+                ok.set_sensitive(bool(names) and not problem)
+
+            name_entry.connect("changed", validate)
+            combo.connect("changed", validate)
+            envview.get_buffer().connect("changed", validate)
+            validate()
+            area.show_all()
+
+            resp = dlg.run()
+            names = names_from_entry()
+            version = (combo.get_active_text() or "").strip() or None
+            seed = donors[0].name if (donors and seed_check.get_active()) else None
+            env = {}
+            try:
+                env = _parse_env_text(env_text())
+            except Error:
+                pass
+            dlg.destroy()
+            if resp != Gtk.ResponseType.OK or not names:
+                return
+
+            def work(p):
+                for n in names:
+                    create_instance(n, version=version, env=env, seed=seed, progress=p)
+                return "Created " + ", ".join(names)
+            self.run_job("Creating " + ", ".join(names), work)
+
+    class App(Gtk.Application):
+        def __init__(self):
+            super().__init__(application_id="org.mocktailmulti.Launcher",
+                             flags=Gio.ApplicationFlags.FLAGS_NONE)
+
+        def do_activate(self):
+            if not getattr(self, "_css", False):
+                install_status_css()
+                self._css = True
+            win = self.props.active_window or MainWindow(self)
+            win.present()
+
+    return App, MainWindow
+
+
+def cmd_gui(_args=None):
+    try:
+        import gi
+        gi.require_version("Gtk", "3.0")
+        gi.require_version("Gdk", "3.0")
+        from gi.repository import Gtk, Gdk, GLib, Gio, Pango
+    except (ImportError, ValueError) as e:
+        raise Error("the GUI needs PyGObject and GTK 3 "
+                    "(Arch: python-gobject gtk3 | Debian/Ubuntu: python3-gi gir1.2-gtk-3.0 | "
+                    f"Fedora: python3-gobject gtk3)  [{e}]")
+    App, _ = _gui_classes(Gtk, GLib, Gio, Pango, Gdk)
+    return App().run([sys.argv[0]])
+
+
+def cmd_desktop(_args=None):
+    """Install a launcher entry so the GUI shows up in app menus / rofi / wofi."""
+    apps = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "applications"
+    apps.mkdir(parents=True, exist_ok=True)
+    script = os.path.abspath(__file__)
+    target = apps / "mocktail-multi.desktop"
+    target.write_text(
+        "[Desktop Entry]\nType=Application\nName=Mocktail Multi\n"
+        "Comment=Run several Mocktail (Roblox) instances\n"
+        f'Exec=python3 "{script}" gui\nIcon=applications-games\n'
+        "Terminal=false\nCategories=Game;\n")
+    print(f"wrote {target}")
+
+
+# ------------------------------------------------------------------------- main
+
+def build_parser():
+    p = argparse.ArgumentParser(
+        prog="mocktail-multi",
+        description="Run several Mocktail (Roblox on Linux) instances side by side. "
+                    "With no command, opens the GUI (or the TUI without a display).")
+    sub = p.add_subparsers(dest="cmd", metavar="<command>")
+
+    sub.add_parser("gui", help="graphical interface (GTK 3) - default when a display is available")
+    sub.add_parser("tui", help="interactive terminal UI")
+    sub.add_parser("desktop-entry", help="install a launcher entry for the GUI in your app menu")
+
+    s = sub.add_parser("fetch", help=f"download a Mocktail AppImage (default {DEFAULT_VERSION})")
+    s.add_argument("-v", "--version", help="release tag, e.g. 1.0.4")
+    s.add_argument("--latest", action="store_true", help="newest non-prerelease release")
+    s.add_argument("-f", "--force", action="store_true", help="re-download even if cached")
+
+    s = sub.add_parser("new", aliases=["add"], help="create instance(s)")
+    s.add_argument("names", nargs="+", metavar="NAME")
+    s.add_argument("-v", "--version", help="AppImage version to use (default: newest downloaded)")
+    s.add_argument("-e", "--env", action="append", metavar="KEY=VALUE",
+                   help="extra environment variable for this instance (repeatable)")
+    s.add_argument("--seed", action="store_true",
+                   help="copy the Roblox payload from an existing stopped instance (best-effort)")
+    s.add_argument("--seed-from", metavar="NAME", help="like --seed, from a specific instance")
+
+    for name, aliases, hlp in (("start", [], "start instance(s)"),
+                               ("stop", [], "stop instance(s)"),
+                               ("restart", [], "restart instance(s)"),
+                               ("upgrade", [], "swap in a newer AppImage (instance must be stopped)")):
+        s = sub.add_parser(name, aliases=aliases, help=hlp)
+        s.add_argument("names", nargs="*", metavar="NAME")
+        s.add_argument("-a", "--all", action="store_true", help="all instances")
+        if name == "upgrade":
+            s.add_argument("-v", "--version", help="version to use (downloaded if needed)")
+            s.add_argument("--latest", action="store_true", help="use the newest release")
+
+    s = sub.add_parser("list", aliases=["ls"], help="show instances and their status")
+    s = sub.add_parser("rm", aliases=["delete"], help="delete instance(s) and their data")
+    s.add_argument("names", nargs="+", metavar="NAME")
+    s.add_argument("-y", "--yes", action="store_true", help="don't ask")
+    s = sub.add_parser("logs", help="show an instance's console log")
+    s.add_argument("name")
+    s.add_argument("-n", "--lines", type=int, default=40)
+    s.add_argument("-f", "--follow", action="store_true")
+    s = sub.add_parser("path", help="print an instance's directory")
+    s.add_argument("name")
+    return p
+
+
+COMMANDS = {
+    "gui": cmd_gui, "desktop-entry": cmd_desktop, "tui": cmd_tui, "fetch": cmd_fetch, "new": cmd_new, "add": cmd_new,
+    "start": cmd_start, "stop": cmd_stop, "restart": cmd_restart, "upgrade": cmd_upgrade,
+    "list": cmd_list, "ls": cmd_list, "rm": cmd_rm, "delete": cmd_rm,
+    "logs": cmd_logs, "path": cmd_path,
+}
+
+
+def _default_command() -> str:
+    import importlib.util
+    if (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) \
+            and importlib.util.find_spec("gi") is not None:
+        return "gui"
+    return "tui" if sys.stdin.isatty() and sys.stdout.isatty() else "list"
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    cmd = args.cmd or _default_command()
+    try:
+        return COMMANDS[cmd](args) or 0
+    except Error as e:
+        print(paint(f"error: {e}", "31"), file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print()
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())
