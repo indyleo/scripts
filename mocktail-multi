@@ -9,6 +9,13 @@ How it works
       * its own MOCKTAIL_{CONFIG,DATA,CACHE,STATE}_ROOT -> its own login, config,
                                                   Roblox payload and logs
 
+Graphics fallback
+    On first launch Mocktail downloads Roblox and runs a "graphics canary" with the configured
+    backend (Vulkan by default). If that self-test rejects the download - common on old Intel
+    GPUs - this tool notices, sets MOCKTAIL_GRAPHICS_BACKEND=opengl (a real environment
+    variable beats config.yaml inside Mocktail) for every instance, and retries once. If OpenGL
+    fails too the setting is reverted. See the `graphics` command to inspect or change it.
+
 Layout (override the root with $MOCKTAIL_MULTI_HOME)
     ~/.local/share/mocktail-multi/appimages/Mocktail-<ver>-x86_64.AppImage
     ~/.local/share/mocktail-multi/instances/<name>/{Mocktail.AppImage,config,data,
@@ -55,10 +62,29 @@ def _root() -> Path:
 ROOT = _root()
 APPIMAGES = ROOT / "appimages"
 INSTANCES = ROOT / "instances"
+SETTINGS = ROOT / "settings.json"
+GFX_ENV = "MOCKTAIL_GRAPHICS_BACKEND"
+GRAPHICS_BACKENDS = ("direct-vulkan", "opengl", "system", "angle-vulkan", "angle-swiftshader")
+VULKAN_BACKENDS = {"direct-vulkan", "vulkan", "native-vulkan", "angle-vulkan", "angle-swiftshader"}
 
 
 class Error(Exception):
     pass
+
+
+def load_settings() -> dict:
+    try:
+        data = json.loads(SETTINGS.read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(data: dict) -> None:
+    ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp = SETTINGS.with_name("settings.json.tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    os.replace(tmp, SETTINGS)
 
 
 # --------------------------------------------------------------------------- utils
@@ -329,6 +355,9 @@ class Instance:
             "MOCKTAIL_CACHE_ROOT": str(self.dir / "cache"),
             "MOCKTAIL_STATE_ROOT": str(self.dir / "state"),
         })
+        backend = load_settings().get("graphics_backend")
+        if backend:
+            env[GFX_ENV] = str(backend)  # real env vars beat config.yaml inside Mocktail
         env.update({str(k): str(v) for k, v in self.meta().get("env", {}).items()})
         return env
 
@@ -361,6 +390,8 @@ class Instance:
             age = None
         if holder is None and age is not None and age < 30:
             return "starting", leader, age
+        if age is not None and age < 1200 and not self.has_payload():
+            return "setting up", holder or leader, age  # first run: download + graphics self-test
         return "running", holder or leader, age
 
     def has_payload(self) -> bool:
@@ -451,8 +482,8 @@ def start(inst: Instance):
         logf.write(f"\n=== {time.strftime('%F %T')} starting {inst.name} ===\n".encode())
         logf.flush()
         proc = subprocess.Popen(
-            [str(inst.appimage)], cwd=inst.dir, env=inst.env(),
-            stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
+            [sys.executable, os.path.abspath(__file__), "_supervise", inst.name],
+            cwd=inst.dir, stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
             start_new_session=True,
         )
     started = proc_start(proc.pid)
@@ -495,8 +526,59 @@ def stop(inst: Instance, timeout: float = 8.0) -> bool:
     return True
 
 
+def config_backend(inst: Instance):
+    """graphics.backend from the instance's config.yaml (tiny line scan, no YAML library)."""
+    try:
+        lines = (inst.dir / "config" / "config.yaml").read_text().splitlines()
+    except OSError:
+        return None
+    in_block = False
+    for line in lines:
+        if re.match(r"^graphics:\s*(#.*)?$", line):
+            in_block = True
+            continue
+        if not in_block or not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line[0].isspace():
+            in_block = False
+            continue
+        m = re.match(r"^\s+backend:\s*['\"]?([A-Za-z0-9_-]+)['\"]?\s*(#.*)?$", line)
+        if m:
+            return m.group(1)
+    return None
+
+
+def effective_backend(inst: Instance) -> str:
+    return inst.env().get(GFX_ENV) or config_backend(inst) or "direct-vulkan"
+
+
+def fallback_backend_for(inst: Instance):
+    """OpenGL if this instance is on a Vulkan-based backend it wasn't pinned to on purpose."""
+    if GFX_ENV in inst.meta().get("env", {}):
+        return None
+    return "opengl" if effective_backend(inst) in VULKAN_BACKENDS else None
+
+
+def graphics_preflight_failed(text: str) -> bool:
+    """Mocktail's first-run 'graphics canary' rejected the Roblox download on this GPU."""
+    t = text.lower()
+    return "preflight failed" in t and "canary" in t
+
+
+def read_from(path: Path, offset: int, limit: int = 1 << 20) -> str:
+    try:
+        with open(path, "rb") as f:
+            f.seek(offset)
+            return f.read(limit).decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
 def failure_hint(log_text: str) -> str:
     t = log_text.lower()
+    if "preflight failed" in t and "canary" in t:
+        return ("Roblox's built-in graphics test failed on this machine. Try another backend: "
+                "mocktail-multi graphics opengl (GUI: menu > Graphics backend)")
     if "already running" in t:
         return "another process holds this instance's lock - stop it first"
     if "libfuse" in t or ("fuse" in t and "mount" in t):
@@ -574,7 +656,11 @@ def _start_checked(inst: Instance, settle: float = 2.5) -> str:
             hint = failure_hint(tail)
             raise Error(f"{inst.name} exited immediately (code {proc.returncode}); last output:\n"
                         f"{tail}\n" + (f"hint: {hint}\n" if hint else ""))
-    return f"started {inst.name} (pid {proc.pid})"
+    msg = f"started {inst.name} (pid {proc.pid})"
+    if not inst.has_payload():
+        msg += ("\n  first launch: downloads Roblox and runs a graphics self-test (a few minutes)."
+                f"\n  follow along with: {os.path.basename(sys.argv[0])} logs {inst.name} -f")
+    return msg
 
 
 def cmd_start(args):
@@ -625,11 +711,11 @@ def cmd_list(_args):
         print(f"no instances yet. Create one with:  {os.path.basename(sys.argv[0])} new NAME")
         return
     width = max(8, max(len(i.name) for i in insts))
-    print(paint(f"{'NAME':<{width}}  {'VERSION':<8}  {'STATUS':<9}  PID", "1"))
+    print(paint(f"{'NAME':<{width}}  {'VERSION':<8}  {'STATUS':<10}  PID", "1"))
     for inst in insts:
         label, pid, _ = inst.status()
-        color = {"running": "32", "starting": "33"}.get(label, "2")
-        print(f"{inst.name:<{width}}  {inst.version:<8}  {paint(f'{label:<9}', color)}  "
+        color = {"running": "32", "starting": "33", "setting up": "33"}.get(label, "2")
+        print(f"{inst.name:<{width}}  {inst.version:<8}  {paint(f'{label:<10}', color)}  "
               f"{pid or '-'}")
 
 
@@ -655,6 +741,90 @@ def cmd_logs(args):
 
 def cmd_path(args):
     print(get_instance(args.name).dir)
+
+
+def cmd_supervise(args):
+    """Internal. Runs Mocktail; if Roblox's first-run graphics self-test rejects the
+    Vulkan backend on this GPU, switch every instance to OpenGL and retry once."""
+    inst = get_instance(args.name)
+    stopping = []
+    signal.signal(signal.SIGTERM, lambda *_: stopping.append(True))
+    retried, before = False, None
+    while True:
+        try:
+            offset = inst.log.stat().st_size
+        except OSError:
+            offset = 0
+        proc = subprocess.Popen([str(inst.appimage)], cwd=inst.dir, env=inst.env(),
+                                stdin=subprocess.DEVNULL)  # stdout/stderr: inherited log file
+        code = proc.wait()
+        if stopping or code == 0:
+            return code
+        failed = graphics_preflight_failed(read_from(inst.log, offset))
+        target = fallback_backend_for(inst) if failed else None
+        if failed and target and not retried:
+            retried = True
+            current = effective_backend(inst)
+            settings = load_settings()
+            before = {k: settings.get(k) for k in ("graphics_backend", "graphics_auto")}
+            settings.update({"graphics_backend": target, "graphics_auto": True})
+            save_settings(settings)
+            print(f"[mocktail-multi] Roblox's graphics self-test failed with {current}. "
+                  f"Switching all instances to {target} and retrying...", flush=True)
+            continue
+        if failed and retried:
+            settings = load_settings()
+            for key, value in (before or {}).items():
+                if value is None:
+                    settings.pop(key, None)
+                else:
+                    settings[key] = value
+            save_settings(settings)
+            print("[mocktail-multi] the graphics self-test failed again; "
+                  "restored the previous graphics setting.", flush=True)
+        return code
+
+
+def cmd_graphics(args):
+    if args.instance:
+        inst = get_instance(args.instance)
+        meta = inst.meta()
+        env = meta.setdefault("env", {})
+        if args.backend is None:
+            print(f"{inst.name}: {env.get(GFX_ENV) or 'no override (global default / config.yaml)'}")
+            return
+        if args.backend == "default":
+            env.pop(GFX_ENV, None)
+        else:
+            env[GFX_ENV] = args.backend
+        inst.save_meta(meta)
+        print(f"{inst.name}: graphics backend override {'cleared' if args.backend == 'default' else args.backend}"
+              " (applies the next time it starts)")
+        return
+    settings = load_settings()
+    if args.backend is None:
+        cur = settings.get("graphics_backend")
+        if cur:
+            how = " (picked automatically after a failed graphics self-test)" \
+                if settings.get("graphics_auto") else ""
+            print(f"global graphics backend: {cur}{how}")
+        else:
+            print("global graphics backend: not set - each instance uses its config.yaml "
+                  "(Mocktail's default is direct-vulkan)")
+        for inst in list_instances():
+            v = inst.meta().get("env", {}).get(GFX_ENV)
+            if v:
+                print(f"  {inst.name}: {v} (per-instance override)")
+        return
+    if args.backend == "default":
+        settings.pop("graphics_backend", None)
+        settings.pop("graphics_auto", None)
+    else:
+        settings["graphics_backend"] = args.backend
+        settings["graphics_auto"] = False
+    save_settings(settings)
+    print(f"global graphics backend: {'cleared' if args.backend == 'default' else args.backend}"
+          " (applies the next time an instance starts)")
 
 
 # -------------------------------------------------------------------------- TUI
@@ -796,7 +966,7 @@ def _draw(scr, ui: UI, insts, colors):
         _put(scr, 1, 1, "No AppImage downloaded yet - press f (or n, which fetches one).", yellow)
 
     nw = min(24, max(8, max((len(i.name) for i in insts), default=8)))
-    _put(scr, 3, 1, f"{'NAME':<{nw}}  {'VERSION':<8}  {'STATUS':<9}  {'PID':>7}  UP",
+    _put(scr, 3, 1, f"{'NAME':<{nw}}  {'VERSION':<8}  {'STATUS':<10}  {'PID':>7}  UP",
          curses.A_BOLD | curses.A_UNDERLINE)
     if not insts:
         _put(scr, 5, 1, "No instances yet. Press n to create one.")
@@ -811,9 +981,9 @@ def _draw(scr, ui: UI, insts, colors):
                 else f"{int(age // 60)}m{int(age % 60):02d}s"
         base = curses.A_REVERSE if row == ui.sel else 0
         _put(scr, y, 1, f"{inst.name:<{nw}}  {inst.version:<8}  ".ljust(w - 2), base)
-        color = {"running": green, "starting": yellow}.get(label, 0)
-        _put(scr, y, 1 + nw + 2 + 8 + 2, f"{label:<9}", color | base)
-        _put(scr, y, 1 + nw + 2 + 8 + 2 + 11, f"{pid or '-':>7}  {up}", base)
+        color = {"running": green, "starting": yellow, "setting up": yellow}.get(label, 0)
+        _put(scr, y, 1 + nw + 2 + 8 + 2, f"{label:<10}", color | base)
+        _put(scr, y, 1 + nw + 2 + 8 + 2 + 12, f"{pid or '-':>7}  {up}", base)
 
     if ui.job and not ui.job.finished:
         j = ui.job
@@ -848,11 +1018,18 @@ def _tui(scr):
         colors = tuple(curses.color_pair(i) for i in range(1, 5))
 
     ui = UI()
+    seen_backend = load_settings().get("graphics_backend")
     while True:
         for name, code in reap():
             inst = Instance(name)
             if code != 0 and not inst.running():
                 ui.say(f"{name} exited with code {code} - press l to read its log", bad=True, secs=15)
+        settings = load_settings()
+        if settings.get("graphics_backend") != seen_backend:
+            seen_backend = settings.get("graphics_backend")
+            if seen_backend and settings.get("graphics_auto"):
+                ui.say(f"Roblox's graphics test failed with Vulkan - all instances now use "
+                       f"{seen_backend}", secs=20)
         if ui.job and ui.job.finished:
             if ui.job.error:
                 ui.say(ui.job.error.splitlines()[0], bad=True, secs=12)
@@ -1151,7 +1328,8 @@ def _gui_classes(Gtk, GLib, Gio, Pango, Gdk):
 
         def update(self, inst, busy):
             label, pid, age = inst.status()
-            cls = {"running": "mm-running", "starting": "mm-starting"}.get(label, "dim-label")
+            cls = {"running": "mm-running", "starting": "mm-starting",
+                   "setting up": "mm-starting"}.get(label, "dim-label")
             ctx = self.dot.get_style_context()
             if cls != self._dot_class:
                 if self._dot_class:
@@ -1228,6 +1406,7 @@ def _gui_classes(Gtk, GLib, Gio, Pango, Gdk):
             self.set_default_size(700, 480)
             self.rows, self.busy, self.jobs, self.logwins = {}, set(), 0, {}
             self.have_progress = False
+            self.seen_backend = load_settings().get("graphics_backend")
 
             hb = Gtk.HeaderBar()
             hb.set_show_close_button(True)
@@ -1245,6 +1424,7 @@ def _gui_classes(Gtk, GLib, Gio, Pango, Gdk):
                 ("Start all", self.start_all),
                 ("Stop all", self.stop_all),
                 None,
+                ("Graphics backend\u2026", self.graphics_dialog),
                 ("Open data folder", lambda: self.open_folder(ROOT)),
             ], "Menu"))
 
@@ -1306,6 +1486,13 @@ def _gui_classes(Gtk, GLib, Gio, Pango, Gdk):
         # ---- periodic refresh
         def tick(self):
             try:
+                settings = load_settings()
+                if settings.get("graphics_backend") != self.seen_backend:
+                    self.seen_backend = settings.get("graphics_backend")
+                    if self.seen_backend and settings.get("graphics_auto"):
+                        self.notify("Roblox's graphics test failed with Vulkan on this machine, so "
+                                    f"all instances now use {self.seen_backend}. "
+                                    "Change it under menu > Graphics backend.", secs=20)
                 for name, code in reap():
                     if code != 0 and not Instance(name).running():
                         tail = "\n".join(tail_lines(Instance(name).log, 30))
@@ -1510,6 +1697,49 @@ def _gui_classes(Gtk, GLib, Gio, Pango, Gdk):
                              lambda p: (rmtree_force(inst.dir), f"Deleted {name}")[1],
                              busy=(name,))
 
+        def graphics_dialog(self):
+            dlg = Gtk.Dialog(title="Graphics backend", transient_for=self, modal=True,
+                             use_header_bar=True)
+            dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
+            ok = dlg.add_button("Apply", Gtk.ResponseType.OK)
+            ok.get_style_context().add_class("suggested-action")
+            area = dlg.get_content_area()
+            area.set_border_width(16)
+            area.set_spacing(10)
+            settings = load_settings()
+            current = settings.get("graphics_backend")
+            combo = Gtk.ComboBoxText()
+            combo.append("default", "Default (each instance's config.yaml)")
+            for backend in GRAPHICS_BACKENDS:
+                combo.append(backend, backend)
+            combo.set_active_id(current if current in GRAPHICS_BACKENDS else "default")
+            note = "Mocktail's default is direct-vulkan. Use opengl on GPUs without a working Vulkan driver."
+            if settings.get("graphics_auto"):
+                note = "Picked automatically after Roblox's graphics self-test failed.\n" + note
+            hint = dim(Gtk.Label(label=note, xalign=0))
+            hint.set_line_wrap(True)
+            area.pack_start(Gtk.Label(label="Applies to all instances the next time they start.",
+                                      xalign=0), False, False, 0)
+            area.pack_start(combo, False, False, 0)
+            area.pack_start(hint, False, False, 0)
+            area.show_all()
+            resp = dlg.run()
+            choice = combo.get_active_id()
+            dlg.destroy()
+            if resp != Gtk.ResponseType.OK:
+                return
+            data = load_settings()
+            if choice == "default":
+                data.pop("graphics_backend", None)
+                data.pop("graphics_auto", None)
+            else:
+                data["graphics_backend"] = choice
+                data["graphics_auto"] = False
+            save_settings(data)
+            self.seen_backend = data.get("graphics_backend")
+            self.notify("Graphics backend: " + ("default" if choice == "default" else choice)
+                        + " (applies the next time an instance starts)")
+
         def new_dialog(self):
             dlg = Gtk.Dialog(title="New instance", transient_for=self, modal=True,
                              use_header_bar=True)
@@ -1713,6 +1943,9 @@ def build_parser():
     s.add_argument("-f", "--follow", action="store_true")
     s = sub.add_parser("path", help="print an instance's directory")
     s.add_argument("name")
+    s = sub.add_parser("graphics", help="show/set the graphics backend (OpenGL fallback is automatic)")
+    s.add_argument("backend", nargs="?", choices=("default",) + GRAPHICS_BACKENDS)
+    s.add_argument("-i", "--instance", metavar="NAME", help="override for one instance only")
     return p
 
 
@@ -1720,7 +1953,7 @@ COMMANDS = {
     "gui": cmd_gui, "desktop-entry": cmd_desktop, "tui": cmd_tui, "fetch": cmd_fetch, "new": cmd_new, "add": cmd_new,
     "start": cmd_start, "stop": cmd_stop, "restart": cmd_restart, "upgrade": cmd_upgrade,
     "list": cmd_list, "ls": cmd_list, "rm": cmd_rm, "delete": cmd_rm,
-    "logs": cmd_logs, "path": cmd_path,
+    "logs": cmd_logs, "path": cmd_path, "graphics": cmd_graphics,
 }
 
 
@@ -1733,6 +1966,13 @@ def _default_command() -> str:
 
 
 def main(argv=None) -> int:
+    raw = sys.argv[1:] if argv is None else list(argv)
+    if len(raw) == 2 and raw[0] == "_supervise":  # internal: launched by start()
+        try:
+            return cmd_supervise(argparse.Namespace(name=raw[1])) or 0
+        except Error as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
     parser = build_parser()
     args = parser.parse_args(argv)
     cmd = args.cmd or _default_command()
