@@ -1,951 +1,1857 @@
-#!/usr/bin/env bash
-#
-# macro — Wayland/X11 macro + macro recorder/player, built on ydotool
-#
-# Modes:
-#   ./macro click  [-r 100] [-b left] [-c 50] [-d 3] [-w classname]
-#       Plain repeated clicking (original behavior).
-#
-#   ./macro record -o my_macro.json [-t 30] [-f json|mac]
-#       Records mouse clicks, mouse movement, and key presses (with real
-#       timing) until Ctrl+C or the optional -t timeout (seconds) elapses.
-#       Default format is JSON (newline-delimited). Requires read access to
-#       input devices (root, or membership in the 'input' group) because it
-#       uses `libinput debug-events`.
-#
-#   ./macro play -i my_macro.json [-l 1] [-s 1.0] [-d 3] [-w classname]
-#       Replays a recorded macro (json or legacy mac format, auto-detected).
-#         -l  number of loops (0 = infinite, default 1)
-#         -s  speed multiplier (0.5 = half speed, 2 = double speed)
-#         -d  seconds to wait before starting
-#
-# Window scoping (-w <window-class>):
-#   Behavior depends on the display server, auto-detected via $DISPLAY /
-#   $WAYLAND_DISPLAY:
-#
-#   X11: focus-based targeting, same model as the Hyprland path below.
-#     The script raises/focuses the window via `xdotool windowactivate`
-#     before it starts, then PAUSES (and re-focuses) whenever the target
-#     stops being the active window, resuming once it's focused again —
-#     it never silently sends events to whatever else happens to be
-#     focused. Requires xdotool. All actual input injection is done via
-#     ydotool (kernel‑level), matching the Hyprland behaviour exactly.
-#
-#   Wayland/Hyprland: synthetic input can't be sent to unfocused windows
-#     at all (the compositor blocks it on purpose — see the Hyprland
-#     wiki). The script focuses the window via hyprctl and PAUSES input
-#     whenever you switch away, resuming when it's focused again.
-#     Requires hyprctl + jq.
-#
-#   Find a window's class with: hyprctl clients | grep -A2 class  (Hyprland)
-#                            or: xdotool selectwindow getwindowclassname  (X11)
-#
-#   ./macro convert -i in.mac -o out.json
-#       Converts between the legacy tab-separated .mac format and the JSON
-#       (newline-delimited) format. Direction is inferred from extensions;
-#       override with -f json|mac and -t json|mac if needed.
-#
-#   ./macro trim -i in.json -o out.json -s 1.0 -e 5.0
-#       Keeps only events with timestamp in [-s, -e] and rebases them to
-#       start at 0. Works on JSON macros; convert a .mac file first if
-#       needed.
-#
-#   ./macro edit -i my_macro.json
-#       Interactive line editor for a JSON macro. Commands once inside:
-#         list                    show all events with index numbers
-#         d N        / d N M      delete event N, or events N..M
-#         t N SECS                change the timestamp of event N
-#         shift N SECS            add SECS to the timestamp of events N..end
-#         scale FACTOR [N]        multiply timestamps by FACTOR (from N on, default 1)
-#         save [file]             write current state out (default: overwrite input)
-#         q                       quit (warns if there are unsaved changes)
-#
-# Stop anytime with Ctrl+C.
+#!/usr/bin/env python3
+"""macro - record, edit and replay mouse/keyboard macros on Linux (Hyprland or X11).
 
-set -euo pipefail
+Pure standard library. Talks to the kernel directly:
+  * recording : reads /dev/input/event* (evdev)
+  * playback  : creates virtual devices through /dev/uinput (no ydotool/ydotoold)
+  * cursor    : Hyprland IPC socket (fast) or libX11 via ctypes
+  * windows   : Hyprland IPC + hyprctl, or xdotool on X11
 
-MODE="${1:-}"
-[ $# -gt 0 ] && shift || true
+Commands: click record play edit convert trim merge compact stats windows keys
+Run `macro COMMAND -h` for options.
+"""
+from __future__ import annotations
 
-TMP_TSV=""
+import argparse
+import contextlib
+import copy
+import ctypes
+import ctypes.util
+import fcntl
+import glob
+import json
+import os
+import pwd
+import random
+import re
+import select
+import shutil
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import threading
+import time
+from collections import Counter
+from datetime import datetime
+from pathlib import Path
 
-usage() {
-    grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '/Modes:/,/Ctrl+C\./p'
-    exit 0
-}
+try:
+    import readline  # noqa: F401  (line editing/history in `edit`)
+except ImportError:
+    pass
+try:
+    import tomllib
+except ImportError:  # Python < 3.11
+    tomllib = None
 
-require_ydotool() {
-    if ! command -v ydotool >/dev/null 2>&1; then
-        echo "ydotool is not installed. Install it first."
-        exit 1
-    fi
-    if ! ydotool click 0x00 >/dev/null 2>&1; then
-        echo "Couldn't reach ydotoold. Start it with:"
-        echo "  sudo systemctl enable --now ydotoold"
-        echo "or run 'ydotoold &' manually, then try again."
-        exit 1
-    fi
-}
+FORMAT_VERSION = 2
+DEFAULT_STOP = "ctrl+alt+q"
+VIRT = "macro-py-virtual"
 
-require_jq() {
-    if ! command -v jq >/dev/null 2>&1; then
-        echo "jq is required for JSON macro support. Install it (e.g. apt install jq)."
-        exit 1
-    fi
-}
 
-require_hyprctl() {
-    if ! command -v hyprctl >/dev/null 2>&1; then
-        echo "hyprctl not found — -w window scoping only works inside a running Hyprland session."
-        exit 1
-    fi
-    if ! command -v jq >/dev/null 2>&1; then
-        echo "jq is required for -w window scoping."
-        exit 1
-    fi
-}
+class MacroError(Exception):
+    pass
 
-# Focuses a window by address, working with both classic hyprctl dispatch
-# syntax and the newer Lua-config dispatch syntax (Hyprland 0.55+, where
-# `hyprctl dispatch` takes a Lua expression instead of "dispatcher args").
-# Auto-detects and caches which one this Hyprland instance uses.
-HYPR_DISPATCH_MODE=""   # "classic" or "lua", set on first successful call
-hypr_focus_address() {
-    local addr="$1" out status
 
-    if [ "$HYPR_DISPATCH_MODE" != "lua" ]; then
-        out="$(hyprctl dispatch focuswindow "address:$addr" 2>&1)"
-        status=$?
-        if [ "$status" -eq 0 ] && ! echo "$out" | grep -qi 'hl\.dispatch'; then
-            HYPR_DISPATCH_MODE="classic"
-            return 0
-        fi
-    fi
+class Stopped(Exception):
+    pass
 
-    out="$(hyprctl dispatch "hl.dsp.focus({ window = \"address:$addr\" })" 2>&1)"
-    status=$?
-    if [ "$status" -ne 0 ]; then
-        echo "hyprctl dispatch failed to focus address $addr:" >&2
-        echo "  $out" >&2
-        return 1
-    fi
-    HYPR_DISPATCH_MODE="lua"
-    return 0
-}
 
-# Focus the first window whose class matches (case-insensitive substring).
-# Exits with an error if no matching window is found.
-focus_window_by_class() {
-    local want="$1"
-    local addr
-    addr=$(hyprctl clients -j | jq -r --arg w "$want" '
-        [.[] | select(.class | ascii_downcase | contains($w | ascii_downcase))][0].address // empty
-    ')
-    if [ -z "$addr" ] || [ "$addr" = "null" ]; then
-        echo "No window found with class matching '$want'. Try: hyprctl clients | grep -A2 class"
-        exit 1
-    fi
-    hypr_focus_address "$addr" || exit 1
-}
+def warn(msg):
+    print(f"warning: {msg}", file=sys.stderr)
 
-# Echoes the class of the currently focused window (empty if none).
-active_window_class() {
-    hyprctl activewindow -j 2>/dev/null | jq -r '.class // empty'
-}
-
-# Blocks (polling every 0.15s) until the focused window's class contains
-# $1 (case-insensitive). Prints a one-time "paused" notice while waiting.
-WINDOW_PAUSED_NOTICE_SHOWN=0
-wait_for_window_focus() {
-    local want="$1"
-    while true; do
-        local cur; cur="$(active_window_class)"
-        if echo "$cur" | grep -qiF "$want"; then
-            if [ "$WINDOW_PAUSED_NOTICE_SHOWN" -eq 1 ]; then
-                echo "Resumed — '$want' is focused again."
-                WINDOW_PAUSED_NOTICE_SHOWN=0
-            fi
-            return 0
-        fi
-        if [ "$WINDOW_PAUSED_NOTICE_SHOWN" -eq 0 ]; then
-            echo "Paused — focus '$want' to continue (currently: ${cur:-none})."
-            WINDOW_PAUSED_NOTICE_SHOWN=1
-        fi
-        sleep 0.15
-    done
-}
-
-# Session type ("x11" or "wayland"), used to pick how -w window scoping works.
-session_type() {
-    if [ -n "${WAYLAND_DISPLAY:-}" ] || [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
-        echo wayland
-    elif [ -n "${DISPLAY:-}" ]; then
-        echo x11
-    else
-        echo unknown
-    fi
-}
-
-require_xdotool() {
-    if ! command -v xdotool >/dev/null 2>&1; then
-        echo "xdotool is required for -w window scoping under X11. Install it (e.g. pacman -S xdotool)."
-        exit 1
-    fi
-}
-
-# First window id whose class/name matches (substring, case-insensitive).
-# xdotool's own --class matching is case-sensitive, so build a
-# case-insensitive ERE (e.g. "Foo" -> "[Ff][Oo][Oo]") to match the
-# documented (and Hyprland-path) behavior.
-x11_find_window() {
-    local want="$1" pattern="" ch
-    local i n=${#want}
-    for (( i=0; i<n; i++ )); do
-        ch="${want:i:1}"
-        if [[ "$ch" =~ [A-Za-z] ]]; then
-            pattern+="[${ch^^}${ch,,}]"
-        else
-            pattern+="$(printf '%s' "$ch" | sed 's/[][\\.^$*+?(){}|]/\\&/g')"
-        fi
-    done
-    xdotool search --class "$pattern" 2>/dev/null | head -1
-}
-
-# Focus + raise a window by id, the same way focus_window_by_class does for
-# Hyprland (hyprctl dispatch focuswindow). Best-effort: some window managers
-# ignore parts of this, so we don't hard-fail on it.
-x11_activate_window() {
-    local winid="$1"
-    xdotool windowactivate --sync "$winid" >/dev/null 2>&1 || true
-}
-
-# Echoes the X11 id of the currently focused window (empty if none/unknown).
-x11_active_window_id() {
-    xdotool getactivewindow 2>/dev/null || true
-}
-
-# Blocks (polling every 0.15s) until $winid is the focused window. Pure
-# port of wait_for_window_focus for X11 — it does NOT keep re-stealing focus,
-# it just waits for the window to be focused again, exactly like the Hyprland
-# path does with hyprctl.
-X11_PAUSED_NOTICE_SHOWN=0
-x11_wait_for_window_focus() {
-    local winid="$1"
-    while true; do
-        local cur; cur="$(x11_active_window_id)"
-        if [ "$cur" = "$winid" ]; then
-            if [ "$X11_PAUSED_NOTICE_SHOWN" -eq 1 ]; then
-                echo "Resumed — target window is focused again."
-                X11_PAUSED_NOTICE_SHOWN=0
-            fi
-            return 0
-        fi
-        if [ "$X11_PAUSED_NOTICE_SHOWN" -eq 0 ]; then
-            echo "Paused — focus the target window to continue (currently: ${cur:-none})."
-            X11_PAUSED_NOTICE_SHOWN=1
-        fi
-        sleep 0.15
-    done
-}
-
-require_nonnegative_number() {
-    local name="$1" value="$2"
-    if ! [[ "$value" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]; then
-        echo "$name must be a non-negative number (got '$value')." >&2
-        exit 1
-    fi
-}
-
-require_positive_number() {
-    local name="$1" value="$2"
-    require_nonnegative_number "$name" "$value"
-    if ! awk "BEGIN {exit !($value > 0)}"; then
-        echo "$name must be greater than 0 (got '$value')." >&2
-        exit 1
-    fi
-}
-
-require_nonnegative_integer() {
-    local name="$1" value="$2"
-    if ! [[ "$value" =~ ^[0-9]+$ ]]; then
-        echo "$name must be a non-negative integer (got '$value')." >&2
-        exit 1
-    fi
-}
-
-button_code() {
-    case "$1" in
-        left)   echo "0xC0" ;;
-        right)  echo "0xC1" ;;
-        middle) echo "0xC2" ;;
-        *) echo "Unknown button '$1' (use left, right, or middle)" >&2; exit 1 ;;
-    esac
-}
-
-# Guess a file's macro format from its extension. Echoes "json" or "mac".
-guess_format() {
-    case "$1" in
-        *.json|*.ndjson) echo json ;;
-        *.mac)            echo mac ;;
-        *)
-            # Fall back to sniffing the first non-empty line.
-            if [ -s "$1" ] && head -1 "$1" | grep -q '^{'; then
-                echo json
-            else
-                echo mac
-            fi
-            ;;
-    esac
-}
 
 # ---------------------------------------------------------------------------
-# click mode (original behavior)
+# Linux input constants + key tables
 # ---------------------------------------------------------------------------
-mode_click() {
-    local INTERVAL_MS=100 BUTTON="left" COUNT=0 START_DELAY=3 WINCLASS=""
-    while getopts "r:b:c:d:w:h" opt; do
-        case "$opt" in
-            r) INTERVAL_MS="$OPTARG" ;;
-            b) BUTTON="$OPTARG" ;;
-            c) COUNT="$OPTARG" ;;
-            d) START_DELAY="$OPTARG" ;;
-            w) WINCLASS="$OPTARG" ;;
-            h) usage ;;
-            *) usage ;;
-        esac
-    done
+EV_SYN, EV_KEY, EV_REL, EV_ABS = 0, 1, 2, 3
+REL_X, REL_Y, REL_HWHEEL, REL_WHEEL = 0, 1, 6, 8
+REL_WHEEL_HI, REL_HWHEEL_HI = 0x0B, 0x0C
+ABS_X, ABS_Y = 0, 1
+ABS_RANGE = 65535
+BTN_MAP = {"left": 0x110, "right": 0x111, "middle": 0x112, "side": 0x113, "extra": 0x114}
+BTN_NAME = {v: k for k, v in BTN_MAP.items()}
 
-    require_positive_number "interval (-r)" "$INTERVAL_MS"
-    require_nonnegative_integer "count (-c)" "$COUNT"
-    require_nonnegative_number "start delay (-d)" "$START_DELAY"
+EV_FMT = "llHHi"
+EV_SIZE = struct.calcsize(EV_FMT)
 
-    local CODE; CODE="$(button_code "$BUTTON")"
-    local SESSION=""
-    if [ -n "$WINCLASS" ]; then
-        SESSION="$(session_type)"
-        case "$SESSION" in
-            x11)
-                require_xdotool
-                require_ydotool   # now required for input injection
-                local WINID; WINID="$(x11_find_window "$WINCLASS")"
-                [ -z "$WINID" ] && { echo "No X11 window found matching '$WINCLASS'. Try: xdotool search --name '' | xargs -I{} xdotool getwindowclassname {}"; exit 1; }
-                echo "Clicker (X11, window-targeted): button=$BUTTON interval=${INTERVAL_MS}ms count=$([ "$COUNT" -eq 0 ] && echo infinite || echo "$COUNT")"
-                echo "Target: '$WINCLASS' (id $WINID) — focusing it now."
-                x11_activate_window "$WINID"
-                echo "Clicking... press Ctrl+C to stop."
-                local n=0
-                while true; do
-                    x11_wait_for_window_focus "$WINID"
-                    ydotool click "$CODE"   # kernel‑level injection
-                    n=$((n + 1))
-                    if [ "$COUNT" -ne 0 ] && [ "$n" -ge "$COUNT" ]; then
-                        echo "Done: $n clicks."
-                        break
-                    fi
-                    sleep "$(awk "BEGIN {printf \"%.3f\", $INTERVAL_MS/1000}")"
-                done
+# uinput ioctls (linux/uinput.h)
+UI_SET_EVBIT = 0x40045564
+UI_SET_KEYBIT = 0x40045565
+UI_SET_RELBIT = 0x40045566
+UI_SET_ABSBIT = 0x40045567
+UI_DEV_CREATE = 0x5501
+UI_DEV_DESTROY = 0x5502
+UI_DEV_SETUP = 0x405C5503
+UI_ABS_SETUP = 0x401C5504
+
+
+def _ioc_read(nr, size):
+    return (2 << 30) | (size << 16) | (ord("E") << 8) | nr
+
+
+EVIOCGNAME = _ioc_read(0x06, 256)
+
+
+def EVIOCGBIT(ev, size):
+    return _ioc_read(0x20 + ev, size)
+
+
+# Names -> Linux keycodes (canonical name first so reverse lookup prefers it)
+KEYNAMES = {
+    "esc": 1, "backspace": 14, "tab": 15, "enter": 28, "leftctrl": 29,
+    "leftshift": 42, "backslash": 43, "rightshift": 54, "leftalt": 56,
+    "space": 57, "capslock": 58, "numlock": 69, "scrolllock": 70,
+    "rightctrl": 97, "sysrq": 99, "rightalt": 100, "home": 102, "up": 103,
+    "pageup": 104, "left": 105, "right": 106, "end": 107, "down": 108,
+    "pagedown": 109, "insert": 110, "delete": 111, "pause": 119,
+    "leftmeta": 125, "rightmeta": 126,
+    "minus": 12, "equal": 13, "leftbrace": 26, "rightbrace": 27,
+    "semicolon": 39, "apostrophe": 40, "grave": 41, "comma": 51, "dot": 52,
+    "slash": 53,
+    # aliases
+    "return": 28, "ctrl": 29, "lctrl": 29, "shift": 42, "lshift": 42,
+    "rshift": 54, "alt": 56, "lalt": 56, "rctrl": 97, "ralt": 100,
+    "altgr": 100, "printscreen": 99, "pgup": 104, "pgdn": 109, "del": 111,
+    "super": 125, "meta": 125, "win": 125, "lsuper": 125, "rsuper": 126,
+    "escape": 1, "period": 52,
+}
+for _i in range(10):
+    KEYNAMES[f"f{_i + 1}"] = 59 + _i
+KEYNAMES["f11"], KEYNAMES["f12"] = 87, 88
+
+_ROWS = {2: "1234567890-=", 16: "qwertyuiop[]", 30: "asdfghjkl;'`", 44: "zxcvbnm,./"}
+CHAR2CODE = {}
+for _start, _row in _ROWS.items():
+    for _k, _ch in enumerate(_row):
+        CHAR2CODE[_ch] = _start + _k
+        if _ch.isalnum():
+            KEYNAMES[_ch] = _start + _k
+CHAR2CODE.update({"\\": 43, " ": 57, "\n": 28, "\t": 15})
+SHIFTED = {
+    "!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6", "&": "7",
+    "*": "8", "(": "9", ")": "0", "_": "-", "+": "=", "{": "[", "}": "]",
+    ":": ";", '"': "'", "~": "`", "|": "\\", "<": ",", ">": ".", "?": "/",
+}
+CODE2NAME = {}
+for _n, _c in KEYNAMES.items():
+    CODE2NAME.setdefault(_c, _n)
+MOD_ALTS = {
+    "ctrl": {29, 97}, "control": {29, 97}, "shift": {42, 54}, "alt": {56, 100},
+    "super": {125, 126}, "meta": {125, 126}, "win": {125, 126},
+}
+
+
+def parse_key(s):
+    s = str(s).strip().lower()
+    if s.startswith("key_"):
+        s = s[4:]
+    if s.isdigit():
+        return int(s)
+    if s in KEYNAMES:
+        return KEYNAMES[s]
+    raise MacroError(f"unknown key {s!r} (see: macro keys)")
+
+
+def key_name(code):
+    return CODE2NAME.get(code, str(code))
+
+
+def char_to_key(ch):
+    """-> (keycode, needs_shift) for a US-layout character, or None."""
+    if ch in CHAR2CODE:
+        return CHAR2CODE[ch], False
+    if ch.isalpha() and ch.lower() in CHAR2CODE and ch.isascii():
+        return CHAR2CODE[ch.lower()], ch.isupper()
+    if ch in SHIFTED:
+        return CHAR2CODE[SHIFTED[ch]], True
+    return None
+
+
+class Combo:
+    """A hotkey like 'ctrl+alt+q'. Left/right modifier variants both count."""
+
+    def __init__(self, spec):
+        self.spec = spec
+        self.groups = []
+        for part in spec.lower().split("+"):
+            part = part.strip()
+            self.groups.append(set(MOD_ALTS[part]) if part in MOD_ALTS else {parse_key(part)})
+        self.codes = set().union(*self.groups)
+
+    def feed(self, pressed, code, value):
+        """`pressed` is the caller's live set of held keycodes (already updated)."""
+        return (value == 1 and any(code in g for g in self.groups)
+                and all(g & pressed for g in self.groups))
+
+
+# ---------------------------------------------------------------------------
+# small helpers
+# ---------------------------------------------------------------------------
+def _run(cmd, timeout=3):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def wait_until(deadline, stop):
+    rem = deadline - time.monotonic()
+    if rem > 0:
+        if stop.wait(rem):
+            raise Stopped()
+    elif stop.is_set():
+        raise Stopped()
+
+
+def countdown(secs):
+    n = int(secs)
+    if n <= 0:
+        return
+    for i in range(n, 0, -1):
+        print(f"\rStarting in {i}... ", end="", flush=True)
+        time.sleep(1)
+    print("\rGo!               ")
+
+
+def fix_owner(path):
+    """When run through sudo, hand files back to the invoking user."""
+    if os.geteuid() == 0 and os.environ.get("SUDO_UID"):
+        with contextlib.suppress(OSError, ValueError):
+            os.chown(path, int(os.environ["SUDO_UID"]), int(os.environ.get("SUDO_GID", "-1")))
+
+
+def invoking_home():
+    user = os.environ.get("SUDO_USER")
+    if user:
+        with contextlib.suppress(KeyError):
+            return Path(pwd.getpwnam(user).pw_dir)
+    return Path.home()
+
+
+def to_int(s, what="number"):
+    if not re.fullmatch(r"\d+", s or ""):
+        raise ValueError(f"{what} must be a non-negative integer, got {s!r}")
+    return int(s)
+
+
+def to_float(s, what="number"):
+    if not re.fullmatch(r"[-+]?(\d+(\.\d*)?|\.\d+)", s or ""):
+        raise ValueError(f"{what} must be a number, got {s!r}")
+    return float(s)
+
+
+# argparse "type" helpers
+def _pos_float(s):
+    try:
+        v = float(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {s!r}")
+    if v <= 0:
+        raise argparse.ArgumentTypeError("must be > 0")
+    return v
+
+
+def _nonneg_float(s):
+    try:
+        v = float(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {s!r}")
+    if v < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return v
+
+
+def _nonneg_int(s):
+    if not re.fullmatch(r"\d+", s):
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return int(s)
+
+
+def _jitter(s):
+    try:
+        v = float(s[:-1]) / 100 if s.endswith("%") else float(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError("use e.g. 10% or 0.1")
+    if not 0 <= v < 1:
+        raise argparse.ArgumentTypeError("jitter must be in [0%, 100%)")
+    return v
+
+
+def _xy(s):
+    m = re.fullmatch(r"\s*(-?\d+)\s*,\s*(-?\d+)\s*", s)
+    if not m:
+        raise argparse.ArgumentTypeError("use X,Y")
+    return int(m[1]), int(m[2])
+
+
+def _screen(s):
+    m = re.fullmatch(r"(\d+)x(\d+)(?:\+(-?\d+)\+(-?\d+))?", s)
+    if not m:
+        raise argparse.ArgumentTypeError("use WxH or WxH+X+Y")
+    return int(m[3] or 0), int(m[4] or 0), int(m[1]), int(m[2])
+
+
+def _combo(s):
+    try:
+        Combo(s)
+    except MacroError as e:
+        raise argparse.ArgumentTypeError(str(e))
+    return s
+
+
+# ---------------------------------------------------------------------------
+# macro file model
+#   NDJSON, one event per line, first line optional META:
+#     {"type":"META","v":2,"session":"hyprland","screen":[0,0,1920,1080],...}
+#     {"t":0.1,"type":"BUTTON","button":"left","state":"press"}
+#     {"t":0.2,"type":"MOVE","dx":5,"dy":-2}           relative
+#     {"t":0.2,"type":"MOVETO","x":640,"y":360}        absolute (screen px)
+#     {"t":0.3,"type":"SCROLL","dx":0,"dy":-1}
+#     {"t":0.4,"type":"KEY","code":30,"state":"press"}
+#     {"t":0.5,"type":"TYPE","text":"hello","delay":0.02}
+#     {"t":0.6,"type":"WAIT_WINDOW","class":"firefox","timeout":10}
+#   Legacy tab-separated .mac files (BUTTON/MOVE/KEY only) are still read/written.
+# ---------------------------------------------------------------------------
+EVENT_TYPES = ("BUTTON", "MOVE", "MOVETO", "SCROLL", "KEY", "TYPE", "WAIT_WINDOW")
+MAC_TYPES = ("BUTTON", "MOVE", "KEY")
+
+
+def validate_event(e):
+    """Coerce fields in place; return an error string or None."""
+    try:
+        if not isinstance(e, dict) or e.get("type") not in EVENT_TYPES:
+            return "unknown event type"
+        e["t"] = round(float(e["t"]), 4)
+        if e["t"] < 0:
+            return "negative timestamp"
+        ty = e["type"]
+        if ty == "BUTTON":
+            if e["button"] not in BTN_MAP or e["state"] not in ("press", "release"):
+                return "bad button/state"
+        elif ty == "KEY":
+            e["code"] = int(e["code"])
+            if e["state"] not in ("press", "release"):
+                return "bad state"
+        elif ty == "MOVE":
+            e["dx"], e["dy"] = int(round(float(e["dx"]))), int(round(float(e["dy"])))
+        elif ty == "MOVETO":
+            e["x"], e["y"] = int(round(float(e["x"]))), int(round(float(e["y"])))
+        elif ty == "SCROLL":
+            e["dx"], e["dy"] = int(e.get("dx", 0)), int(e.get("dy", 0))
+        elif ty == "TYPE":
+            e["text"] = str(e["text"])
+        elif ty == "WAIT_WINDOW":
+            e["class"] = str(e["class"])
+    except (KeyError, TypeError, ValueError) as ex:
+        return f"missing/invalid field ({ex})"
+    return None
+
+
+def guess_format(path, lines=()):
+    suf = Path(path).suffix.lower()
+    if suf in (".json", ".ndjson", ".jsonl"):
+        return "json"
+    if suf == ".mac":
+        return "mac"
+    first = next((ln for ln in lines if ln.strip()), "")
+    return "mac" if first and not first.lstrip().startswith("{") else "json"
+
+
+def _parse_tsv(line):
+    f = line.rstrip("\n").split("\t")
+    t, ty = float(f[0]), f[1]
+    if ty == "BUTTON":
+        return {"t": t, "type": ty, "button": f[2], "state": f[3]}
+    if ty == "MOVE":
+        return {"t": t, "type": ty, "dx": float(f[2]), "dy": float(f[3])}
+    if ty == "KEY":
+        return {"t": t, "type": ty, "code": int(f[2]), "state": f[3]}
+    raise ValueError("unknown type")
+
+
+def load_macro(path):
+    p = Path(path)
+    if not p.is_file():
+        raise MacroError(f"no such file: {path}")
+    lines = p.read_text().splitlines()
+    fmt = guess_format(p, lines)
+    meta, events, bad = {}, [], 0
+    for n, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        try:
+            e = json.loads(line) if fmt == "json" else _parse_tsv(line)
+        except (ValueError, IndexError):
+            warn(f"{path}:{n}: unparseable line skipped")
+            bad += 1
+            continue
+        if isinstance(e, dict) and e.get("type") == "META":
+            meta = e
+            continue
+        err = validate_event(e)
+        if err:
+            warn(f"{path}:{n}: {err}; skipped")
+            bad += 1
+            continue
+        events.append(e)
+    events.sort(key=lambda e: e["t"])  # stable
+    return meta, events
+
+
+def save_macro(path, meta, events, fmt=None):
+    fmt = fmt or guess_format(path)
+    out = []
+    if fmt == "json":
+        if meta:
+            out.append(json.dumps(meta, separators=(",", ":")))
+        out += [json.dumps(e, separators=(",", ":")) for e in events]
+    else:
+        dropped = 0
+        for e in events:
+            ty = e["type"]
+            if ty == "BUTTON":
+                out.append(f'{e["t"]}\tBUTTON\t{e["button"]}\t{e["state"]}')
+            elif ty == "MOVE":
+                out.append(f'{e["t"]}\tMOVE\t{e["dx"]}\t{e["dy"]}')
+            elif ty == "KEY":
+                out.append(f'{e["t"]}\tKEY\t{e["code"]}\t{e["state"]}')
+            else:
+                dropped += 1
+        if dropped:
+            warn(f"{dropped} event(s) not representable in .mac format were dropped")
+    tmp = f"{path}.tmp{os.getpid()}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # may contain typed passwords
+    with os.fdopen(fd, "w") as f:
+        f.write("\n".join(out) + ("\n" if out else ""))
+    os.replace(tmp, path)
+    fix_owner(path)
+
+
+def balance(events):
+    """Drop releases of never-pressed inputs; release anything still held at the end."""
+    held_k, held_b, out = set(), set(), []
+    for e in events:
+        if e["type"] == "KEY":
+            if e["state"] == "press":
+                held_k.add(e["code"])
+            elif e["code"] in held_k:
+                held_k.discard(e["code"])
+            else:
+                continue
+        elif e["type"] == "BUTTON":
+            if e["state"] == "press":
+                held_b.add(e["button"])
+            elif e["button"] in held_b:
+                held_b.discard(e["button"])
+            else:
+                continue
+        out.append(e)
+    end = out[-1]["t"] if out else 0.0
+    out += [{"t": end, "type": "KEY", "code": c, "state": "release"} for c in sorted(held_k)]
+    out += [{"t": end, "type": "BUTTON", "button": b, "state": "release"} for b in sorted(held_b)]
+    return out
+
+
+def make_slice(events, i0, i1, base=None):
+    """events[i0:i1] rebased to t=0, keeping the cursor position and input balance."""
+    chunk = copy.deepcopy(events[i0:i1])
+    if not chunk:
+        return []
+    base = chunk[0]["t"] if base is None else base
+    for e in chunk:
+        e["t"] = round(max(0.0, e["t"] - base), 4)
+    pos = next((e for e in reversed(events[:i0]) if e["type"] == "MOVETO"), None)
+    if pos and not (chunk[0]["type"] == "MOVETO" and chunk[0]["t"] == 0):
+        chunk.insert(0, {"t": 0.0, "type": "MOVETO", "x": pos["x"], "y": pos["y"]})
+    return balance(chunk)
+
+
+def compact(events, window=0.01):
+    """Merge bursts of MOVE/SCROLL, drop zero moves and repeated MOVETOs."""
+    out, last_abs = [], None
+    for e in copy.deepcopy(events):
+        ty, prev = e["type"], (out[-1] if out else None)
+        if ty == "MOVE":
+            last_abs = None
+            if e["dx"] == 0 and e["dy"] == 0:
+                continue
+            if prev and prev["type"] == "MOVE" and e["t"] - prev["t"] <= window:
+                prev["dx"] += e["dx"]
+                prev["dy"] += e["dy"]
+                continue
+        elif ty == "MOVETO":
+            if (e["x"], e["y"]) == last_abs:
+                continue
+            last_abs = (e["x"], e["y"])
+            if prev and prev["type"] == "MOVETO" and e["t"] - prev["t"] <= window:
+                prev["x"], prev["y"] = e["x"], e["y"]
+                continue
+        elif ty == "SCROLL":
+            if prev and prev["type"] == "SCROLL" and e["t"] - prev["t"] <= window:
+                prev["dx"] += e["dx"]
+                prev["dy"] += e["dy"]
+                continue
+        out.append(e)
+    return out
+
+
+def fmt_event(e):
+    ty = e["type"]
+    if ty == "BUTTON":
+        d = f'{e["button"]} {e["state"]}'
+    elif ty == "MOVE":
+        d = f'dx={e["dx"]} dy={e["dy"]}'
+    elif ty == "MOVETO":
+        d = f'x={e["x"]} y={e["y"]}'
+    elif ty == "SCROLL":
+        d = f'dx={e["dx"]} dy={e["dy"]}'
+    elif ty == "KEY":
+        d = f'{key_name(e["code"])} ({e["code"]}) {e["state"]}'
+    elif ty == "TYPE":
+        d = repr(e["text"])
+    else:
+        d = f'{e["class"]} timeout={e.get("timeout", 10)}'
+    return f'{e["t"]:9.3f}  {ty:<11} {d}'
+
+
+def stats_lines(events, meta=None):
+    if not events:
+        return ["empty macro"]
+    c = Counter(e["type"] for e in events)
+    lines = [f"events   : {len(events)}", f"duration : {events[-1]['t']:.3f}s"]
+    lines.append("types    : " + ", ".join(f"{k}={v}" for k, v in sorted(c.items())))
+    xs = [e["x"] for e in events if e["type"] == "MOVETO"]
+    ys = [e["y"] for e in events if e["type"] == "MOVETO"]
+    if xs:
+        lines.append(f"abs area : x {min(xs)}..{max(xs)}, y {min(ys)}..{max(ys)}")
+    rel = [(e["dx"], e["dy"]) for e in events if e["type"] == "MOVE"]
+    if rel:
+        lines.append(f"rel move : net ({sum(a for a, _ in rel)}, {sum(b for _, b in rel)})")
+    keys = Counter(key_name(e["code"]) for e in events if e["type"] == "KEY" and e["state"] == "press")
+    if keys:
+        lines.append("keys     : " + ", ".join(f"{k}x{v}" for k, v in keys.most_common(8)))
+    if meta:
+        lines.append(f"meta     : session={meta.get('session')} screen={meta.get('screen')} move={meta.get('move')}")
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# display session backends (cursor position, screen bounds, windows)
+# ---------------------------------------------------------------------------
+def _match(want, cls, title):
+    w = want.lower()
+    return w in (cls or "").lower() or w in (title or "").lower()
+
+
+class Session:
+    name = "unknown"
+
+    def cursor(self):
+        return None
+
+    def bounds(self):
+        return None
+
+    def list_windows(self):
+        raise MacroError("window features need a Hyprland or X11 (xdotool) session")
+
+    def is_focused(self, want):
+        raise MacroError("window features need a Hyprland or X11 (xdotool) session")
+
+    def focus(self, want):
+        raise MacroError("window features need a Hyprland or X11 (xdotool) session")
+
+    def find(self, want):
+        wins = self.list_windows()
+        for wid, cls, _t in wins:  # class first, then title
+            if want.lower() in cls.lower():
+                return wid
+        for wid, _c, title in wins:
+            if want.lower() in title.lower():
+                return wid
+        return None
+
+    def wait_focused(self, want, timeout, stop):
+        t0 = time.monotonic()
+        while not self.is_focused(want):
+            if timeout and time.monotonic() - t0 > timeout:
+                raise MacroError(f"timed out waiting for window {want!r}")
+            if stop.wait(0.15):
+                raise Stopped()
+        return time.monotonic() - t0
+
+
+def find_hypr_sock():
+    sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+    uid = os.environ.get("SUDO_UID") or str(os.getuid())
+    bases = [b for b in (os.environ.get("XDG_RUNTIME_DIR"), f"/run/user/{uid}") if b]
+    found = []
+    for b in dict.fromkeys(bases):
+        found += glob.glob(f"{b}/hypr/{sig or '*'}/.socket.sock")
+    if not found and sig:
+        found += glob.glob(f"/tmp/hypr/{sig}/.socket.sock")
+    return max(found, key=os.path.getmtime) if found else None
+
+
+def hypr_request(sock_path, cmd, timeout=1.0):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect(sock_path)
+        s.sendall(cmd.encode())
+        chunks = []
+        while True:
+            b = s.recv(65536)
+            if not b:
+                break
+            chunks.append(b)
+    finally:
+        s.close()
+    return b"".join(chunks).decode(errors="replace")
+
+
+class HyprSession(Session):
+    name = "hyprland"
+
+    def __init__(self, sock):
+        self.sock = sock
+
+    def _json(self, cmd):
+        try:
+            return json.loads(hypr_request(self.sock, "j/" + cmd))
+        except (OSError, ValueError):
+            return None
+
+    def cursor(self):
+        d = self._json("cursorpos")
+        try:
+            return int(round(d["x"])), int(round(d["y"]))
+        except (TypeError, KeyError):
+            return None
+
+    def bounds(self):
+        mons = self._json("monitors")
+        if not mons:
+            return None
+        x0 = y0 = 10 ** 9
+        x1 = y1 = -10 ** 9
+        for m in mons:
+            if m.get("disabled"):
+                continue
+            w, h = m["width"], m["height"]
+            if m.get("transform", 0) % 2 == 1:
+                w, h = h, w
+            sc = m.get("scale") or 1
+            w, h = w / sc, h / sc
+            x0, y0 = min(x0, m["x"]), min(y0, m["y"])
+            x1, y1 = max(x1, m["x"] + w), max(y1, m["y"] + h)
+        return (int(x0), int(y0), int(round(x1 - x0)), int(round(y1 - y0))) if x1 > x0 else None
+
+    def list_windows(self):
+        cl = self._json("clients") or []
+        return [(c["address"], c.get("class", ""), c.get("title", ""))
+                for c in cl if c.get("mapped", True) and not c.get("hidden")]
+
+    def is_focused(self, want):
+        d = self._json("activewindow")
+        return bool(d and _match(want, d.get("class"), d.get("title")))
+
+    _lua = None  # Hyprland 0.55+ takes Lua expressions in `hyprctl dispatch`
+
+    def focus(self, want):
+        addr = self.find(want)
+        if not addr:
+            raise MacroError(f"no window matching {want!r} (see: macro windows)")
+        if not shutil.which("hyprctl"):
+            raise MacroError("hyprctl not found")
+        if not HyprSession._lua:
+            r = _run(["hyprctl", "dispatch", "focuswindow", f"address:{addr}"])
+            out = (r.stdout + r.stderr) if r else ""
+            if r and r.returncode == 0 and "hl.dispatch" not in out.lower():
                 return
-                ;;
-            wayland)
-                require_ydotool
-                require_hyprctl
-                ;;
-            *)
-                echo "Couldn't determine session type (no \$DISPLAY or \$WAYLAND_DISPLAY set)."
-                exit 1
-                ;;
-        esac
-    else
-        require_ydotool
-    fi
+        r = _run(["hyprctl", "dispatch", f'hl.dsp.focus({{ window = "address:{addr}" }})'])
+        if not r or r.returncode != 0:
+            raise MacroError(f"hyprctl failed to focus {addr}: {(r.stdout + r.stderr).strip() if r else ''}")
+        HyprSession._lua = True
 
-    echo "Clicker: button=$BUTTON interval=${INTERVAL_MS}ms count=$([ "$COUNT" -eq 0 ] && echo infinite || echo "$COUNT")"
-    if [ -n "$WINCLASS" ]; then
-        echo "Window scope: '$WINCLASS' — focusing it now."
-        focus_window_by_class "$WINCLASS"
-    else
-        echo "Starting in ${START_DELAY}s — switch to your target window now."
-        sleep "$START_DELAY"
-    fi
-    echo "Clicking... press Ctrl+C to stop."
 
-    local n=0
-    while true; do
-        [ -n "$WINCLASS" ] && wait_for_window_focus "$WINCLASS"
-        ydotool click "$CODE"
-        n=$((n + 1))
-        if [ "$COUNT" -ne 0 ] && [ "$n" -ge "$COUNT" ]; then
-            echo "Done: $n clicks."
-            break
-        fi
-        sleep "$(awk "BEGIN {printf \"%.3f\", $INTERVAL_MS/1000}")"
-    done
-}
+class X11Session(Session):
+    name = "x11"
 
-# ---------------------------------------------------------------------------
-# record mode
-#
-# JSON format: one JSON object per line (newline-delimited JSON), e.g.
-#   {"t":0.123,"type":"BUTTON","button":"left","state":"press"}
-#   {"t":0.500,"type":"MOVE","dx":10,"dy":-5}
-#   {"t":1.000,"type":"KEY","code":30,"state":"press"}
-#
-# Legacy mac format: tab-separated, one event per line:
-#   <elapsed_seconds>\tBUTTON\t<btn_name>\t<press|release>
-#   <elapsed_seconds>\tMOVE\t<dx>\t<dy>
-#   <elapsed_seconds>\tKEY\t<keycode>\t<press|release>
-# ---------------------------------------------------------------------------
-mode_record() {
-    local OUT="" TIMEOUT=0 FORMAT="json"
-    while getopts "o:t:f:h" opt; do
-        case "$opt" in
-            o) OUT="$OPTARG" ;;
-            t) TIMEOUT="$OPTARG" ;;
-            f) FORMAT="$OPTARG" ;;
-            h) usage ;;
-            *) usage ;;
-        esac
-    done
-    [ -z "$OUT" ] && OUT="macro_$(date +%s).${FORMAT}"
-    case "$FORMAT" in json|mac) ;; *) echo "Unknown format '$FORMAT' (use json or mac)." >&2; exit 1 ;; esac
-    require_nonnegative_integer "timeout (-t)" "$TIMEOUT"
+    def __init__(self):
+        self._lib = None
+        self._dpy = None
+        self._cache = {}
 
-    if ! command -v libinput >/dev/null 2>&1; then
-        echo "libinput (with 'libinput debug-events') is required for recording."
-        echo "Install it via your package manager (e.g. apt install libinput-tools)."
-        exit 1
-    fi
-    [ "$FORMAT" = "json" ] && require_jq
+    def _xlib(self):
+        if self._lib is None:
+            path = ctypes.util.find_library("X11")
+            if not path:
+                self._lib = False
+                return False
+            lib = ctypes.CDLL(path)
+            lib.XOpenDisplay.restype = ctypes.c_void_p
+            lib.XOpenDisplay.argtypes = [ctypes.c_char_p]
+            lib.XDefaultRootWindow.restype = ctypes.c_ulong
+            lib.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+            lib.XDefaultScreen.argtypes = [ctypes.c_void_p]
+            lib.XDisplayWidth.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            lib.XDisplayHeight.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            lib.XQueryPointer.argtypes = [
+                ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(ctypes.c_ulong),
+                ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int),
+                ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+                ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_uint)]
+            self._dpy = lib.XOpenDisplay(None)
+            self._lib = lib if self._dpy else False
+        return self._lib
 
-    # Pre-flight: libinput debug-events opens raw /dev/input/eventX nodes
-    # directly, which almost always requires root (being in the 'input'
-    # group alone is often not enough). Fail loudly here instead of letting
-    # a permission error silently kill the script via `set -e`.
-    local preflight_err
-    preflight_err="$(timeout 1 libinput debug-events --show-keycodes 2>&1 >/dev/null || true)"
-    if echo "$preflight_err" | grep -qiE 'permission denied|failed to.*seat|not part of|must be run as root|insufficient permissions|operation not permitted'; then
-        echo "Couldn't open input devices for recording:"
-        echo "  $preflight_err" | head -3
-        echo
-        echo "libinput debug-events needs raw access to /dev/input/eventX,"
-        echo "which normally requires root. Try:"
-        echo "  sudo $0 record -o \"$OUT\"${TIMEOUT:+ -t $TIMEOUT} -f $FORMAT"
-        exit 1
-    fi
+    def cursor(self):
+        lib = self._xlib()
+        if not lib:
+            return None
+        rr, cr = ctypes.c_ulong(), ctypes.c_ulong()
+        rx, ry, wx, wy = (ctypes.c_int() for _ in range(4))
+        mask = ctypes.c_uint()
+        ok = lib.XQueryPointer(self._dpy, lib.XDefaultRootWindow(self._dpy), ctypes.byref(rr),
+                               ctypes.byref(cr), ctypes.byref(rx), ctypes.byref(ry),
+                               ctypes.byref(wx), ctypes.byref(wy), ctypes.byref(mask))
+        return (rx.value, ry.value) if ok else None
 
-    : > "$OUT"
-    echo "Recording ($FORMAT format) to '$OUT'. Move/click/type as you like."
-    echo "Press Ctrl+C to stop$( [ "$TIMEOUT" -ne 0 ] && echo " (or wait ${TIMEOUT}s)" )."
+    def bounds(self):
+        lib = self._xlib()
+        if not lib:
+            return None
+        s = lib.XDefaultScreen(self._dpy)
+        return (0, 0, lib.XDisplayWidth(self._dpy, s), lib.XDisplayHeight(self._dpy, s))
 
-    local start_ts=""
-    record_line() {
-        local raw="$1"
-        # Example lines from `libinput debug-events`:
-        #   event6   POINTER_MOTION   +9.760s  0.29/-0.36 (0.29/-0.36 unaccelerated)
-        #   event6   POINTER_BUTTON   +12.259s BTN_LEFT (272) pressed, seat count: 1
-        #   event6   KEYBOARD_KEY     +5.001s  KEY_A (30) pressed
-        local ts
-        ts=$(echo "$raw" | grep -oE '\+[0-9]+\.[0-9]+s' | tr -d '+s') || return 0
-        [ -z "$ts" ] && return 0
-        [ -z "$start_ts" ] && start_ts="$ts"
-        local elapsed
-        elapsed=$(awk "BEGIN {printf \"%.3f\", $ts - $start_ts}")
+    def _xdo(self, *args):
+        if not shutil.which("xdotool"):
+            raise MacroError("xdotool is required for window features under X11")
+        r = _run(["xdotool", *args])
+        return r.stdout.strip() if r and r.returncode == 0 else ""
 
-        if echo "$raw" | grep -q "POINTER_BUTTON"; then
-            local btn state
-            btn=$(echo "$raw" | grep -m1 -oE 'BTN_[A-Z]+' || true)
-            state=$(echo "$raw" | grep -qE 'pressed' && echo press || echo release)
-            case "$btn" in
-                BTN_LEFT)   btn="left" ;;
-                BTN_RIGHT)  btn="right" ;;
-                BTN_MIDDLE) btn="middle" ;;
-                *) return 0 ;;
-            esac
-            if [ "$FORMAT" = "json" ]; then
-                printf '{"t":%s,"type":"BUTTON","button":"%s","state":"%s"}\n' "$elapsed" "$btn" "$state" >> "$OUT"
-            else
-                printf '%s\tBUTTON\t%s\t%s\n' "$elapsed" "$btn" "$state" >> "$OUT"
-            fi
-        elif echo "$raw" | grep -q "POINTER_MOTION"; then
-            # libinput's actual output format (confirmed against upstream
-            # source, tools/libinput-debug-events.c: print_motion_event)
-            # is: printf("%6.2f/%6.2f (%+6.2f/%+6.2f)", x, y, ux, uy) -
-            # i.e. the FIRST, UNPARENTHESIZED pair is the ACCELERATED
-            # (on-screen pixel) delta, and the SECOND, parenthesized pair
-            # is the raw UNACCELERATED (sub-pixel, device-native-resolution)
-            # delta. This used to extract the *parenthesized* pair, which
-            # is backwards from the stated intent below: unaccelerated
-            # deltas for an ordinary mouse move are typically well under 1
-            # pixel and round away to 0/0 in the %.0f truncation further
-            # down, silently dropping essentially all recorded cursor
-            # movement. Match the first pair instead.
-            local pair dx dy
-            # Columns are right-justified for display, so there's often
-            # whitespace between the '/' and the second number (e.g.
-            # "  0.88/  0.00"), which a plain [0-9.-]+/[0-9.-]+ regex can't
-            # match handle without allowing whitespace around the '/'.
-            pair=$(echo "$raw" | grep -oE '[-+]?[0-9]+([.][0-9]+)?[[:space:]]*/[[:space:]]*[-+]?[0-9]+([.][0-9]+)?' | head -1 || true)
-            dx=$(echo "$pair" | cut -d/ -f1 | tr -d '[:space:]')
-            dy=$(echo "$pair" | cut -d/ -f2 | tr -d '[:space:]')
-            if [ -n "$dx" ] && [ -n "$dy" ]; then
-                if [ "$FORMAT" = "json" ]; then
-                    printf '{"t":%s,"type":"MOVE","dx":%.0f,"dy":%.0f}\n' "$elapsed" "$dx" "$dy" >> "$OUT"
-                else
-                    printf '%s\tMOVE\t%.0f\t%.0f\n' "$elapsed" "$dx" "$dy" >> "$OUT"
-                fi
-            fi
-        elif echo "$raw" | grep -q "KEYBOARD_KEY"; then
-            local code state
-            code=$(echo "$raw" | grep -m1 -oE '\(-?[0-9]+\)' | tr -d '()' || true)
-            state=$(echo "$raw" | grep -qE 'pressed' && echo press || echo release)
-            if [ -n "$code" ] && [ "$code" != "-1" ]; then
-                if [ "$FORMAT" = "json" ]; then
-                    printf '{"t":%s,"type":"KEY","code":%s,"state":"%s"}\n' "$elapsed" "$code" "$state" >> "$OUT"
-                else
-                    printf '%s\tKEY\t%s\t%s\n' "$elapsed" "$code" "$state" >> "$OUT"
-                fi
-            fi
-        fi
-    }
+    def _info(self, wid):
+        if wid not in self._cache:
+            self._cache[wid] = (self._xdo("getwindowclassname", wid), self._xdo("getwindowname", wid))
+        return self._cache[wid]
 
-    # libinput debug-events fully block-buffers its stdout once it isn't a
-    # tty (i.e. as soon as it's piped). Without forcing line buffering here,
-    # every event sits in that buffer and is lost the moment the process
-    # dies (e.g. via the SIGPIPE below) instead of being flushed — which is
-    # why recordings could come back empty even with correct permissions.
-    local STDBUF=()
-    if command -v stdbuf >/dev/null 2>&1; then
-        STDBUF=(stdbuf -oL)
-    else
-        echo "Warning: 'stdbuf' not found — libinput's output may be buffered" >&2
-        echo "and events could be lost when recording stops. (coreutils package)" >&2
-    fi
+    def list_windows(self):
+        ids = self._xdo("search", "--onlyvisible", "--name", "").split()
+        return [(w, *self._info(w)) for w in ids]
 
-    # Ctrl+C delivers SIGINT to the whole pipeline at once. The `while read`
-    # side dies first and closes the pipe, so libinput's next write gets
-    # SIGPIPE and it exits 141 — that's the *expected* way this recording
-    # stops, not an error, so trap it quietly instead of alarming the user.
-    local interrupted=0
-    trap 'interrupted=1' INT
+    def is_focused(self, want):
+        wid = self._xdo("getactivewindow")
+        return bool(wid) and _match(want, *self._info(wid))
 
-    set +e
-    if [ "$TIMEOUT" -ne 0 ]; then
-        timeout "$TIMEOUT" "${STDBUF[@]}" libinput debug-events --show-keycodes | while IFS= read -r line; do record_line "$line"; done
-    else
-        "${STDBUF[@]}" libinput debug-events --show-keycodes | while IFS= read -r line; do record_line "$line"; done
-    fi
-    local li_status="${PIPESTATUS[0]}"
-    set -e
-    trap - INT
+    def focus(self, want):
+        wid = self.find(want)
+        if not wid:
+            raise MacroError(f"no X11 window matching {want!r} (see: macro windows)")
+        self._xdo("windowactivate", "--sync", wid)
 
-    # timeout's exit code 124 just means the timer expired — that's success.
-    # 130 (SIGINT) and 141 (SIGPIPE from the reader closing after SIGINT)
-    # are the normal ways a Ctrl+C stop looks — not errors.
-    if [ "$li_status" -ne 0 ] && [ "$li_status" -ne 124 ] && [ "$interrupted" -ne 1 ] \
-        && [ "$li_status" -ne 130 ] && [ "$li_status" -ne 141 ]; then
-        echo "libinput debug-events exited with status $li_status — recording may be incomplete."
-        echo "If this is a permissions issue, try running with sudo."
-    fi
 
-    local count; count=$(wc -l < "$OUT")
-    echo "Recorded $count events to '$OUT'."
-}
+def detect_session():
+    sock = find_hypr_sock()
+    if sock:
+        s = HyprSession(sock)
+        if s._json("monitors") is not None:
+            return s
+    if os.environ.get("DISPLAY"):
+        return X11Session()
+    return Session()
+
+
+def resolve_bounds(session, screen_arg):
+    return screen_arg or session.bounds()
+
+
+class FocusGate:
+    """Pauses playback whenever the target window is not focused."""
+
+    def __init__(self, session, want, stop):
+        self.s, self.want, self.stop = session, want, stop
+        self._t, self._ok = 0.0, False
+
+    def ok(self):
+        now = time.monotonic()
+        if now - self._t > 0.1:  # throttle IPC/subprocess calls
+            self._ok, self._t = self.s.is_focused(self.want), now
+        return self._ok
+
+    def wait(self):
+        if self.ok():
+            return 0.0
+        t0 = time.monotonic()
+        print(f"Paused - focus '{self.want}' to continue.")
+        while not self.ok():
+            if self.stop.wait(0.15):
+                raise Stopped()
+        print("Resumed.")
+        return time.monotonic() - t0
+
 
 # ---------------------------------------------------------------------------
-# play mode — accepts either json or legacy mac format (auto-detected)
+# reading input devices (recording + hotkeys)
 # ---------------------------------------------------------------------------
-mode_play() {
-    local IN="" LOOPS=1 SPEED=1.0 START_DELAY=3 WINCLASS=""
-    while getopts "i:l:s:d:w:h" opt; do
-        case "$opt" in
-            i) IN="$OPTARG" ;;
-            l) LOOPS="$OPTARG" ;;
-            s) SPEED="$OPTARG" ;;
-            d) START_DELAY="$OPTARG" ;;
-            w) WINCLASS="$OPTARG" ;;
-            h) usage ;;
-            *) usage ;;
-        esac
-    done
+class Dev:
+    def __init__(self, fd, path, name, kbd, ptr):
+        self.fd, self.path, self.name, self.kbd, self.ptr = fd, path, name, kbd, ptr
 
-    [ -z "$IN" ] && { echo "Specify a macro file with -i"; exit 1; }
-    [ -f "$IN" ] || { echo "No such file: $IN"; exit 1; }
-    require_nonnegative_integer "loops (-l)" "$LOOPS"
-    require_positive_number "speed (-s)" "$SPEED"
-    require_nonnegative_number "start delay (-d)" "$START_DELAY"
 
-    local PLAY_SESSION="" X11_WINID=""
-    if [ -n "$WINCLASS" ]; then
-        PLAY_SESSION="$(session_type)"
-        case "$PLAY_SESSION" in
-            x11)
-                require_xdotool
-                require_ydotool   # input injection also uses ydotool
-                X11_WINID="$(x11_find_window "$WINCLASS")"
-                [ -z "$X11_WINID" ] && { echo "No X11 window found matching '$WINCLASS'."; exit 1; }
-                x11_activate_window "$X11_WINID"
-                ;;
-            wayland)
-                require_ydotool
-                require_hyprctl
-                ;;
-            *)
-                echo "Couldn't determine session type (no \$DISPLAY or \$WAYLAND_DISPLAY set)."
-                exit 1
-                ;;
-        esac
-    else
-        require_ydotool
-    fi
+def _bit(buf, n):
+    return n // 8 < len(buf) and bool(buf[n // 8] >> (n % 8) & 1)
 
-    local fmt; fmt="$(guess_format "$IN")"
-    local TSV_FILE="$IN"
-    if [ "$fmt" = "json" ]; then
-        require_jq
-        TMP_TSV="$(mktemp)"
-        jq -r '
-            if .type=="BUTTON" then [.t,.type,.button,.state]
-            elif .type=="MOVE" then [.t,.type,(.dx|tostring),(.dy|tostring)]
-            elif .type=="KEY" then [.t,.type,(.code|tostring),.state]
-            else empty end | @tsv
-        ' "$IN" > "$TMP_TSV"
-        TSV_FILE="$TMP_TSV"
-        trap 'rm -f "$TMP_TSV"' EXIT
-    fi
 
-    echo "Playing '$IN' ($fmt) — loops=$([ "$LOOPS" -eq 0 ] && echo infinite || echo "$LOOPS") speed=${SPEED}x"
-    if [ "$PLAY_SESSION" = "x11" ]; then
-        echo "Target: '$WINCLASS' (id $X11_WINID) — focusing it now."
-    elif [ -n "$WINCLASS" ]; then
-        echo "Window scope: '$WINCLASS' — focusing it now."
-        focus_window_by_class "$WINCLASS"
-    else
-        echo "Starting in ${START_DELAY}s — switch to your target window now."
-        sleep "$START_DELAY"
-    fi
+def scan_devices(kbd=True, ptr=True):
+    devs, denied = [], 0
+    for path in sorted(glob.glob("/dev/input/event*")):
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        except PermissionError:
+            denied += 1
+            continue
+        except OSError:
+            continue
+        try:
+            nb = bytearray(256)
+            fcntl.ioctl(fd, EVIOCGNAME, nb)
+            name = nb.split(b"\0")[0].decode(errors="replace")
 
-    play_once() {
-        local prev_ts=0
-        while IFS=$'\t' read -r ts type a b; do
-            local wait_s
-						wait_s=$(awk -v ts="$ts" -v prev="$prev_ts" -v speed="$SPEED" 'BEGIN {d=(ts-prev)/speed; if (d<0) d=0; printf "%.3f", d}')
-            sleep "$wait_s"
-            prev_ts="$ts"
+            def caps(ev, size):
+                b = bytearray(size)
+                fcntl.ioctl(fd, EVIOCGBIT(ev, size), b)
+                return b
 
-            # Wait for the target window to have focus if window scoping is active
-            if [ -n "$PLAY_SESSION" ]; then
-                if [ "$PLAY_SESSION" = "x11" ]; then
-                    x11_wait_for_window_focus "$X11_WINID"
-                else
-                    wait_for_window_focus "$WINCLASS"
-                fi
-            fi
+            types, keys = caps(0, 4), caps(EV_KEY, 96)
+            is_kbd = _bit(types, EV_KEY) and _bit(keys, 30) and _bit(keys, 28)
+            rel = caps(EV_REL, 2) if _bit(types, EV_REL) else b""
+            absb = caps(EV_ABS, 8) if _bit(types, EV_ABS) else b""
+            is_ptr = (_bit(rel, REL_X) and _bit(rel, REL_Y) and _bit(keys, 0x110)) or (
+                _bit(absb, ABS_X) and _bit(absb, ABS_Y)
+                and (_bit(keys, 0x110) or _bit(keys, 0x145) or _bit(keys, 0x14A)))
+        except OSError:
+            os.close(fd)
+            continue
+        if name.startswith("macro-py") or not ((kbd and is_kbd) or (ptr and is_ptr)):
+            os.close(fd)
+            continue
+        devs.append(Dev(fd, path, name, is_kbd, is_ptr))
+    return devs, denied
 
-            # All input injection uses ydotool (kernel-level) regardless of session
-            case "$type" in
-                BUTTON)
-                    local base
-                    case "$a" in
-                        left)   base=0x00 ;;
-                        right)  base=0x01 ;;
-                        middle) base=0x02 ;;
-                        *) continue ;;
-                    esac
-                    if [ "$b" = "press" ]; then
-                        ydotool click "$(( base | 0x40 ))"
-                    else
-                        ydotool click "$(( base | 0x80 ))"
-                    fi
-                    ;;
-                MOVE)
-                    ydotool mousemove -- "$a" "$b"
-                    ;;
-                KEY)
-                    if [ "$b" = "press" ]; then
-                        ydotool key "${a}:1"
-                    else
-                        ydotool key "${a}:0"
-                    fi
-                    ;;
-            esac
-        done < "$TSV_FILE"
-    }
 
-    local i=0
-    while true; do
-        play_once
-        i=$((i + 1))
-        [ "$LOOPS" -ne 0 ] && [ "$i" -ge "$LOOPS" ] && break
-    done
-    echo "Playback finished ($i loop(s))."
-}
+def close_devices(devs):
+    for d in devs:
+        with contextlib.suppress(OSError):
+            os.close(d.fd)
 
-# ---------------------------------------------------------------------------
-# convert mode — mac <-> json
-# ---------------------------------------------------------------------------
-mode_convert() {
-    local IN="" OUT="" FROM="" TO=""
-    while getopts "i:o:f:t:h" opt; do
-        case "$opt" in
-            i) IN="$OPTARG" ;;
-            o) OUT="$OPTARG" ;;
-            f) FROM="$OPTARG" ;;
-            t) TO="$OPTARG" ;;
-            h) usage ;;
-            *) usage ;;
-        esac
-    done
-    [ -z "$IN" ] && { echo "Specify input with -i"; exit 1; }
-    [ -z "$OUT" ] && { echo "Specify output with -o"; exit 1; }
-    [ -f "$IN" ] || { echo "No such file: $IN"; exit 1; }
 
-    require_jq
-    [ -z "$FROM" ] && FROM="$(guess_format "$IN")"
-    [ -z "$TO" ] && TO="$(guess_format "$OUT")"
-    case "$FROM" in json|mac) ;; *) echo "Unknown input format '$FROM' (use json or mac)." >&2; exit 1 ;; esac
-    case "$TO" in json|mac) ;; *) echo "Unknown output format '$TO' (use json or mac)." >&2; exit 1 ;; esac
+def drain(devs):
+    for d in devs:
+        with contextlib.suppress(OSError):
+            while os.read(d.fd, 4096):
+                pass
 
-    if [ "$FROM" = "$TO" ]; then
-        cp "$IN" "$OUT"
-    elif [ "$FROM" = "mac" ] && [ "$TO" = "json" ]; then
-        awk -F'\t' '
-            $2=="BUTTON" { printf "{\"t\":%s,\"type\":\"BUTTON\",\"button\":\"%s\",\"state\":\"%s\"}\n", $1,$3,$4 }
-            $2=="MOVE"   { printf "{\"t\":%s,\"type\":\"MOVE\",\"dx\":%s,\"dy\":%s}\n", $1,$3,$4 }
-            $2=="KEY"    { printf "{\"t\":%s,\"type\":\"KEY\",\"code\":%s,\"state\":\"%s\"}\n", $1,$3,$4 }
-        ' "$IN" > "$OUT"
-    elif [ "$FROM" = "json" ] && [ "$TO" = "mac" ]; then
-        jq -r '
-            if .type=="BUTTON" then [.t,.type,.button,.state]
-            elif .type=="MOVE" then [.t,.type,(.dx|tostring),(.dy|tostring)]
-            elif .type=="KEY" then [.t,.type,(.code|tostring),.state]
-            else empty end | @tsv
-        ' "$IN" > "$OUT"
-    else
-        echo "Don't know how to convert '$FROM' -> '$TO'"; exit 1
-    fi
-    echo "Converted '$IN' ($FROM) -> '$OUT' ($TO)."
-}
 
-# ---------------------------------------------------------------------------
-# trim mode — JSON only; convert a .mac file first if needed
-# ---------------------------------------------------------------------------
-mode_trim() {
-    local IN="" OUT="" START="0" END=""
-    while getopts "i:o:s:e:h" opt; do
-        case "$opt" in
-            i) IN="$OPTARG" ;;
-            o) OUT="$OPTARG" ;;
-            s) START="$OPTARG" ;;
-            e) END="$OPTARG" ;;
-            h) usage ;;
-            *) usage ;;
-        esac
-    done
-    [ -z "$IN" ] && { echo "Specify input with -i"; exit 1; }
-    [ -z "$OUT" ] && { echo "Specify output with -o"; exit 1; }
-    [ -f "$IN" ] || { echo "No such file: $IN"; exit 1; }
-    require_jq
-    require_nonnegative_number "start (-s)" "$START"
-    [ -z "$END" ] || require_nonnegative_number "end (-e)" "$END"
-    if [ -n "$END" ] && ! awk "BEGIN {exit !($END >= $START)}"; then
-        echo "end (-e) must be greater than or equal to start (-s)." >&2
-        exit 1
-    fi
+class HotkeyThread(threading.Thread):
+    def __init__(self, devs, bindings, callback):
+        super().__init__(daemon=True)
+        self.devs, self.bindings, self.callback = devs, bindings, callback
+        self.halt = threading.Event()
 
-    if [ "$(guess_format "$IN")" != "json" ]; then
-        echo "trim only works on JSON macros — convert first:"
-        echo "  ./macro convert -i '$IN' -o '${IN%.*}.json'"
-        exit 1
-    fi
-
-    # Sort by timestamp before filtering to avoid negative relative times
-    if [ -z "$END" ]; then
-        jq -c 'sort_by(.t) | .[] | select(.t >= $s) | .t = (.t - $s)' --argjson s "$START" "$IN" > "$OUT"
-    else
-        jq -c 'sort_by(.t) | .[] | select(.t >= $s and .t <= $e) | .t = (.t - $s)' \
-            --argjson s "$START" --argjson e "$END" "$IN" > "$OUT"
-    fi
-    local count; count=$(wc -l < "$OUT")
-    echo "Trimmed to [$START, ${END:-end}] -> '$OUT' ($count events)."
-}
-
-# ---------------------------------------------------------------------------
-# edit mode — interactive editor for a JSON macro
-# ---------------------------------------------------------------------------
-mode_edit() {
-    local IN=""
-    while getopts "i:h" opt; do
-        case "$opt" in
-            i) IN="$OPTARG" ;;
-            h) usage ;;
-            *) usage ;;
-        esac
-    done
-    [ -z "$IN" ] && { echo "Specify a macro file with -i"; exit 1; }
-    [ -f "$IN" ] || { echo "No such file: $IN"; exit 1; }
-    require_jq
-
-    if [ "$(guess_format "$IN")" != "json" ]; then
-        echo "edit only works on JSON macros — convert first:"
-        echo "  ./macro convert -i '$IN' -o '${IN%.*}.json'"
-        exit 1
-    fi
-
-    # Load events into a bash array, one JSON object string per element.
-    local -a events=()
-    while IFS= read -r line; do
-        [ -n "$line" ] && events+=("$line")
-    done < "$IN"
-
-    local dirty=0
-    local pending_quit=0
-
-    print_list() {
-        local i=1
-        for e in "${events[@]}"; do
-            printf '%3d  %s\n' "$i" "$(echo "$e" | jq -c '.')"
-            i=$((i + 1))
-        done
-    }
-
-    echo "Editing '$IN' — ${#events[@]} events loaded. Type 'list' to see them, or 'q' to quit."
-    print_list
-
-    while true; do
-        printf '> '
-        read -r cmd arg1 arg2 arg3 || break
-        case "$cmd" in
-            q|quit|exit) ;;
-            *) pending_quit=0 ;;
-        esac
-        case "$cmd" in
-            list)
-                print_list ;;
-            d)
-                if [ -n "$arg1" ] && [ -z "$arg2" ]; then
-                    local idx=$((arg1 - 1))
-                    if [ "$idx" -ge 0 ] && [ "$idx" -lt "${#events[@]}" ]; then
-                        unset 'events[idx]'
-                        events=("${events[@]}")
-                        dirty=1
-                        echo "Deleted event $arg1."
-                    else
-                        echo "No such event: $arg1"
-                    fi
-                elif [ -n "$arg1" ] && [ -n "$arg2" ]; then
-                    local from=$((arg1 - 1)) to=$((arg2 - 1))
-                    if [ "$from" -lt 0 ] || [ "$to" -ge "${#events[@]}" ] || [ "$from" -gt "$to" ]; then
-                        echo "Invalid range: $arg1-$arg2 (valid: 1-${#events[@]}, start <= end)"
-                    else
-                        local -a kept=()
-                        local i=0
-                        for e in "${events[@]}"; do
-                            if [ "$i" -lt "$from" ] || [ "$i" -gt "$to" ]; then
-                                kept+=("$e")
-                            fi
-                            i=$((i + 1))
-                        done
-                        events=("${kept[@]}")
-                        dirty=1
-                        echo "Deleted events $arg1-$arg2."
-                    fi
-                else
-                    echo "Usage: d N   or   d N M"
-                fi
-                ;;
-            t)
-                if [ -n "$arg1" ] && [ -n "$arg2" ] && [[ "$arg1" =~ ^[0-9]+$ ]] && [[ "$arg2" =~ ^[-+]?[0-9]+([.][0-9]+)?$ ]]; then
-                    local idx=$((arg1 - 1))
-                    if [ "$idx" -ge 0 ] && [ "$idx" -lt "${#events[@]}" ]; then
-                        events[idx]="$(echo "${events[idx]}" | jq -c --argjson t "$arg2" '.t = $t')"
-                        dirty=1
-                        echo "Set event $arg1 timestamp to $arg2."
-                    else
-                        echo "No such event: $arg1"
-                    fi
-                else
-                    echo "Usage: t N SECS"
-                fi
-                ;;
-            shift)
-                if [ -n "$arg1" ] && [ -n "$arg2" ] && [[ "$arg1" =~ ^[0-9]+$ ]] && [[ "$arg2" =~ ^[-+]?[0-9]+([.][0-9]+)?$ ]]; then
-                    local from=$((arg1 - 1))
-                    local -a newevents=()
-                    local i=0
-                    for e in "${events[@]}"; do
-                        if [ "$i" -ge "$from" ]; then
-                            e="$(echo "$e" | jq -c --argjson d "$arg2" '.t = (.t + $d)')"
-                        fi
-                        newevents+=("$e")
-                        i=$((i + 1))
-                    done
-                    events=("${newevents[@]}")
-                    dirty=1
-                    echo "Shifted events $arg1..end by ${arg2}s."
-                else
-                    echo "Usage: shift N SECS"
-                fi
-                ;;
-            scale)
-                if [ -n "$arg1" ] && [[ "$arg1" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] && awk "BEGIN {exit !($arg1 > 0)}"; then
-                    local from=0
-                    if [ -n "$arg2" ] && [[ "$arg2" =~ ^[0-9]+$ ]]; then
-                        from=$((arg2 - 1))
-                        # Bounds check
-                        if [ "$from" -ge "${#events[@]}" ]; then
-                            echo "No such event: $arg2"
-                            continue
-                        fi
-                    elif [ -n "$arg2" ]; then
-                        echo "Usage: scale FACTOR [N]"
+    def run(self):
+        fds = {d.fd for d in self.devs}
+        pressed = set()
+        while not self.halt.is_set() and fds:
+            try:
+                ready, _, _ = select.select(list(fds), [], [], 0.2)
+            except (OSError, ValueError):
+                break
+            for fd in ready:
+                try:
+                    data = os.read(fd, EV_SIZE * 64)
+                except BlockingIOError:
+                    continue
+                except OSError:
+                    fds.discard(fd)
+                    continue
+                for off in range(0, len(data) - EV_SIZE + 1, EV_SIZE):
+                    _, _, typ, code, val = struct.unpack_from(EV_FMT, data, off)
+                    if typ != EV_KEY or code >= 0x100 or val == 2:
                         continue
-                    fi
-                    local -a newevents=()
-                    local i=0
-                    for e in "${events[@]}"; do
-                        if [ "$i" -ge "$from" ]; then
-                            e="$(echo "$e" | jq -c --argjson f "$arg1" '.t = (.t * $f)')"
-                        fi
-                        newevents+=("$e")
-                        i=$((i + 1))
-                    done
-                    events=("${newevents[@]}")
-                    dirty=1
-                    echo "Scaled timestamps from event $((from + 1)) onward by ${arg1}x."
-                else
-                    echo "Usage: scale FACTOR [N]"
-                fi
-                ;;
-            save)
-                local dest="${arg1:-$IN}"
-                : > "$dest"
-                for e in "${events[@]}"; do
-                    echo "$e" >> "$dest"
-                done
-                echo "Saved ${#events[@]} events to '$dest'."
-                [ "$dest" = "$IN" ] && dirty=0
-                ;;
-            q|quit|exit)
-                if [ "$dirty" -eq 1 ] && [ "$pending_quit" -eq 0 ]; then
-                    echo "You have unsaved changes. 'save' first, or run '$cmd' again to discard."
-                    pending_quit=1
-                else
-                    break
-                fi
-                ;;
-            "") ;;
-            *) echo "Unknown command '$cmd'. Try: list, d, t, shift, scale, save, q" ;;
-        esac
-    done
-}
+                    (pressed.add if val else pressed.discard)(code)
+                    for name, combo in self.bindings.items():
+                        if combo.feed(pressed, code, val):
+                            self.callback(name)
 
-case "$MODE" in
-    click)   mode_click "$@" ;;
-    record)  mode_record "$@" ;;
-    play)    mode_play "$@" ;;
-    convert) mode_convert "$@" ;;
-    trim)    mode_trim "$@" ;;
-    edit)    mode_edit "$@" ;;
-    -h|--help|help|"") usage ;;
-    *) echo "Unknown mode '$MODE' (use click, record, play, convert, trim, or edit)"; exit 1 ;;
-esac
+    def shutdown(self):
+        self.halt.set()
+        self.join(1.0)
+        close_devices(self.devs)
+
+
+def start_hotkeys(bindings, callback):
+    devs, denied = scan_devices(kbd=True, ptr=False)
+    if not devs:
+        warn("hotkeys unavailable (" + ("no permission to read /dev/input" if denied else "no keyboards found")
+             + "); Ctrl+C still stops")
+        return None
+    t = HotkeyThread(devs, {n: Combo(s) for n, s in bindings.items()}, callback)
+    t.start()
+    return t
+
+
+# ---------------------------------------------------------------------------
+# uinput injection
+# ---------------------------------------------------------------------------
+class UInput:
+    def __init__(self, name, keys=(), rels=(), abs_axes=()):
+        self.fd = None
+        for path in ("/dev/uinput", "/dev/input/uinput"):
+            try:
+                self.fd = os.open(path, os.O_WRONLY)
+                break
+            except FileNotFoundError:
+                continue
+            except PermissionError:
+                raise MacroError(f"no permission to open {path}. Run with sudo, or see `macro --help` for a udev rule.")
+        if self.fd is None:
+            raise MacroError("/dev/uinput not found - try: sudo modprobe uinput")
+        fd = self.fd
+        if keys:
+            fcntl.ioctl(fd, UI_SET_EVBIT, EV_KEY)
+            for k in keys:
+                fcntl.ioctl(fd, UI_SET_KEYBIT, k)
+        if rels:
+            fcntl.ioctl(fd, UI_SET_EVBIT, EV_REL)
+            for r in rels:
+                fcntl.ioctl(fd, UI_SET_RELBIT, r)
+        if abs_axes:
+            fcntl.ioctl(fd, UI_SET_EVBIT, EV_ABS)
+            for a in abs_axes:
+                fcntl.ioctl(fd, UI_SET_ABSBIT, a)
+        fcntl.ioctl(fd, UI_DEV_SETUP, struct.pack("=HHHH80sI", 3, 0x1209, 0x0001, 1, name.encode()[:79], 0))
+        for a in abs_axes:
+            fcntl.ioctl(fd, UI_ABS_SETUP, struct.pack("=H2x6i", a, 0, 0, ABS_RANGE, 0, 0, 0))
+        fcntl.ioctl(fd, UI_DEV_CREATE)
+
+    def send(self, events):
+        data = b"".join(struct.pack(EV_FMT, 0, 0, t, c, v) for t, c, v in events)
+        os.write(self.fd, data + struct.pack(EV_FMT, 0, 0, EV_SYN, 0, 0))
+
+    def close(self):
+        if self.fd is not None:
+            with contextlib.suppress(OSError):
+                fcntl.ioctl(self.fd, UI_DEV_DESTROY)
+            with contextlib.suppress(OSError):
+                os.close(self.fd)
+            self.fd = None
+
+
+class Injector:
+    """Emits macro events. Always releases held keys/buttons on exit (even on Ctrl+C)."""
+
+    def __init__(self, stop, need_abs=False, bounds=None, dry=False, verbose=False, session=None):
+        self.stop, self.bounds, self.dry, self.verbose, self.session = stop, bounds, dry, verbose, session
+        self.held_keys, self.held_btns = set(), set()
+        self.main = self.absd = None
+        if need_abs and not bounds:
+            raise MacroError("cannot determine screen size for absolute positions; pass --screen WxH[+X+Y]")
+        if not dry:
+            try:
+                self.main = UInput(VIRT, keys=list(range(1, 0x100)) + list(BTN_MAP.values()),
+                                   rels=[REL_X, REL_Y, REL_WHEEL, REL_HWHEEL, REL_WHEEL_HI, REL_HWHEEL_HI])
+                if need_abs:
+                    self.absd = UInput(VIRT + "-abs", keys=[0x110], abs_axes=[ABS_X, ABS_Y])
+            except Exception:
+                self.close()
+                raise
+            time.sleep(0.5)  # give the compositor time to pick the devices up
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+    def close(self):
+        with contextlib.suppress(Exception):
+            self.release_all()
+        for d in (self.main, self.absd):
+            if d:
+                d.close()
+        self.main = self.absd = None
+
+    def release_all(self):
+        if not self.main:
+            return
+        ev = [(EV_KEY, c, 0) for c in sorted(self.held_keys)] + [(EV_KEY, c, 0) for c in sorted(self.held_btns)]
+        if ev:
+            self.main.send(ev)
+        self.held_keys.clear()
+        self.held_btns.clear()
+
+    # -- primitives -------------------------------------------------------
+    def _move_abs(self, x, y):
+        ox, oy, w, h = self.bounds
+        ax = round((min(max(x, ox), ox + w - 1) - ox + 0.5) / w * ABS_RANGE)
+        ay = round((min(max(y, oy), oy + h - 1) - oy + 0.5) / h * ABS_RANGE)
+        self.absd.send([(EV_ABS, ABS_X, ax), (EV_ABS, ABS_Y, ay)])
+
+    def _type(self, text, delay):
+        for ch in text:
+            k = char_to_key(ch)
+            if not k:
+                warn(f"TYPE: cannot type {ch!r} (US layout only); skipped")
+                continue
+            code, shift = k
+            if shift:
+                self.main.send([(EV_KEY, 42, 1)])
+            self.main.send([(EV_KEY, code, 1)])
+            self.main.send([(EV_KEY, code, 0)])
+            if shift:
+                self.main.send([(EV_KEY, 42, 0)])
+            if delay and self.stop.wait(delay):
+                raise Stopped()
+
+    def emit(self, e, off=(0, 0)):
+        ty = e["type"]
+        if self.verbose or self.dry:
+            print(fmt_event(e))
+        if self.dry:
+            return
+        if ty == "BUTTON":
+            code = BTN_MAP[e["button"]]
+            (self.held_btns.add if e["state"] == "press" else self.held_btns.discard)(code)
+            self.main.send([(EV_KEY, code, 1 if e["state"] == "press" else 0)])
+        elif ty == "KEY":
+            (self.held_keys.add if e["state"] == "press" else self.held_keys.discard)(e["code"])
+            self.main.send([(EV_KEY, e["code"], 1 if e["state"] == "press" else 0)])
+        elif ty == "MOVE":
+            ev = [(EV_REL, REL_X, e["dx"])] * bool(e["dx"]) + [(EV_REL, REL_Y, e["dy"])] * bool(e["dy"])
+            if ev:
+                self.main.send(ev)
+        elif ty == "MOVETO":
+            self._move_abs(e["x"] + off[0], e["y"] + off[1])
+        elif ty == "SCROLL":
+            ev = []
+            if e.get("dy"):
+                ev += [(EV_REL, REL_WHEEL, e["dy"]), (EV_REL, REL_WHEEL_HI, e["dy"] * 120)]
+            if e.get("dx"):
+                ev += [(EV_REL, REL_HWHEEL, e["dx"]), (EV_REL, REL_HWHEEL_HI, e["dx"] * 120)]
+            if ev:
+                self.main.send(ev)
+        elif ty == "TYPE":
+            self._type(e["text"], e.get("delay", 0.02))
+
+    def press_release(self, button, hold):
+        self.emit({"t": 0, "type": "BUTTON", "button": button, "state": "press"})
+        if hold and self.stop.wait(hold):
+            raise Stopped()
+        self.emit({"t": 0, "type": "BUTTON", "button": button, "state": "release"})
+
+
+# ---------------------------------------------------------------------------
+# playback engine
+# ---------------------------------------------------------------------------
+def play_once(events, inj, gate, stop, session, *, speed, jitter, off, limit):
+    start = time.monotonic()
+    shift = virt = prev_t = 0.0
+    for e in events:
+        gap = max(0.0, e["t"] - prev_t) / speed
+        if jitter:
+            gap *= random.uniform(1 - jitter, 1 + jitter)
+        prev_t = e["t"]
+        virt += gap
+        wait_until(start + shift + virt, stop)  # absolute deadlines: no drift
+        if limit and time.monotonic() >= limit:
+            raise Stopped("max duration reached")
+        if gate:
+            shift += gate.wait()
+        if e["type"] == "WAIT_WINDOW":
+            if inj.dry:
+                inj.emit(e)
+            else:
+                print(f"Waiting for window '{e['class']}'...")
+                shift += session.wait_focused(e["class"], e.get("timeout", 10), stop)
+            continue
+        inj.emit(e, off)
+
+
+def run_macro(events, inj, gate, stop, session, *, speed=1.0, loops=1, gap=0.0, jitter=0.0,
+              pos_jitter=0, max_duration=0.0):
+    if not events:
+        raise MacroError("macro is empty")
+    began = time.monotonic()
+    limit = began + max_duration if max_duration else 0
+    n = 0
+    while True:
+        off = (random.randint(-pos_jitter, pos_jitter), random.randint(-pos_jitter, pos_jitter)) if pos_jitter else (0, 0)
+        play_once(events, inj, gate, stop, session, speed=speed, jitter=jitter, off=off, limit=limit)
+        n += 1
+        print(f"loop {n} done" + ("" if loops else " (infinite)"))
+        if loops and n >= loops:
+            return n
+        wait_until(time.monotonic() + gap, stop)
+
+
+def install_signals(stop):
+    def handler(signum, _frame):
+        stop.set()
+        if signum == signal.SIGINT:
+            signal.signal(signal.SIGINT, signal.SIG_DFL)  # 2nd Ctrl+C kills hard
+
+    for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        with contextlib.suppress(ValueError):
+            signal.signal(s, handler)
+
+
+def player_setup(events, screen, window, stop, verbose=False, dry=False):
+    session = detect_session()
+    need_abs = any(e["type"] == "MOVETO" for e in events)
+    bounds = resolve_bounds(session, screen) if need_abs else None
+    gate = None
+    if window:
+        session.focus(window)
+        gate = FocusGate(session, window, stop)
+    return session, bounds, need_abs, gate
+
+
+def quick_play(events, speed=1.0, delay=3, stop_key=DEFAULT_STOP):
+    """Used by the editor's `replay`."""
+    stop = threading.Event()
+    session, bounds, need_abs, _ = player_setup(events, None, None, stop)
+    hk = start_hotkeys({"stop": stop_key}, lambda _n: stop.set())
+    old = signal.getsignal(signal.SIGINT)
+    try:
+        install_signals(stop)
+        countdown(delay)
+        with Injector(stop, need_abs, bounds, session=session) as inj:
+            run_macro(events, inj, None, stop, session, speed=speed)
+    except Stopped as s:
+        print(f"Stopped{': ' + str(s) if str(s) else ''}.")
+    finally:
+        signal.signal(signal.SIGINT, old)
+        if hk:
+            hk.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# commands
+# ---------------------------------------------------------------------------
+def cmd_click(a):
+    stop, active = threading.Event(), threading.Event()
+    session = detect_session()
+    bounds = resolve_bounds(session, a.screen) if a.at else None
+    gate = None
+    if a.window:
+        session.focus(a.window)
+        gate = FocusGate(session, a.window, stop)
+    bindings = {"stop": a.stop_key}
+    if a.toggle_key:
+        bindings["toggle"] = a.toggle_key
+    else:
+        active.set()
+
+    def on_key(name):
+        if name == "stop":
+            stop.set()
+        elif active.is_set():
+            active.clear()
+            print("Paused.")
+        else:
+            active.set()
+            print("Running.")
+
+    hk = start_hotkeys(bindings, on_key)
+    install_signals(stop)
+    base = a.interval / 1000
+    n = 0
+    try:
+        if a.toggle_key:
+            print(f"Press {a.toggle_key} to start/pause, {a.stop_key} to quit.")
+        elif not a.window:
+            countdown(a.delay)
+        with Injector(stop, bool(a.at), bounds, session=session) as inj:
+            print(f"Clicking ({a.button}, every {a.interval:g}ms). Stop: {a.stop_key} or Ctrl+C.")
+            nxt = time.monotonic()
+            while True:
+                if not active.is_set():
+                    if stop.wait(0.1):
+                        raise Stopped()
+                    nxt = time.monotonic()
+                    continue
+                if gate:
+                    nxt += gate.wait()
+                if a.at:
+                    off = (random.randint(-a.pos_jitter, a.pos_jitter), random.randint(-a.pos_jitter, a.pos_jitter))
+                    inj.emit({"t": 0, "type": "MOVETO", "x": a.at[0], "y": a.at[1]}, off)
+                for k in range(2 if a.double else 1):
+                    inj.press_release(a.button, a.hold / 1000)
+                    if a.double and k == 0 and stop.wait(0.04):
+                        raise Stopped()
+                n += 1
+                if a.count and n >= a.count:
+                    break
+                nxt += base * (random.uniform(1 - a.jitter, 1 + a.jitter) if a.jitter else 1)
+                wait_until(nxt, stop)
+    except Stopped:
+        pass
+    finally:
+        if hk:
+            hk.shutdown()
+    print(f"Done: {n} click(s).")
+
+
+def cmd_record(a):
+    session = detect_session()
+    devs, denied = scan_devices(kbd=True, ptr=not a.no_mouse)
+    if not devs:
+        raise MacroError("cannot read /dev/input/event* (permission denied) - run with sudo or join the 'input' group"
+                         if denied else "no input devices found")
+    cur = session.cursor()
+    mm = a.move
+    if mm == "auto":
+        mm = "abs" if cur else "rel"
+    elif mm == "abs" and not cur:
+        close_devices(devs)
+        raise MacroError("--move abs needs a cursor source (Hyprland, or X11 with libX11)")
+    stop_combo = Combo(a.stop_key)
+    start_combo = Combo(a.start_key) if a.start_key else None
+    out = a.output or f"macro_{int(time.time())}.{a.format or 'json'}"
+    fmt = a.format or guess_format(out)
+    sample = a.sample_ms / 1000
+
+    events, pressed, acc = [], set(), [0, 0]
+    st = {"rec": start_combo is None, "t0": None, "pend": None, "last": None}
+    fds = {d.fd for d in devs}
+
+    def begin(now):
+        st["rec"], st["t0"] = True, now
+        if mm == "abs" and cur:
+            p = session.cursor() or cur
+            events.append({"t": 0.0, "type": "MOVETO", "x": p[0], "y": p[1]})
+            st["last"] = p
+
+    def flush(now):
+        if st["pend"] is None:
+            return
+        if mm == "rel":
+            if acc[0] or acc[1]:
+                events.append({"t": round(st["pend"] - st["t0"], 4), "type": "MOVE", "dx": acc[0], "dy": acc[1]})
+            acc[0] = acc[1] = 0
+        elif mm == "abs":
+            p = session.cursor()
+            if p and p != st["last"]:
+                events.append({"t": round(now - st["t0"], 4), "type": "MOVETO", "x": p[0], "y": p[1]})
+                st["last"] = p
+        st["pend"] = None
+
+    drain(devs)
+    if start_combo:
+        print(f"Press {a.start_key} to start recording, {a.stop_key} to stop.")
+    else:
+        countdown(a.delay)
+        drain(devs)
+        begin(time.monotonic())
+        print(f"Recording ({mm} movement) -> {out}. Press {a.stop_key} or Ctrl+C to stop.")
+    finished = False
+    try:
+        while not finished and fds:
+            now = time.monotonic()
+            tmo = None
+            if st["pend"] is not None:
+                tmo = max(0.0, st["pend"] + sample - now)
+            if a.timeout and st["t0"]:
+                left = max(0.0, st["t0"] + a.timeout - now)
+                tmo = left if tmo is None else min(tmo, left)
+            ready, _, _ = select.select(list(fds), [], [], tmo)
+            now = time.monotonic()
+            for fd in ready:
+                try:
+                    data = os.read(fd, EV_SIZE * 128)
+                except BlockingIOError:
+                    continue
+                except OSError:
+                    fds.discard(fd)
+                    continue
+                for off in range(0, len(data) - EV_SIZE + 1, EV_SIZE):
+                    _, _, typ, code, val = struct.unpack_from(EV_FMT, data, off)
+                    if typ == EV_KEY and code < 0x100:
+                        if val == 2:
+                            continue
+                        (pressed.add if val else pressed.discard)(code)
+                        if not st["rec"]:
+                            if start_combo.feed(pressed, code, val):
+                                begin(now)
+                                print("Recording...")
+                            continue
+                        if stop_combo.feed(pressed, code, val):
+                            finished = True
+                            break
+                        if not a.no_keys:
+                            flush(now)
+                            events.append({"t": round(now - st["t0"], 4), "type": "KEY", "code": code,
+                                           "state": "press" if val else "release"})
+                    elif not st["rec"] or a.no_mouse:
+                        continue
+                    elif typ == EV_KEY and code in BTN_NAME and val != 2:
+                        if st["pend"] is not None and mm == "abs":
+                            time.sleep(0.002)
+                        flush(now)
+                        events.append({"t": round(now - st["t0"], 4), "type": "BUTTON", "button": BTN_NAME[code],
+                                       "state": "press" if val else "release"})
+                    elif typ == EV_REL and code in (REL_X, REL_Y):
+                        if mm == "none":
+                            continue
+                        if st["pend"] is None:
+                            st["pend"] = now
+                        if mm == "rel":
+                            acc[code] += val
+                    elif typ == EV_REL and code in (REL_WHEEL, REL_HWHEEL):
+                        flush(now)
+                        ev = {"t": round(now - st["t0"], 4), "type": "SCROLL", "dx": 0, "dy": 0}
+                        ev["dy" if code == REL_WHEEL else "dx"] = val
+                        events.append(ev)
+                    elif typ == EV_ABS and mm == "abs" and st["pend"] is None:
+                        st["pend"] = now
+                if finished:
+                    break
+            if st["pend"] is not None and time.monotonic() - st["pend"] >= sample:
+                flush(time.monotonic())
+            if a.timeout and st["t0"] and time.monotonic() - st["t0"] >= a.timeout:
+                finished = True
+    except KeyboardInterrupt:
+        print()
+    finally:
+        close_devices(devs)
+    if not st["rec"]:
+        raise MacroError("recording never started")
+    flush(time.monotonic())
+    while events and events[-1]["type"] == "KEY" and events[-1]["code"] in stop_combo.codes:
+        events.pop()  # don't record the stop hotkey itself
+    events = balance(events)
+    bounds = session.bounds() if mm == "abs" else None
+    meta = {"type": "META", "v": FORMAT_VERSION, "created": datetime.now().isoformat(timespec="seconds"),
+            "session": session.name, "screen": list(bounds) if bounds else None, "move": mm}
+    save_macro(out, meta, events, fmt)
+    dur = events[-1]["t"] if events else 0
+    print(f"Recorded {len(events)} events ({dur:.1f}s) to '{out}'.")
+
+
+def cmd_play(a):
+    meta, events = load_macro(a.input)
+    if a.from_event or a.to_event:
+        i0 = (a.from_event or 1) - 1
+        i1 = a.to_event or len(events)
+        if not (0 <= i0 < i1 <= len(events)):
+            raise MacroError(f"event range must be within 1..{len(events)}")
+        events = make_slice(events, i0, i1)
+    if a.dry_run:
+        print(f"# dry run: {len(events)} events at {a.speed}x, {a.loops or 'infinite'} loop(s)")
+        for e in events:
+            e2 = dict(e, t=round(e["t"] / a.speed, 4))
+            print(fmt_event(e2))
+        return
+    stop = threading.Event()
+    session, bounds, need_abs, gate = player_setup(events, a.screen, a.window, stop)
+    if need_abs and meta.get("screen") and bounds and list(bounds) != list(meta["screen"]):
+        warn(f"macro was recorded at screen {meta['screen']} but current screen is {list(bounds)}; "
+             "positions may be off")
+    hk = start_hotkeys({"stop": a.stop_key}, lambda _n: stop.set())
+    install_signals(stop)
+    try:
+        if not a.window:
+            countdown(a.delay)
+        print(f"Playing '{a.input}' ({len(events)} events, {a.speed}x). Stop: {a.stop_key} or Ctrl+C.")
+        with Injector(stop, need_abs, bounds, verbose=a.verbose, session=session) as inj:
+            run_macro(events, inj, gate, stop, session, speed=a.speed, loops=a.loops, gap=a.gap,
+                      jitter=a.jitter, pos_jitter=a.pos_jitter, max_duration=a.max_duration)
+        print("Playback finished.")
+    except Stopped as s:
+        print(f"Stopped{': ' + str(s) if str(s) else ''}.")
+    finally:
+        if hk:
+            hk.shutdown()
+
+
+def cmd_convert(a):
+    meta, events = load_macro(a.input)
+    fmt = a.to or guess_format(a.output)
+    save_macro(a.output, meta, events, fmt)
+    print(f"Converted '{a.input}' -> '{a.output}' ({fmt}, {len(events)} events).")
+
+
+def cmd_trim(a):
+    meta, events = load_macro(a.input)
+    end = a.end if a.end is not None else float("inf")
+    if end < a.start:
+        raise MacroError("end must be >= start")
+    idx = [i for i, e in enumerate(events) if a.start <= e["t"] <= end]
+    if not idx:
+        raise MacroError("no events in that time range")
+    out = make_slice(events, idx[0], idx[-1] + 1, base=a.start)
+    save_macro(a.output, meta, out)
+    print(f"Trimmed to [{a.start}, {a.end if a.end is not None else 'end'}] -> '{a.output}' ({len(out)} events).")
+
+
+def cmd_merge(a):
+    meta_all, merged, offset = {}, [], 0.0
+    for n, path in enumerate(a.inputs):
+        meta, events = load_macro(path)
+        if n == 0:
+            meta_all = meta
+        if merged:
+            offset = merged[-1]["t"] + a.gap
+        merged += [dict(e, t=round(e["t"] + offset, 4)) for e in events]
+    save_macro(a.output, meta_all, merged)
+    print(f"Merged {len(a.inputs)} macros -> '{a.output}' ({len(merged)} events, {merged[-1]['t']:.2f}s).")
+
+
+def cmd_compact(a):
+    meta, events = load_macro(a.input)
+    out = compact(events, a.window_ms / 1000)
+    save_macro(a.output or a.input, meta, out)
+    print(f"Compacted {len(events)} -> {len(out)} events.")
+
+
+def cmd_stats(a):
+    meta, events = load_macro(a.input)
+    print("\n".join(stats_lines(events, meta)))
+
+
+def cmd_windows(_a):
+    s = detect_session()
+    print(f"session: {s.name}")
+    for wid, cls, title in s.list_windows():
+        print(f"{wid:<14} {cls:<28} {title[:60]}")
+
+
+def cmd_keys(_a):
+    seen = set()
+    for name, code in sorted(KEYNAMES.items(), key=lambda kv: (kv[1], kv[0])):
+        if code not in seen:
+            seen.add(code)
+            alts = [n for n, c in KEYNAMES.items() if c == code and n != name]
+            print(f"{code:>4}  {name}" + (f"   (also: {', '.join(alts)})" if alts else ""))
+    print("Mouse buttons: " + ", ".join(BTN_MAP))
+
+
+# ---------------------------------------------------------------------------
+# interactive editor
+# ---------------------------------------------------------------------------
+HELP = """\
+list [N [M]]              show events (all, one, or a range)
+d N [M] [close]           delete event N (or N..M); 'close' also removes the time gap
+t N SECS                  set event N's timestamp
+shift N SECS              add SECS to events N..end
+scale F [N [M]]           multiply the gaps between events N..M by F
+insert N <what>           insert before event N (later events shift to make room):
+                            click [button] [press|release]   key NAME [press|release]
+                            moveto X Y   move DX DY   scroll DY [DX]
+                            type TEXT...   wait CLASS [TIMEOUT]
+copy N [M] / paste N      copy a range, paste it before event N
+compact [MS]              merge move/scroll bursts (default 10ms), drop no-ops
+stats                     summary of the macro
+replay [N [M]] [-s SPD]   play (a slice of) the macro right now
+undo / redo               step through history
+save [file]               write out (default: overwrite the input)
+q                         quit (asks twice if there are unsaved changes)
+"""
+
+
+class Editor:
+    def __init__(self, path, meta, events):
+        self.path, self.meta, self.ev = path, meta, events
+        self.undo_stack, self.redo_stack, self.dirty, self.clip = [], [], False, []
+
+    def snap(self):
+        self.undo_stack.append(copy.deepcopy(self.ev))
+        del self.undo_stack[:-100]
+        self.redo_stack.clear()
+        self.dirty = True
+
+    def resort(self):
+        self.ev.sort(key=lambda e: e["t"])
+
+    def rng(self, toks):
+        if not toks:
+            raise ValueError("missing event number")
+        i = to_int(toks[0], "N")
+        j = to_int(toks[1], "M") if len(toks) > 1 else i
+        if not 1 <= i <= j <= len(self.ev):
+            raise ValueError(f"range must be within 1..{len(self.ev)} (N <= M)")
+        return i - 1, j
+
+    def splice(self, idx, rel):
+        base = self.ev[idx - 1]["t"] if idx > 0 else 0.0
+        dur = max((e["t"] for e in rel), default=0.0)
+        for e in self.ev[idx:]:
+            e["t"] = round(e["t"] + dur, 4)
+        self.ev[idx:idx] = [dict(e, t=round(base + e["t"], 4)) for e in copy.deepcopy(rel)]
+
+    # -- commands ---------------------------------------------------------
+    def c_help(self, rest):
+        print(HELP)
+
+    def c_list(self, rest):
+        toks = rest.split()
+        i0, i1 = self.rng(toks) if toks else (0, len(self.ev))
+        for n in range(i0, i1):
+            print(f"{n + 1:4d}  {fmt_event(self.ev[n])}")
+
+    def c_d(self, rest):
+        toks = rest.split()
+        close = "close" in toks
+        i0, i1 = self.rng([t for t in toks if t != "close"])
+        self.snap()
+        span = (self.ev[i1 - 1]["t"] - self.ev[i0]["t"]) if close else 0
+        gap_after = (self.ev[i1]["t"] - self.ev[i1 - 1]["t"]) if close and i1 < len(self.ev) else 0
+        del self.ev[i0:i1]
+        if close:
+            for e in self.ev[i0:]:
+                e["t"] = round(max(0.0, e["t"] - span - gap_after), 4)
+        print(f"Deleted {i1 - i0} event(s).")
+
+    def c_t(self, rest):
+        tok = rest.split()
+        if len(tok) != 2:
+            raise ValueError("usage: t N SECS")
+        i0, _ = self.rng(tok[:1])
+        v = to_float(tok[1], "SECS")
+        if v < 0:
+            raise ValueError("timestamp must be >= 0")
+        self.snap()
+        self.ev[i0]["t"] = round(v, 4)
+        self.resort()
+
+    def c_shift(self, rest):
+        tok = rest.split()
+        if len(tok) != 2:
+            raise ValueError("usage: shift N SECS")
+        i0, _ = self.rng(tok[:1])
+        d = to_float(tok[1], "SECS")
+        if self.ev[i0]["t"] + d < 0:
+            raise ValueError("that would make a timestamp negative")
+        self.snap()
+        for e in self.ev[i0:]:
+            e["t"] = round(e["t"] + d, 4)
+        self.resort()
+
+    def c_scale(self, rest):
+        tok = rest.split()
+        if not tok:
+            raise ValueError("usage: scale FACTOR [N [M]]")
+        f = to_float(tok[0], "FACTOR")
+        if f <= 0:
+            raise ValueError("FACTOR must be > 0")
+        i0, i1 = self.rng(tok[1:]) if len(tok) > 1 else (0, len(self.ev))
+        if len(tok) == 2:
+            i1 = len(self.ev)
+        self.snap()
+        pivot, old_end = self.ev[i0]["t"], self.ev[i1 - 1]["t"]
+        for e in self.ev[i0:i1]:
+            e["t"] = round(pivot + (e["t"] - pivot) * f, 4)
+        delta = (pivot + (old_end - pivot) * f) - old_end
+        for e in self.ev[i1:]:
+            e["t"] = round(max(0.0, e["t"] + delta), 4)
+        self.resort()
+
+    def c_insert(self, rest):
+        parts = rest.split(None, 2)
+        if len(parts) < 2:
+            raise ValueError("usage: insert N click|key|moveto|move|scroll|type|wait ...")
+        n = to_int(parts[0], "N")
+        if not 1 <= n <= len(self.ev) + 1:
+            raise ValueError(f"N must be within 1..{len(self.ev) + 1}")
+        kind, arg = parts[1].lower(), (parts[2] if len(parts) > 2 else "")
+        toks = arg.split()
+        if kind == "click":
+            btn = toks[0] if toks else "left"
+            if btn not in BTN_MAP:
+                raise ValueError(f"button must be one of {', '.join(BTN_MAP)}")
+            state = toks[1] if len(toks) > 1 else None
+            rel = ([{"t": 0.0, "type": "BUTTON", "button": btn, "state": state}] if state in ("press", "release") else
+                   [{"t": 0.0, "type": "BUTTON", "button": btn, "state": "press"},
+                    {"t": 0.05, "type": "BUTTON", "button": btn, "state": "release"}])
+        elif kind == "key":
+            if not toks:
+                raise ValueError("usage: insert N key NAME [press|release]")
+            code = parse_key(toks[0])
+            state = toks[1] if len(toks) > 1 else None
+            rel = ([{"t": 0.0, "type": "KEY", "code": code, "state": state}] if state in ("press", "release") else
+                   [{"t": 0.0, "type": "KEY", "code": code, "state": "press"},
+                    {"t": 0.03, "type": "KEY", "code": code, "state": "release"}])
+        elif kind == "moveto" and len(toks) == 2:
+            rel = [{"t": 0.0, "type": "MOVETO", "x": int(to_float(toks[0])), "y": int(to_float(toks[1]))}]
+        elif kind == "move" and len(toks) == 2:
+            rel = [{"t": 0.0, "type": "MOVE", "dx": int(to_float(toks[0])), "dy": int(to_float(toks[1]))}]
+        elif kind == "scroll" and toks:
+            rel = [{"t": 0.0, "type": "SCROLL", "dy": int(to_float(toks[0])),
+                    "dx": int(to_float(toks[1])) if len(toks) > 1 else 0}]
+        elif kind == "type" and arg:
+            rel = [{"t": 0.0, "type": "TYPE", "text": arg}]
+        elif kind == "wait" and toks:
+            rel = [{"t": 0.0, "type": "WAIT_WINDOW", "class": toks[0],
+                    "timeout": to_float(toks[1]) if len(toks) > 1 else 10}]
+        else:
+            raise ValueError("unrecognised insert; see `help`")
+        self.snap()
+        self.splice(n - 1, rel)
+        print(f"Inserted {len(rel)} event(s) before #{n}.")
+
+    def c_copy(self, rest):
+        i0, i1 = self.rng(rest.split())
+        base = self.ev[i0]["t"]
+        self.clip = [dict(e, t=round(e["t"] - base, 4)) for e in copy.deepcopy(self.ev[i0:i1])]
+        print(f"Copied {len(self.clip)} event(s).")
+
+    def c_paste(self, rest):
+        if not self.clip:
+            raise ValueError("clipboard is empty")
+        n = to_int(rest.strip(), "N")
+        if not 1 <= n <= len(self.ev) + 1:
+            raise ValueError(f"N must be within 1..{len(self.ev) + 1}")
+        self.snap()
+        self.splice(n - 1, self.clip)
+        print(f"Pasted {len(self.clip)} event(s) before #{n}.")
+
+    def c_compact(self, rest):
+        ms = to_float(rest.strip(), "MS") if rest.strip() else 10.0
+        self.snap()
+        before = len(self.ev)
+        self.ev = compact(self.ev, ms / 1000)
+        print(f"{before} -> {len(self.ev)} events.")
+
+    def c_stats(self, rest):
+        print("\n".join(stats_lines(self.ev, self.meta)))
+
+    def c_replay(self, rest):
+        toks, speed = rest.split(), 1.0
+        if "-s" in toks:
+            k = toks.index("-s")
+            if k + 1 >= len(toks):
+                raise ValueError("-s needs a value")
+            speed = to_float(toks[k + 1], "SPD")
+            if speed <= 0:
+                raise ValueError("speed must be > 0")
+            del toks[k:k + 2]
+        i0, i1 = self.rng(toks) if toks else (0, len(self.ev))
+        if len(toks) == 1:
+            i1 = len(self.ev)
+        quick_play(make_slice(self.ev, i0, i1), speed=speed)
+
+    def c_undo(self, rest):
+        if not self.undo_stack:
+            raise ValueError("nothing to undo")
+        self.redo_stack.append(self.ev)
+        self.ev = self.undo_stack.pop()
+        self.dirty = True
+
+    def c_redo(self, rest):
+        if not self.redo_stack:
+            raise ValueError("nothing to redo")
+        self.undo_stack.append(self.ev)
+        self.ev = self.redo_stack.pop()
+        self.dirty = True
+
+    def c_save(self, rest):
+        dest = rest.strip() or self.path
+        save_macro(dest, self.meta, self.ev)
+        if dest == self.path:
+            self.dirty = False
+        print(f"Saved {len(self.ev)} events to '{dest}'.")
+
+    def repl(self):
+        print(f"Editing '{self.path}' - {len(self.ev)} events. Type 'help' for commands.")
+        self.c_list("")
+        pending_quit = False
+        while True:
+            try:
+                line = input("> ").strip()
+            except EOFError:
+                print()
+                break
+            except KeyboardInterrupt:
+                print()
+                continue
+            if not line:
+                continue
+            cmd, _, rest = line.partition(" ")
+            cmd = cmd.lower()
+            if cmd in ("q", "quit", "exit"):
+                if self.dirty and not pending_quit:
+                    print("Unsaved changes. 'save' first, or quit again to discard.")
+                    pending_quit = True
+                    continue
+                break
+            pending_quit = False
+            handler = getattr(self, "c_" + cmd, None) if cmd.isalnum() else None
+            if not handler:
+                print(f"Unknown command {cmd!r}. Type 'help'.")
+                continue
+            try:
+                handler(rest.strip())
+            except (ValueError, MacroError, Stopped) as e:
+                print(f"error: {e}")
+            self.resort()
+
+
+def cmd_edit(a):
+    meta, events = load_macro(a.input)
+    Editor(a.input, meta, events).repl()
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+EPILOG = f"""\
+Setup (one-time, so you don't need sudo):
+  sudo modprobe uinput
+  echo 'KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' \\
+      | sudo tee /etc/udev/rules.d/99-macro.rules
+  sudo usermod -aG input $USER      # log out/in afterwards
+Note: membership in 'input' lets a program read all keystrokes; treat it accordingly.
+
+Stop hotkey defaults to {DEFAULT_STOP} (works even while another window has focus).
+Defaults can be set in ~/.config/macro/config.toml, e.g.:
+  [defaults]
+  stop_key = "ctrl+alt+x"
+  [record]
+  delay = 5
+"""
+
+
+def build_parser():
+    p = argparse.ArgumentParser(prog="macro", description=__doc__.split("\n\n")[0],
+                                epilog=EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True, metavar="COMMAND")
+    subs = {}
+
+    def add(name, func, help_):
+        sp = sub.add_parser(name, help=help_, description=help_,
+                            formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+        sp.set_defaults(func=func)
+        subs[name] = sp
+        return sp
+
+    def common_run(sp, delay_default=3):
+        sp.add_argument("-d", "--delay", type=_nonneg_int, default=delay_default,
+                        help="countdown seconds before starting (ignored with -w)")
+        sp.add_argument("--stop-key", type=_combo, default=DEFAULT_STOP, help="global stop hotkey")
+        sp.add_argument("--screen", type=_screen, help="override screen bounds, WxH or WxH+X+Y")
+
+    sp = add("click", cmd_click, "repeated clicking")
+    sp.add_argument("-r", "--interval", type=_pos_float, default=100, help="ms between clicks")
+    sp.add_argument("-b", "--button", choices=list(BTN_MAP), default="left")
+    sp.add_argument("-c", "--count", type=_nonneg_int, default=0, help="number of clicks (0 = infinite)")
+    sp.add_argument("--hold", type=_nonneg_float, default=10, help="ms the button is held down")
+    sp.add_argument("--double", action="store_true", help="double-click each time")
+    sp.add_argument("--at", type=_xy, help="move to X,Y (screen pixels) before each click")
+    sp.add_argument("--jitter", type=_jitter, default=0.0, help="randomise interval, e.g. 20%%")
+    sp.add_argument("--pos-jitter", type=_nonneg_int, default=0, help="randomise --at by +-PX")
+    sp.add_argument("-w", "--window", help="only click while this window class/title is focused")
+    sp.add_argument("--toggle-key", type=_combo, help="hotkey that starts/pauses clicking (starts paused)")
+    common_run(sp)
+
+    sp = add("record", cmd_record, "record mouse + keyboard (needs read access to /dev/input)")
+    sp.add_argument("-o", "--output", help="output file (default macro_<time>.json)")
+    sp.add_argument("-t", "--timeout", type=_nonneg_float, default=0, help="stop after SECS (0 = manual)")
+    sp.add_argument("-f", "--format", choices=["json", "mac"], help="file format (default: from extension)")
+    sp.add_argument("--start-key", type=_combo, help="wait for this hotkey before recording")
+    sp.add_argument("--move", choices=["auto", "abs", "rel", "none"], default="auto",
+                    help="abs = cursor positions (best fidelity), rel = raw device deltas")
+    sp.add_argument("--sample-ms", type=_pos_float, default=8, help="motion sampling/coalescing interval")
+    sp.add_argument("--no-keys", action="store_true", help="don't record keyboard events (privacy)")
+    sp.add_argument("--no-mouse", action="store_true", help="don't record mouse events")
+    common_run(sp, delay_default=3)
+
+    sp = add("play", cmd_play, "replay a macro")
+    sp.add_argument("-i", "--input", required=True)
+    sp.add_argument("-l", "--loops", type=_nonneg_int, default=1, help="0 = infinite")
+    sp.add_argument("-s", "--speed", type=_pos_float, default=1.0)
+    sp.add_argument("-g", "--gap", type=_nonneg_float, default=0.0, help="seconds between loops")
+    sp.add_argument("-w", "--window", help="only play while this window class/title is focused (pauses otherwise)")
+    sp.add_argument("--jitter", type=_jitter, default=0.0, help="randomise timing, e.g. 10%%")
+    sp.add_argument("--pos-jitter", type=_nonneg_int, default=0, help="shift absolute positions by up to +-PX per loop")
+    sp.add_argument("--max-duration", type=_nonneg_float, default=0.0, help="hard stop after SECS")
+    sp.add_argument("--from-event", type=_nonneg_int, help="start at event N (1-based)")
+    sp.add_argument("--to-event", type=_nonneg_int, help="end at event N")
+    sp.add_argument("--dry-run", action="store_true", help="print the schedule; inject nothing")
+    sp.add_argument("--verbose", action="store_true", help="print each event as it is sent")
+    common_run(sp)
+
+    sp = add("edit", cmd_edit, "interactive editor (undo, insert, copy/paste, compact, replay...)")
+    sp.add_argument("-i", "--input", required=True)
+
+    sp = add("convert", cmd_convert, "convert between .json and legacy .mac")
+    sp.add_argument("-i", "--input", required=True)
+    sp.add_argument("-o", "--output", required=True)
+    sp.add_argument("--to", choices=["json", "mac"])
+
+    sp = add("trim", cmd_trim, "keep only events in a time range")
+    sp.add_argument("-i", "--input", required=True)
+    sp.add_argument("-o", "--output", required=True)
+    sp.add_argument("-s", "--start", type=_nonneg_float, default=0.0)
+    sp.add_argument("-e", "--end", type=_nonneg_float)
+
+    sp = add("merge", cmd_merge, "concatenate macros")
+    sp.add_argument("inputs", nargs="+")
+    sp.add_argument("-o", "--output", required=True)
+    sp.add_argument("--gap", type=_nonneg_float, default=0.5, help="seconds between macros")
+
+    sp = add("compact", cmd_compact, "merge motion bursts and drop no-op events")
+    sp.add_argument("-i", "--input", required=True)
+    sp.add_argument("-o", "--output", help="default: overwrite input")
+    sp.add_argument("--window-ms", type=_pos_float, default=10)
+
+    sp = add("stats", cmd_stats, "summarise a macro")
+    sp.add_argument("-i", "--input", required=True)
+
+    add("windows", cmd_windows, "list windows (for -w)")
+    add("keys", cmd_keys, "list key names accepted by hotkeys and the editor")
+
+    apply_config(subs)
+    return p
+
+
+def apply_config(subs):
+    if not tomllib:
+        return
+    path = Path(os.environ.get("XDG_CONFIG_HOME") or invoking_home() / ".config") / "macro" / "config.toml"
+    try:
+        cfg = tomllib.loads(path.read_text())
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError) as e:
+        warn(f"ignoring {path}: {e}")
+        return
+    for name, sp in subs.items():
+        known = {act.dest for act in sp._actions}
+        merged = {**cfg.get("defaults", {}), **cfg.get(name, {})}
+        sp.set_defaults(**{k: v for k, v in merged.items() if k in known})
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    try:
+        return args.func(args) or 0
+    except MacroError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    except Stopped as s:
+        print(f"Stopped{': ' + str(s) if str(s) else ''}.")
+        return 0
+    except KeyboardInterrupt:
+        print()
+        return 130
+
+
+if __name__ == "__main__":
+    with contextlib.suppress(AttributeError, ValueError):
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)  # quiet `| head`
+    sys.exit(main())
