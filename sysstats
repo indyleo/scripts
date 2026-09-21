@@ -565,8 +565,10 @@ function vvolume() {
         echo "󰝟 No tool"; return
     fi
     read -r vol muted < <(_wpctl_pct_muted @DEFAULT_AUDIO_SINK@)
-    if [[ "$muted" == "1" || "$vol" -eq 0 ]]; then
+    if [[ "$muted" == "1" ]]; then
         icon="󰝟"; msg="Muted"
+    elif [[ "$vol" -eq 0 ]]; then
+        icon="󰕿"; msg="0%"
     elif [[ "$vol" -ge 100 ]]; then icon="󰶬"; msg="${vol}%"
     elif [[ "$vol" -ge 75 ]]; then icon="󰕾"; msg="${vol}%"
     elif [[ "$vol" -ge 25 ]]; then icon="󰖀"; msg="${vol}%"
@@ -587,7 +589,7 @@ function mmicrophone() {
         echo " No tool"; return
     fi
     read -r vol muted < <(_wpctl_pct_muted @DEFAULT_AUDIO_SOURCE@)
-    if [[ "$muted" == "0" && "$vol" -gt 0 ]]; then
+    if [[ "$muted" == "0" ]]; then
         icon=""; msg="${vol}%"
     else
         icon=""; msg="Muted"

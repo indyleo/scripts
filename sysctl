@@ -4,14 +4,26 @@ set -euo pipefail
 # Constants
 SCRIPT_NAME=$(basename "$0")
 
-# Check required commands
-DEPS=(brightnessctl wpctl nmcli bluetoothctl awk notify-send)
-for cmd in "${DEPS[@]}"; do
-    if ! command -v "$cmd" &>/dev/null; then
-        echo "Error: Required command '$cmd' is not installed." >&2
-        exit 1
-    fi
-done
+# Check only the commands the requested subsystem actually needs. A global
+# check meant a missing bluetoothctl/brightnessctl/nmcli (e.g. on a desktop)
+# aborted *every* subcommand -- including volume -- before it did anything.
+need() {
+    local cmd
+    for cmd in "$@"; do
+        if ! command -v "$cmd" &>/dev/null; then
+            echo "Error: Required command '$cmd' is not installed." >&2
+            exit 1
+        fi
+    done
+}
+
+case "${1:-}" in
+    vol|volume|mic)        need wpctl awk ;;
+    bri|brightness)        need brightnessctl ;;
+    wifi)                  need nmcli ;;
+    bt)                    need bluetoothctl ;;
+    airplane)              need nmcli bluetoothctl ;;
+esac
 
 # Arguments
 subsys="${1:-}"
