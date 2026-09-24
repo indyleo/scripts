@@ -16,18 +16,30 @@
 # A plain click (no Ctrl) still submits immediately with just that one
 # item, so single-select callers work exactly as before.
 #
-# Only -p (prompt) is honoured; other dmenu flags are accepted and ignored
-# so existing scripts don't break outright. Exit status is 0 with the
-# choice(s) on stdout, or 1 with nothing on stdout if cancelled (Escape)
-# or nothing was selected.
+# Password entry: -password (or -P) masks what's typed, e.g.
+#   echo "" | qsdmenu -password -p "Password:"
+# (feed it an empty line so the picker is just an input box; whatever is typed
+# comes back on stdout).
+#
+# Only -p (prompt) and -password/-P are honoured; other dmenu flags are
+# accepted and ignored so existing scripts don't break outright. Exit status
+# is 0 with the choice(s) on stdout, or 1 with nothing on stdout if cancelled
+# (Escape) or nothing was selected.
 
 prompt="run"
+password=0
 while [ $# -gt 0 ]; do
     case "$1" in
-        -p) prompt="$2"; shift 2 ;;
+        # (a trailing -p with no value must not loop forever on a failed shift)
+        -p) prompt="${2-}"; shift; [ $# -gt 0 ] && shift ;;
+        -P|-password) password=1; shift ;;
         *) shift ;;
     esac
 done
+
+# The IPC call only carries <infile> <outfifo> <prompt>, so the mask flag rides
+# along as a leading U+0001 on the prompt; Dmenu.qml strips it and masks input.
+[ "$password" = 1 ] && prompt=$'\x01'"$prompt"
 
 tmpdir=$(mktemp -d)
 infile="$tmpdir/in"
@@ -38,7 +50,7 @@ trap cleanup EXIT
 cat > "$infile"
 mkfifo "$outfifo"
 
-qs ipc call pick dmenu "$infile" "$outfifo" "$prompt"
+qs ipc call pick dmenu "$infile" "$outfifo" "$prompt" || exit 1
 
 result=$(cat "$outfifo")
 

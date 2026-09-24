@@ -1,46 +1,49 @@
 #!/usr/bin/env bash
-# rofi_wifi — WiFi manager using rofi/dmenu + nmcli
+# wifi — WiFi manager using qsdmenu (the Quickshell picker) + nmcli
+#
+# qsdmenu only understands -p (prompt) and -password (mask the input), so the
+# old rofi flags (-dmenu, -theme-str, -i, ...) are gone: window size and
+# case-insensitive filtering are fixed by Dmenu.qml. Text typed into the picker
+# that matches no row is returned as-is, which the SSID/password prompts and
+# the "type an SSID" fallback below rely on.
 
 DIVIDER="──────────────────────"
 TOGGLE_ON="󰤭  Disable WiFi"
 TOGGLE_OFF="󰤨  Enable WiFi"
 DISCONNECT_ITEM="󰖰  Disconnect"
 MANUAL_ITEM="󰐥  Manual / Hidden SSID"
+SAVED_TAG=" 󰆓"
 
-# --- Display server detection ---
-if [ -n "$WAYLAND_DISPLAY" ]; then
-    MENU() {
-        rofi -dmenu -p "$1" \
-            -theme-str 'window {width: 500px;}' \
-            -theme-str 'listview {lines: 12;}' \
-            -theme-str 'listview { columns: 1; }' \
-            -i
-    }
-    PROMPT() {
-        rofi -dmenu -p "$1" \
-            -theme-str 'window {width: 400px;}' \
-            -theme-str 'listview { columns: 1; }'
-    }
-    PROMPT_PASS() {
-        rofi -dmenu -p "$1" -password \
-            -theme-str 'window {width: 400px;}' \
-            -theme-str 'listview { columns: 1; }'
-    }
-else
-    MENU()        { dmenu -p "$1"; }
-    PROMPT()      { dmenu -p "$1"; }
-    PROMPT_PASS() { dmenu -P -p "$1"; }
-fi
+MENU()        { qsdmenu -p "$1"; }
+# Text prompts: feed the picker one empty line so it behaves as a plain input box.
+# (Escape and an empty Enter both come back as empty output.)
+PROMPT()      { echo "" | qsdmenu -p "$1"; }
+PROMPT_PASS() { echo "" | qsdmenu -password -p "$1"; }
 
 # Resolve the wifi device once, used for disconnect/status actions
 wifi_dev() {
     nmcli -t -f DEVICE,TYPE device | awk -F: '$2=="wifi"{print $1; exit}'
 }
 
+# connect_new SSID [PASSWORD] [hidden]
+# Connects to a network that has no saved profile. "hidden" is needed for SSIDs
+# that don't broadcast, otherwise nmcli only looks in the scan list and gives up.
+connect_new() {
+    local ssid="$1" password="${2:-}" hidden="${3:-}"
+    local args=(device wifi connect "$ssid")
+    [[ -n "$password" ]] && args+=(password "$password")
+    [[ -n "$hidden" ]] && args+=(hidden yes)
+    if nmcli "${args[@]}"; then
+        notify-send "WiFi" "Connected to $ssid" --icon=network-wireless
+    else
+        notify-send "WiFi" "Failed to connect to $ssid" --icon=network-wireless-offline
+    fi
+}
+
 wifi_status=$(nmcli radio wifi)
 
 if [[ "$wifi_status" == "disabled" ]]; then
-    choice=$(echo -e "$TOGGLE_OFF\n$DIVIDER" | MENU "WiFi (disabled):")
+    choice=$(printf '%s\n%s\n' "$TOGGLE_OFF" "$DIVIDER" | MENU "WiFi (disabled):")
     if [[ "$choice" == "$TOGGLE_OFF" ]]; then
         nmcli radio wifi on
     fi
@@ -71,6 +74,14 @@ while IFS=: read -r inuse ssid security signal; do
     fi
 done < <(nmcli -t -f IN-USE,SSID,SECURITY,SIGNAL device wifi list 2>/dev/null)
 
+# SSID column is as wide as the longest SSID (802.11 caps them at 32), so the
+# security/saved columns still fit inside the picker's fixed-width window.
+ssid_w=12
+for ssid in "${order[@]}"; do
+    (( ${#ssid} > ssid_w )) && ssid_w=${#ssid}
+done
+(( ssid_w > 32 )) && ssid_w=32
+
 # Build display lines + a line->ssid lookup so we never re-parse text for the ssid
 declare -A ssid_by_line=()
 display_lines=()
@@ -80,17 +91,18 @@ for ssid in "${order[@]}"; do
     prefix="  "
     [[ -n "${inuse_of[$ssid]:-}" ]] && prefix="▶ "
     saved_tag=""
-    [[ -n "${is_saved[$ssid]:-}" ]] && saved_tag=" 󰆓"
-    line=$(printf "%s%-30s %5s%%  %s%s" "$prefix" "$ssid" "${signal_of[$ssid]:-0}" "$sec_label" "$saved_tag")
+    [[ -n "${is_saved[$ssid]:-}" ]] && saved_tag="$SAVED_TAG"
+    line=$(printf "%s%-*s %3s%%  %s%s" "$prefix" "$ssid_w" "$ssid" "${signal_of[$ssid]:-0}" "$sec_label" "$saved_tag")
     display_lines+=("$line")
     ssid_by_line["$line"]="$ssid"
 done
 
-networks=$(printf '%s\n' "${display_lines[@]}")
+menu=$(printf '%s\n' "$TOGGLE_ON" "$DIVIDER" "${display_lines[@]}" "$DIVIDER" "$DISCONNECT_ITEM" "$MANUAL_ITEM")
 
-menu=$(echo -e "$TOGGLE_ON\n$DIVIDER\n$networks\n$DIVIDER\n$DISCONNECT_ITEM\n$MANUAL_ITEM")
-
-choice=$(echo "$menu" | MENU "WiFi:")
+choice=$(printf '%s\n' "$menu" | MENU "WiFi:")
+# Ctrl+click in the picker multi-selects and returns one item per line; we only
+# ever act on one, so take the first.
+choice="${choice%%$'\n'*}"
 
 [[ -z "$choice" ]] && exit 0
 
@@ -107,22 +119,33 @@ case "$choice" in
         ;;
 
     "$MANUAL_ITEM")
-        ssid=$(echo "" | PROMPT "SSID:")
+        ssid=$(PROMPT "SSID:")
         [[ -z "$ssid" ]] && exit 0
-        password=$(echo "" | PROMPT_PASS "Password:")
-        nmcli device wifi connect "$ssid" password "$password" \
-            && notify-send "WiFi" "Connected to $ssid" --icon=network-wireless \
-            || notify-send "WiFi" "Failed to connect to $ssid" --icon=network-wireless-offline
+        # Blank password = open network (qsdmenu can't tell blank from Escape)
+        password=$(PROMPT_PASS "Password:")
+        connect_new "$ssid" "$password" hidden
         ;;
 
-    "$DIVIDER"|"") exit 0 ;;
+    "$DIVIDER") exit 0 ;;
 
     *)
         ssid="${ssid_by_line[$choice]:-}"
 
-        # Fallback: manual/unrecognized selection, best-effort strip of the ▶ marker
+        # Not one of our rows, so the user typed an SSID into the picker and hit
+        # Enter: trim it (and a stray ▶ marker) and use it as-is.
         if [[ -z "$ssid" ]]; then
-            ssid=$(echo "$choice" | sed 's/^▶ //' | sed 's/^ *//' | sed -E 's/ {2,}.*//')
+            ssid="${choice#▶ }"
+            ssid="${ssid#"${ssid%%[![:space:]]*}"}"
+            ssid="${ssid%"${ssid##*[![:space:]]}"}"
+            [[ -z "$ssid" ]] && exit 0
+
+            # Not in the scan and not saved: treat it like a hidden network
+            if [[ -z "${seen[$ssid]:-}" && -z "${is_saved[$ssid]:-}" ]]; then
+                password=$(PROMPT_PASS "Password ($ssid):")
+                [[ -z "$password" ]] && exit 0
+                connect_new "$ssid" "$password" hidden
+                exit 0
+            fi
         fi
 
         # Selecting the network you're already on disconnects it (toggle behavior)
@@ -152,15 +175,11 @@ case "$choice" in
         else
             security="${security_of[$ssid]}"
             if [[ -z "$security" || "$security" == "--" ]]; then
-                nmcli device wifi connect "$ssid" \
-                    && notify-send "WiFi" "Connected to $ssid" --icon=network-wireless \
-                    || notify-send "WiFi" "Failed" --icon=network-wireless-offline
+                connect_new "$ssid"
             else
-                password=$(echo "" | PROMPT_PASS "Password ($ssid):")
+                password=$(PROMPT_PASS "Password ($ssid):")
                 [[ -z "$password" ]] && exit 0
-                nmcli device wifi connect "$ssid" password "$password" \
-                    && notify-send "WiFi" "Connected to $ssid" --icon=network-wireless \
-                    || notify-send "WiFi" "Failed to connect to $ssid" --icon=network-wireless-offline
+                connect_new "$ssid" "$password"
             fi
         fi
         ;;
