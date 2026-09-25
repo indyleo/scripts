@@ -10,7 +10,7 @@ fi
 
 # --- Menu helper ---
 if [ "$IS_WAYLAND" -eq 1 ]; then
-    MENU() { rofi -dmenu -p "$1"; }
+    MENU() { qsdmenu -dmenu -p "$1"; }
 else
     MENU() { dmenu -p "$1"; }
 fi

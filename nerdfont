@@ -78,7 +78,7 @@ def check_dependencies():
     """Check if required tools are available"""
     if IS_WAYLAND:
         # Wayland: prefer wayland-native finders, fall back to rofi
-        finders = ["wofi", "fuzzel", "tofi", "rofi"]
+        finders = ["wofi", "fuzzel", "tofi", "rofi", "qsdmenu"]
         clip_tools = [("wl-copy", None)]
         clip_err = "wl-copy not found. Please install wl-clipboard."
     else:
@@ -132,6 +132,8 @@ def show_selection_menu(finder):
         cmd = ["tofi", "--prompt-text", "Select Icon: "]
     elif finder == "rofi":
         cmd = ["rofi", "-dmenu", "-l", "10", "-p", "Select Icon:"]
+    elif finder == "qsdmenu":
+        cmd = ["qsdmenu", "-p", "Select Icon: "]
     else:  # dmenu (X11 fallback)
         cmd = ["dmenu", "-l", "10", "-p", "Select Icon:"]
 

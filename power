@@ -2,9 +2,9 @@
 
 # --- Display server detection ---
 if [ -n "$WAYLAND_DISPLAY" ]; then
-    MENU() { rofi -dmenu -p "$1"; }
+    MENU() { qsdmenu -dmenu -p "$1"; }
     LOCK_CMD="hyprlock"
-    LOGOUT_CMD="loginctl terminate-user $USER"
+    LOGOUT_CMD="hyprctl eval hl.dsp.exit()"
 else
     MENU() { dmenu -p "$1"; }
     LOCK_CMD="slock"
