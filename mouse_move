@@ -113,6 +113,13 @@ function ensure_ydotoold() {
 # keyboard-class input device), while skipping obvious non-keyboard
 # nodes such as power/sleep buttons and video-bus toggles that also
 # expose a "kbd" handler but have almost no keys.
+#
+# We also skip our OWN virtual passthrough keyboard by name
+# ("mouse-mode-passthrough-kbd"). If a previous run was killed with
+# SIGKILL (bypassing our cleanup handler, e.g. `kill -9` from outside
+# this script), that virtual device can be left behind in
+# /proc/bus/input/devices, and without this exclusion a later restart
+# could auto-detect and grab *it* instead of the real keyboard.
 function find_keyboard_device() {
     if [ -n "$KEYBOARD_EVENT_DEVICE" ]; then
         echo "$KEYBOARD_EVENT_DEVICE"
@@ -131,7 +138,7 @@ function find_keyboard_device() {
             ev=$0
             sub(/^B: EV=/, "", ev)
             has_kbd_handler = (handlers ~ /(^|[[:space:]])kbd[0-9]*([[:space:]]|$)/)
-            skip = (name ~ /Power Button|Sleep Button|Video Bus|Consumer Control/)
+            skip = (name ~ /Power Button|Sleep Button|Video Bus|Consumer Control|mouse-mode-passthrough-kbd/)
             if (is_keyboard_ev(ev) && has_kbd_handler && !skip) {
                 match(handlers, /event[0-9]+/)
                 if (RSTART) {
@@ -172,6 +179,16 @@ static int uinput_fd = -1;
  * device that outlives this process. */
 static volatile sig_atomic_t left_button_held = 0;
 
+/* A pending EV_MSC/MSC_SCAN event, held back until we know whether the
+ * EV_KEY event it precedes will be swallowed (mapped to a mouse
+ * action) or forwarded. Without this, the scancode for e.g. 'f' would
+ * already have been written to the passthrough keyboard by the time
+ * we decide to swallow the matching EV_KEY — leaving a scancode event
+ * with no key event behind it, which can confuse the keymap layer of
+ * whatever reads the passthrough device. */
+static struct input_event pending_msc;
+static int has_pending_msc = 0;
+
 static void release_stuck_button(void) {
     if (left_button_held) {
         char *a[] = {"ydotool", "click", "0x80", NULL};
@@ -188,7 +205,7 @@ static void release_stuck_button(void) {
 
 static void cleanup_and_exit(int sig) {
     (void)sig;
-release_stuck_button();
+    release_stuck_button();
     if (uinput_fd >= 0) {
         ioctl(uinput_fd, UI_DEV_DESTROY);
         close(uinput_fd);
@@ -208,6 +225,13 @@ static void run_ydotool(char *const argv[]) {
         execvp("ydotool", argv);
         _exit(127); /* only reached if exec fails */
     }
+}
+
+static void forward_event(struct input_event *ev) {
+    struct input_event out = *ev;
+    out.time.tv_sec = 0;
+    out.time.tv_usec = 0;
+    write(uinput_fd, &out, sizeof(out));
 }
 
 int main(int argc, char **argv) {
@@ -281,6 +305,15 @@ int main(int argc, char **argv) {
 
     struct input_event ev;
     while (read(dev_fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
+        /* Hold EV_MSC/MSC_SCAN events back instead of forwarding them
+         * immediately — we don't yet know if the EV_KEY event that
+         * follows will be swallowed. */
+        if (ev.type == EV_MSC && ev.code == MSC_SCAN) {
+            pending_msc = ev;
+            has_pending_msc = 1;
+            continue;
+        }
+
         if (ev.type == EV_KEY) {
             int swallow = 0;
 
@@ -354,15 +387,20 @@ int main(int argc, char **argv) {
                     break;
             }
 
-            if (swallow) continue; /* don't forward this key event */
+            if (swallow) {
+                has_pending_msc = 0; /* drop the scancode that led here, don't forward it */
+                continue; /* don't forward this key event either */
+            }
         }
 
-        /* Forward everything else (including SYN/MSC) untouched, so
-         * the rest of your keyboard behaves completely normally. */
-        struct input_event out = ev;
-        out.time.tv_sec = 0;
-        out.time.tv_usec = 0;
-        write(uinput_fd, &out, sizeof(out));
+        /* Forward any scancode we held back, then this event itself,
+         * both untouched, so the rest of your keyboard behaves
+         * completely normally. */
+        if (has_pending_msc) {
+            forward_event(&pending_msc);
+            has_pending_msc = 0;
+        }
+        forward_event(&ev);
     }
 
     cleanup_and_exit(0);
@@ -422,7 +460,21 @@ function turn_off() {
             kill -0 "$pid" 2>/dev/null || break
             sleep 0.1
         done
-        kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+
+        if kill -0 "$pid" 2>/dev/null; then
+            # It didn't exit gracefully. SIGKILL will still force the
+            # kernel to release the EVIOCGRAB and tear down the
+            # passthrough uinput device (both are cleaned up when the
+            # process's fds close), but it skips our C cleanup
+            # handler entirely — so a left-button-down drag in
+            # progress at the time would never get its matching
+            # button-up sent, leaving the mouse button stuck held in
+            # ydotoold's virtual pointer. Send a release ourselves as
+            # a safety net before the hard kill (harmless no-op if no
+            # drag was in progress).
+            command -v ydotool >/dev/null 2>&1 && ydotool click 0x80 >/dev/null 2>&1 || true
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
     fi
 
     rm -f "$PID_FILE"
