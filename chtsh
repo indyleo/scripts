@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # chtsh - interactive cheat.sh helper
-# Improved: caching with TTL, safer tempfile writes, better arg parsing, fallbacks, and helpful messages.
+# Features: caching with TTL, atomic cache writes, HTML error-page detection,
+# stale-cache fallback, local fallbacks (tldr / man / --help) when cheat.sh is down.
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -9,35 +10,41 @@ IFS=$'\n\t'
 CACHE_DIR="${HOME:-/tmp}/.cache/chtsh"
 mkdir -p "$CACHE_DIR"
 CACHE_TTL=${CACHE_TTL:-86400}   # seconds; default 1 day (change via env var)
-CHEAT_BASE="https://cheat.sh"
+CHEAT_BASE="${CHEAT_BASE:-https://cheat.sh}"
 FZF_CMD="${FZF_CMD:-fzf}"
 CURL_CMD="${CURL_CMD:-curl}"
 LESS_CMD="${LESS_CMD:-less}"
+CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-5}"
+MAX_TIME="${MAX_TIME:-15}"
 
 # --- Helpers ---
-function die() { printf '%s\n' "$@" >&2; exit 1; }
-function info() { printf '%s\n' "$@" >&2; }
+die()  { printf '%s\n' "$@" >&2; exit 1; }
+info() { printf '%s\n' "$@" >&2; }
 
 # compute cache filename for URL (safe & deterministic)
-function cache_file_for_url() {
-    local url=$1
+cache_file_for_url() {
     local key
-    # use printf (no trailing newline) for stable hash
-    key=$(printf '%s' "$url" | md5sum | cut -d' ' -f1)
+    key=$(printf '%s' "$1" | md5sum | cut -d' ' -f1)
     printf '%s/%s' "$CACHE_DIR" "$key"
 }
 
-# atomic fetch with caching
-function fetch_list() {
-    local url=$1
-    local cache_file
+# detect HTML error pages (e.g. "<title>500 Internal Server Error</title>"),
+# including ones a proxy might serve with a 200 status
+is_html_error() {
+    local chunk
+    chunk=$(head -c 1024 "$1" 2>/dev/null || true)
+    grep -qiE '<title>[0-9]{3} |^[[:space:]]*<!doctype html' <<<"$chunk"
+}
+
+# fetch with cache. Order: fresh cache -> network -> stale cache.
+# Returns 1 only if the network AND the cache both fail.
+fetch_url() {
+    local url=$1 cache_file tmp mod now
     cache_file=$(cache_file_for_url "$url")
 
-    # if cache exists and is fresh, print it
-    if [[ -f "$cache_file" ]]; then
-        local mod
+    # 1. fresh cache
+    if [[ -s "$cache_file" ]]; then
         mod=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || echo 0)
-        local now
         now=$(date +%s)
         if (( now - mod < CACHE_TTL )); then
             cat "$cache_file"
@@ -45,58 +52,106 @@ function fetch_list() {
         fi
     fi
 
-    # fetch to a tempfile then atomically move into cache
-    local tmp
-    tmp=$(mktemp) || die "mktemp failed"
-    if ! "$CURL_CMD" -fsS "$url" >"$tmp"; then
-        rm -f "$tmp"
-        die "Failed to fetch: $url"
+    # 2. network, with timeouts and retries (curl retries transient 5xx)
+    tmp=$(mktemp) || return 1
+    if "$CURL_CMD" -fsS --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
+        --retry 2 --retry-delay 1 "$url" >"$tmp" 2>/dev/null \
+        && [[ -s "$tmp" ]] && ! is_html_error "$tmp"; then
+        mv -f "$tmp" "$cache_file"
+        cat "$cache_file"
+        return 0
     fi
-    mv -f "$tmp" "$cache_file"
-    cat "$cache_file"
+    rm -f "$tmp"
+
+    # 3. stale cache beats nothing
+    if [[ -s "$cache_file" ]]; then
+        info "cheat.sh unavailable, showing cached copy"
+        cat "$cache_file"
+        return 0
+    fi
+    return 1
 }
 
-# pick an item with fzf (or fallback to numbered select)
-function choose_item() {
-    local prompt="$1"
-    if command -v "$FZF_CMD" >/dev/null 2>&1; then
-        "$FZF_CMD" --prompt="$prompt" --height=40% --border
+# local fallbacks when cheat.sh is unreachable and nothing is cached
+local_fallback() {
+    local t=$1
+    if command -v tldr >/dev/null 2>&1 && tldr "$t" 2>/dev/null | "$LESS_CMD" -R; then
+        return 0
+    fi
+    if man -w "$t" >/dev/null 2>&1; then
+        man "$t"
+        return 0
+    fi
+    if command -v "$t" >/dev/null 2>&1; then
+        { "$t" --help 2>&1 || true; } | "$LESS_CMD" -R
+        return 0
+    fi
+    return 1
+}
+
+# topic list when we can't reach cheat.sh at all
+offline_topics() {
+    if command -v tldr >/dev/null 2>&1; then
+        tldr --list 2>/dev/null || tldr -l 2>/dev/null || true
     else
-        # fallback: number the options and let user type number
-        nl -ba -w3 -s'. ' | sed 's/^/ /'
-        printf '\nEnter the number of your choice (or blank to cancel): '
-        read -r idx
-        if [[ -z "$idx" ]]; then
-            printf ''
-            return 0
-        fi
-        sed -n "${idx}p"
+        compgen -c | sort -u
     fi
 }
 
-function usage() {
+# fetch + page a URL, falling back to local docs
+show_page() {
+    local url=$1 topic=$2 page
+    if page=$(fetch_url "$url"); then
+        printf '%s\n' "$page" | "$LESS_CMD" -R
+    else
+        info "cheat.sh unreachable, trying local docs for '$topic'..."
+        local_fallback "$topic" || die "No cheat.sh, cache, tldr, man page, or --help for '$topic'."
+    fi
+}
+
+# pick an item with fzf (or fall back to a numbered menu on the terminal)
+choose_item() {
+    local prompt="$1" items idx
+    if command -v "$FZF_CMD" >/dev/null 2>&1; then
+        "$FZF_CMD" --prompt="$prompt" --height=40% --border || true
+    else
+        items=$(cat)
+        [[ -z "$items" ]] && return 0
+        # menu goes to stderr so it isn't captured by $(...) callers;
+        # input comes from the terminal because stdin is the pipe
+        printf '%s\n' "$items" | nl -ba -w3 -s'. ' >&2
+        printf '\nEnter the number of your choice (or blank to cancel): ' >&2
+        read -r idx </dev/tty || return 0
+        [[ "$idx" =~ ^[0-9]+$ ]] || return 0
+        printf '%s\n' "$items" | sed -n "${idx}p"
+    fi
+}
+
+usage() {
     cat <<EOF
 Usage: ${0##*/} [OPTIONS] [QUERY]
-Interactive cheat.sh client.
+Interactive cheat.sh client with offline fallbacks.
 
 Options:
-  -l, --lang        Show only common programming languages first (interactive filter)
-  --no-cache        Ignore cache (force re-fetch)
+  --no-cache        Ignore fresh cache (force re-fetch; stale cache still used if offline)
   -t, --ttl SEC     Set cache TTL seconds for this run (overrides CACHE_TTL)
   -h, --help        Show this help
+
 If QUERY is provided, it will be used to filter topics (fzf -q or grep).
+
+Environment: CACHE_TTL, CHEAT_BASE, CONNECT_TIMEOUT, MAX_TIME, FZF_CMD, CURL_CMD, LESS_CMD
 EOF
 }
 
 # --- Argument parsing ---
-topic_constraint="none"
 NO_CACHE=0
 query=""
-while [[ ${#@} -gt 0 ]]; do
+while [[ $# -gt 0 ]]; do
     case "$1" in
-        -l|--lang) topic_constraint="lang"; shift ;;
         --no-cache) NO_CACHE=1; shift ;;
-        -t|--ttl) shift; CACHE_TTL="${1:-$CACHE_TTL}"; shift ;;
+        -t|--ttl)
+            [[ $# -ge 2 ]] || die "--ttl needs a value"
+            CACHE_TTL="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         --) shift; break ;;
         -*) die "Unknown option: $1" ;;
@@ -104,37 +159,34 @@ while [[ ${#@} -gt 0 ]]; do
     esac
 done
 
-# honor --no-cache by temporarily setting TTL to 0
+[[ "$CACHE_TTL" =~ ^[0-9]+$ ]] || die "TTL must be a number of seconds"
+
+# honor --no-cache by setting TTL to 0 (skips the fresh-cache check)
 if (( NO_CACHE == 1 )); then
     CACHE_TTL=0
 fi
 
 # --- Main flow ---
-# fetch master topic list once
-topics_raw=$(fetch_list "$CHEAT_BASE/:list")
+# fetch master topic list once; fall back to local commands if cheat.sh is down
+topics_raw=$(fetch_url "$CHEAT_BASE/:list") || {
+    info "cheat.sh unreachable, using local command list"
+    topics_raw=$(offline_topics)
+}
+[[ -n "$topics_raw" ]] || die "No topics available (cheat.sh down, no cache, no local fallback)."
 
-# curated language list (keeps the interactive set smaller, and also tells
-# us which topics actually live in cheat.sh's per-language namespaces where
-# ":list" is meaningful - see the note further down)
+# topics that live in cheat.sh's per-language namespaces, where ":list" is meaningful
 languages_regex='^(c|cpp|python|go|rust|java|javascript|typescript|bash|zsh|lua|git|perl|ruby|haskell|kotlin|swift|powershell|scala|clojure|r|elixir|dart|php|make|docker|ansible|terraform|sql|html|css|json|yaml|xml)$'
 
-# optionally filter to languages
-if [[ "$topic_constraint" == "lang" ]]; then
-    topics_filtered=$(printf '%s\n' "$topics_raw" | grep -E -i "$languages_regex" || true)
-else
-    topics_filtered="$topics_raw"
-fi
+topics_filtered="$topics_raw"
 
-# if user provided a QUERY, prefilter using grep (case-insensitive)
+# pick a topic (prefilter with QUERY if given)
 if [[ -n "${query:-}" ]]; then
-    # try fzf's query option if available; else fallback to grep
     if command -v "$FZF_CMD" >/dev/null 2>&1; then
-        topic=$(printf '%s\n' "$topics_filtered" | "$FZF_CMD" -q "$query" --prompt="Topic> " --height=40% --border)
+        topic=$(printf '%s\n' "$topics_filtered" | "$FZF_CMD" -q "$query" --prompt="Topic> " --height=40% --border || true)
     else
-        topic=$(printf '%s\n' "$topics_filtered" | grep -i -- "$query" | choose_item "Topic> ")
+        topic=$(printf '%s\n' "$topics_filtered" | grep -i -- "$query" | choose_item "Topic> " || true)
     fi
 else
-    # interactive pick
     topic=$(printf '%s\n' "$topics_filtered" | choose_item "Topic> ")
 fi
 
@@ -144,32 +196,28 @@ if [[ -z "${topic:-}" ]]; then
     exit 0
 fi
 
-# fetch available sheets for selected topic
-# NOTE: cheat.sh's ":list" query only has meaning inside a programming-
-# language namespace (e.g. "go/:list", "python/:list") - it's not defined
-# for plain UNIX/Linux command topics like "tar" or "curl", which are the
-# majority of the master topic list. Calling it unconditionally meant every
-# non-language topic hit a 404 and printed a spurious "Failed to fetch"
-# message before falling back to the main page anyway. Only try it for
-# topics that are actually in the language namespace.
+# fetch available sheets for selected topic.
+# NOTE: cheat.sh's ":list" only has meaning inside a programming-language
+# namespace (e.g. "go/:list"); it isn't defined for plain commands like
+# "tar" or "curl", so only try it for language topics.
 if [[ "$topic" =~ $languages_regex ]]; then
-    sheets_list=$(fetch_list "$CHEAT_BASE/$topic/:list" || true)
+    sheets_list=$(fetch_url "$CHEAT_BASE/$topic/:list" || true)
 else
     sheets_list=""
 fi
 
-# If no sheets or only info, display the topic directly
+# no sub-sheets: show the main topic page
 if [[ -z "${sheets_list:-}" ]]; then
-    # display main page
-    "$CURL_CMD" -fsS "$CHEAT_BASE/$topic?style=rrt" | "$LESS_CMD" -R
+    show_page "$CHEAT_BASE/$topic?style=rrt" "$topic"
     exit 0
 fi
 
-# Choose sheet (if multiple); empty choice => show main topic
+# choose a sheet; empty choice => main topic page
 sheet=$(printf '%s\n' "$sheets_list" | choose_item "Sheet> ")
 
 if [[ -z "${sheet:-}" ]]; then
-    "$CURL_CMD" -fsS "$CHEAT_BASE/$topic?style=rrt" | "$LESS_CMD" -R
+    show_page "$CHEAT_BASE/$topic?style=rrt" "$topic"
 else
-    "$CURL_CMD" -fsS "$CHEAT_BASE/$topic/$sheet?style=rrt" | "$LESS_CMD" -R
+    show_page "$CHEAT_BASE/$topic/$sheet?style=rrt" "$topic"
 fi
+
