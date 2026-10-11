@@ -1,3 +1,0 @@
-#!/bin/env bash
-
-discordo -token "${DISCORDO_TOKEN}"

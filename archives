@@ -1,238 +1,544 @@
 #!/usr/bin/env bash
 # =====================================
-# Archive Utility Script
-# Supports: extract | archive
+# Archive Utility
+# Supports: extract | archive | list | test
 # =====================================
 
-set -e
+set -Eeuo pipefail
+
+PROGRAM="archives"
+TEMP_DIRS=()
+TEMP_FILES=()
 
 function usage() {
     cat <<'EOF'
 Usage:
-  archives extract <archive_file>
-  archives archive <archive_name> <file1> [file2 ... fileN]
+  archives extract [--force] [-C output_dir] <archive_file>
+  archives archive <archive_name> <file1> [file2 ...]
+  archives list <archive_file>
+  archives test <archive_file>
+  archives help
 
-Description:
-  A simple archive utility to extract or create common archive formats.
+Extraction formats:
+  .tar.bz2, .tar.gz, .bz2, .rar, .gz, .tar, .tbz2, .tgz,
+  .zip, .Z, .7z, .deb, .tar.xz, .tar.zst
 
-Supported extraction formats:
-  .tar.bz2, .tar.gz, .bz2, .rar, .gz, .tar, .tbz2, .tgz, .zip, .Z, .7z, .deb, .tar.xz, .tar.zst
-
-Supported archive formats:
+Creation formats:
   .tar.gz, .zip, .rar
+
+Options:
+  -C, --directory DIR   Extract into DIR
+  -f, --force           Allow extraction into an existing destination
+  -h, --help            Show this help
 
 Examples:
   archives extract data.tar.gz
+  archives extract -C output data.zip
+  archives extract --force backup.zip
   archives archive backup.zip file1.txt file2.txt
+  archives list backup.zip
+  archives test backup.tar.gz
+
+Notes:
+  - By default, extraction uses a directory named after the archive.
+  - Single-stream .gz, .bz2, and .Z files decompress to a sibling file.
+  - Never extract untrusted archives on a sensitive host. Path checks are
+    best-effort and do not replace an isolated environment.
 EOF
-    exit 1
 }
 
-# --- Extraction function ---
-function extract() {
-    local file="$1"
-    if [[ -z "$file" ]]; then
-        echo "Error: No file specified for extraction."
-        usage
-    fi
+function error() {
+    printf 'Error: %s\n' "$*" >&2
+}
 
-    if [[ ! -f "$file" ]]; then
-        echo "Error: '$file' is not a valid file."
-        exit 1
-    fi
+function info() {
+    printf '%s\n' "$*"
+}
 
-    # NOTE: .gz/.bz2/.Z are single-stream compressors, not archives - they
-    # never have a "top-level directory" to detect, and the code below that
-    # tried to synthesize one (`dir_name="${base_name%.*}"`, e.g.
-    # "sample.txt.gz" -> "sample.txt") collides head-on with the original
-    # uncompressed file that almost always sits right next to its .gz/.bz2/.Z
-    # copy - mkdir fails because a *file* of that name already exists.
-    # These formats always contain exactly one member, so just decompress
-    # them in place, matching what gunzip/bunzip2/uncompress do by default.
-    case "$file" in
-        # IMPORTANT: .tar.gz/.tgz/.tar.bz2/.tbz2/.tar.xz/.tar.zst must fall
-        # through to the real archive-handling logic below, not the
-        # single-stream case underneath - a bare `*.gz)` pattern would also
-        # match "project.tar.gz" and try to gunzip it into "project.tar"
-        # instead of actually extracting the tarball.
-        *.tar.gz|*.tar.bz2|*.tar.xz|*.tar.zst|*.tgz|*.tbz2) : ;;
-        *.gz)
-            if gunzip -k -- "$file"; then
-                echo "✅ Extracted: ${file%.gz}"
-            fi
-            return
-            ;;
-        *.bz2)
-            if bunzip2 -k -- "$file"; then
-                echo "✅ Extracted: ${file%.bz2}"
-            fi
-            return
-            ;;
-        *.Z)
-            if uncompress -c -- "$file" > "${file%.Z}"; then
-                echo "✅ Extracted: ${file%.Z}"
-            fi
-            return
-            ;;
+function cleanup() {
+    local path
+    for path in "${TEMP_FILES[@]}"; do
+        [[ -n "$path" && -f "$path" ]] && rm -f -- "$path"
+    done
+    for path in "${TEMP_DIRS[@]}"; do
+        [[ -n "$path" && -d "$path" ]] && rm -rf -- "$path"
+    done
+}
+trap cleanup EXIT
+
+function new_temp_dir() {
+    local dir
+    dir=$(mktemp -d "${TMPDIR:-/tmp}/archives.XXXXXXXX") || {
+        error "Could not create temporary directory."
+        return 1
+    }
+    TEMP_DIRS+=("$dir")
+    printf '%s\n' "$dir"
+}
+
+function require_command() {
+    local cmd
+    for cmd in "$@"; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            error "Required command not found: $cmd"
+            return 1
+        fi
+    done
+}
+
+function canonical_path() {
+    # Resolve an existing file/directory to an absolute path.
+    realpath -- "$1"
+}
+
+function archive_kind() {
+    case "$1" in
+        *.tar.gz|*.tgz)   printf 'tar.gz\n' ;;
+        *.tar.bz2|*.tbz2) printf 'tar.bz2\n' ;;
+        *.tar.xz)         printf 'tar.xz\n' ;;
+        *.tar.zst)        printf 'tar.zst\n' ;;
+        *.tar)            printf 'tar\n' ;;
+        *.zip)            printf 'zip\n' ;;
+        *.rar)            printf 'rar\n' ;;
+        *.7z)             printf '7z\n' ;;
+        *.deb)            printf 'deb\n' ;;
+        *.gz)             printf 'gz\n' ;;
+        *.bz2)            printf 'bz2\n' ;;
+        *.Z)              printf 'compress\n' ;;
+        *)                printf 'unknown\n' ;;
     esac
+}
 
-    # Determine a target directory
-    local base_name
-    base_name=$(basename "$file")
-    local dir_name="${base_name%.*}"  # remove extension, may need tweak for double extensions
+# Emit archive member names, one per line, where the backend supports it.
+function list_members() {
+    local file="$1" kind="$2"
 
-    # Handle double extensions like .tar.gz, .tar.bz2, .tar.xz, .tar.zst
-    if [[ "$file" =~ \.tar\.gz$ || "$file" =~ \.tar\.bz2$ || "$file" =~ \.tar\.xz$ || "$file" =~ \.tar\.zst$ ]]; then
-        dir_name="${base_name%.*.*}"
-    elif [[ "$file" =~ \.tbz2$ || "$file" =~ \.tgz$ ]]; then
-        dir_name="${base_name%.*.*}"
-    fi
-
-    # Check if archive contents already have a top-level directory
-    local temp_dir
-    temp_dir=$(mktemp -d)
-    case "$file" in
-        *.tar.bz2|*.tar.gz|*.tar|*.tbz2|*.tgz|*.tar.xz|*.tar.zst)
-            tar -tf "$file" | head -1 > "$temp_dir/first_entry.txt"
+    case "$kind" in
+        tar|tar.gz|tar.bz2|tar.xz)
+            require_command tar || return 1
+            tar -tf "$file"
             ;;
-        *.zip)
-            unzip -l "$file" | awk 'NR>3 {print $4}' | head -1 > "$temp_dir/first_entry.txt"
+        tar.zst)
+            require_command tar zstd || return 1
+            zstd -dc -- "$file" | tar -tf -
             ;;
-        *.7z)
-            7z l "$file" | awk '/^----/{flag=1;next} /^----/{flag=0} flag {print $6}' | head -1 > "$temp_dir/first_entry.txt"
+        zip)
+            require_command unzip || return 1
+            unzip -Z1 "$file"
             ;;
-        *.rar)
-            unrar lb "$file" | head -1 > "$temp_dir/first_entry.txt"
+        rar)
+            require_command unrar || return 1
+            unrar lb "$file"
             ;;
-        *.deb)
-            # .deb (ar) archives are flat (debian-binary, control.tar.*,
-            # data.tar.*) - there's never a shared top-level directory, so
-            # always take the "create a wrapper dir" branch below. Leaving
-            # first_entry.txt unwritten already achieves that (empty
-            # first_entry fails the `-d` test), this just documents why.
+        7z)
+            require_command 7z || return 1
+            7z l -slt -- "$file" |
+            awk -F ' = ' '/^Path = / { print substr($0, 8) }'
+            ;;
+        deb)
+            require_command ar || return 1
+            ar t "$file"
             ;;
         *)
-            echo "Warning: Cannot determine archive structure for '$file'"
+            error "Listing is not supported for this file type."
+            return 1
+            ;;
+    esac
+}
+
+# Best-effort checks against absolute paths and parent traversal.
+# This does not fully model symlinks or every extractor's behavior.
+function validate_member_paths() {
+    local file="$1" kind="$2"
+    local member normalized
+
+    case "$kind" in
+        tar|tar.gz|tar.bz2|tar.xz|tar.zst|zip|rar|7z)
+            ;;
+        *)
+            return 0
             ;;
     esac
 
-    local first_entry_raw=""
-    [[ -f "$temp_dir/first_entry.txt" ]] && first_entry_raw=$(head -1 "$temp_dir/first_entry.txt")
+    while IFS= read -r member; do
+        [[ -z "$member" ]] && continue
+        normalized="${member//\\//}"
 
-    rm -rf "$temp_dir"
+        if [[ "$normalized" == /* || "$normalized" =~ ^[[:alpha:]]:[/] ]]; then
+            error "Unsafe absolute path in archive: $member"
+            return 1
+        fi
 
-    # NOTE: this used to check `[[ ! -d "$first_entry" ]]` - i.e. whether a
-    # directory of that name already exists ON DISK. That's the wrong
-    # question: right before extracting, that directory almost never exists
-    # yet (that's the point of extracting!), so this always concluded "no
-    # wrapper directory" and created one anyway - for a well-formed archive
-    # like "proj.tar.gz" containing "proj/inner/file.txt", that meant
-    # extracting into "proj/" on top of an archive that already wraps
-    # everything in "proj/", producing double-nested "proj/proj/inner/...".
-    # What actually matters is the ARCHIVE'S OWN structure: does its first
-    # entry live inside a subdirectory (contains a "/"), or is it a loose
-    # file at the archive root?
-    if [[ "$first_entry_raw" != */* ]]; then
-        mkdir -p "$dir_name"
-        case "$file" in
-            *.tar.bz2) tar xjf "$file" -C "$dir_name" ;;
-            *.tar.gz)  tar xzf "$file" -C "$dir_name" ;;
-            *.rar)     unrar x "$file" "$dir_name/" ;;
-            *.tar)     tar xf "$file" -C "$dir_name" ;;
-            *.tbz2)    tar xjf "$file" -C "$dir_name" ;;
-            *.tgz)     tar xzf "$file" -C "$dir_name" ;;
-            *.zip)     unzip "$file" -d "$dir_name" ;;
-            *.7z)      7z x "$file" -o"$dir_name" ;;
-            *.deb)
-                # NOTE: `ar` has no `-C`/target-directory flag (unlike tar/
-                # unzip) - passing one is a silent no-op at best or an
-                # "invalid option" error at worst. `ar` always extracts to
-                # the current directory, so cd into the target instead and
-                # resolve the source to an absolute path first, since it's
-                # relative to the directory we're about to leave.
-                local abs_file
-                abs_file=$(realpath "$file")
-                (cd "$dir_name" && ar x "$abs_file")
+        case "/$normalized/" in
+            */../*)
+                error "Unsafe parent traversal path in archive: $member"
+                return 1
                 ;;
-            *.tar.xz)  tar xf "$file" -C "$dir_name" ;;
-            *.tar.zst) unzstd -c "$file" | tar xf - -C "$dir_name" ;;
-            *)         echo "Error: '$file' cannot be extracted via this script." ;;
         esac
-        echo "✅ Extracted to directory: $dir_name"
-    else
-        # Archive already has a top-level directory
-        case "$file" in
-            *.tar.bz2) tar xjf "$file" ;;
-            *.tar.gz)  tar xzf "$file" ;;
-            *.rar)     unrar x "$file" ;;
-            *.tar)     tar xf "$file" ;;
-            *.tbz2)    tar xjf "$file" ;;
-            *.tgz)     tar xzf "$file" ;;
-            *.zip)     unzip "$file" ;;
-            *.7z)      7z x "$file" ;;
-            *.deb)     ar x "$file" ;;
-            *.tar.xz)  tar xf "$file" ;;
-            *.tar.zst) unzstd "$file" ;;
-        esac
-        echo "✅ Extracted archive contents (already in top-level directory)"
-    fi
+        done < <(list_members "$file" "$kind") || {
+        error "Could not inspect archive members."
+        return 1
+    }
 }
 
-# --- Archiving function ---
+function default_output_name() {
+    local base="$1"
+    case "$base" in
+        *.tar.gz|*.tar.bz2|*.tar.xz|*.tar.zst) printf '%s\n' "${base%.*.*}" ;;
+        *.tgz|*.tbz2)                         printf '%s\n' "${base%.*}" ;;
+        *.tar|*.zip|*.rar|*.7z|*.deb)         printf '%s\n' "${base%.*}" ;;
+        *)                                    printf '%s\n' "${base%.*}" ;;
+    esac
+}
+
+function extract_stream() {
+    local file="$1" kind="$2" output="$3" force="$4"
+    local parent tmp
+
+    parent=$(dirname -- "$output")
+    mkdir -p -- "$parent"
+
+    if [[ -e "$output" && "$force" != "true" ]]; then
+        error "Destination already exists: $output (use --force to replace it)"
+        return 1
+    fi
+
+    tmp=$(mktemp "$parent/.archives-output.XXXXXXXX") || {
+        error "Could not create temporary output file."
+        return 1
+    }
+    TEMP_FILES+=("$tmp")
+
+    case "$kind" in
+        gz)
+            require_command gzip || return 1
+            gzip -dc -- "$file" > "$tmp" || {
+                error "gzip decompression failed."
+                return 1
+            }
+            ;;
+        bz2)
+            require_command bzip2 || return 1
+            bzip2 -dc -- "$file" > "$tmp" || {
+                error "bzip2 decompression failed."
+                return 1
+            }
+            ;;
+        compress)
+            require_command uncompress || return 1
+            uncompress -c -- "$file" > "$tmp" || {
+                error "compress decompression failed."
+                return 1
+            }
+            ;;
+        *)
+            error "Unsupported single-stream format."
+            return 1
+            ;;
+    esac
+
+    if [[ -e "$output" && "$force" != "true" ]]; then
+        error "Destination appeared during extraction: $output"
+        return 1
+    fi
+    mv -f -- "$tmp" "$output"
+    info "Extracted: $output"
+}
+
+function extract_archive_to() {
+    local file="$1" kind="$2" dest="$3"
+    case "$kind" in
+        tar)
+            require_command tar || return 1
+            tar --no-same-owner -xf "$file" -C "$dest"
+            ;;
+        tar.gz)
+            require_command tar || return 1
+            tar --no-same-owner -xzf "$file" -C "$dest"
+            ;;
+        tar.bz2)
+            require_command tar || return 1
+            tar --no-same-owner -xjf "$file" -C "$dest"
+            ;;
+        tar.xz)
+            require_command tar || return 1
+            tar --no-same-owner -xJf "$file" -C "$dest"
+            ;;
+        tar.zst)
+            require_command tar zstd || return 1
+            zstd -dc -- "$file" | tar --no-same-owner -xf - -C "$dest"
+            ;;
+        zip)
+            require_command unzip || return 1
+            unzip -o "$file" -d "$dest"
+            ;;
+        rar)
+            require_command unrar || return 1
+            unrar x -o+ "$file" "$dest/"
+            ;;
+        7z)
+            require_command 7z || return 1
+            7z x -y "-o$dest" -- "$file"
+            ;;
+        deb)
+            require_command ar || return 1
+            (cd "$dest" && ar x "$file")
+            ;;
+        *)
+            error "Unsupported extraction format: $file"
+            return 1
+            ;;
+    esac
+}
+
+function extract() {
+    local force=false output_dir="" file kind base dest parent abs_file
+    while (($#)); do
+        case "$1" in
+            -C|--directory)
+                (($# >= 2)) || { error "Missing directory after $1"; return 1; }
+                output_dir="$2"
+                shift 2
+                ;;
+            -f|--force)
+                force=true
+                shift
+                ;;
+            -h|--help)
+                usage
+                return 0
+                ;;
+            --)
+                shift
+                break
+                ;;
+            -*)
+                error "Unknown extract option: $1"
+                return 1
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    (($# == 1)) || { error "extract requires exactly one archive file."; return 1; }
+    file="$1"
+
+    [[ -f "$file" ]] || { error "Not a regular file: $file"; return 1; }
+    abs_file=$(canonical_path "$file") || return 1
+    base=$(basename -- "$file")
+    kind=$(archive_kind "$base")
+
+    case "$kind" in
+        gz|bz2|compress)
+            [[ -n "$output_dir" ]] && {
+                error "-C is not supported for single-stream compression; specify a destination by moving the input or use a dedicated output option."
+                return 1
+            }
+            case "$kind" in
+                gz)      dest="${base%.gz}" ;;
+                bz2)     dest="${base%.bz2}" ;;
+                compress) dest="${base%.Z}" ;;
+            esac
+            extract_stream "$abs_file" "$kind" "$(dirname -- "$file")/$dest" "$force"
+            return
+            ;;
+        unknown)
+            error "Unsupported archive format: $file"
+            return 1
+            ;;
+    esac
+
+    validate_member_paths "$abs_file" "$kind" || return 1
+
+    if [[ -n "$output_dir" ]]; then
+        dest="$output_dir"
+    else
+        dest="$(dirname -- "$file")/$(default_output_name "$base")"
+    fi
+
+    if [[ -e "$dest" ]]; then
+        if [[ "$force" != "true" ]]; then
+            error "Destination already exists: $dest (use --force to extract into it)"
+            return 1
+        fi
+        [[ -d "$dest" ]] || { error "Destination exists and is not a directory: $dest"; return 1; }
+    else
+        mkdir -p -- "$dest"
+    fi
+
+    dest=$(canonical_path "$dest") || return 1
+
+    # Resolve source before changing directories (notably for .deb).
+    extract_archive_to "$abs_file" "$kind" "$dest" || {
+        error "Extraction failed. Partial output may remain in: $dest"
+        return 1
+    }
+    info "Extracted to: $dest"
+}
+
 function archive() {
     local archive_name="$1"
     shift
-    local files=("$@")
+    local -a files=("$@")
+    local file kind parent tmpdir tmp
 
-    if [[ -z "$archive_name" || "${#files[@]}" -lt 1 ]]; then
-        echo "Error: Missing archive name or files."
-        usage
-    fi
+    [[ -n "$archive_name" && ${#files[@]} -gt 0 ]] || {
+        error "archive requires an archive name and at least one input."
+        return 1
+    }
 
-    if [[ -e "$archive_name" ]]; then
-        echo "Error: Archive '$archive_name' already exists."
-        exit 1
-    fi
+    [[ ! -e "$archive_name" ]] || {
+        error "Archive already exists: $archive_name"
+        return 1
+    }
 
-    case "$archive_name" in
-        *.tar.gz)
-            tar -czf "$archive_name" "${files[@]}"
+    for file in "${files[@]}"; do
+        [[ -e "$file" || -L "$file" ]] || {
+            error "Input does not exist: $file"
+            return 1
+        }
+    done
+
+    kind=$(archive_kind "$archive_name")
+    parent=$(dirname -- "$archive_name")
+    mkdir -p -- "$parent"
+    tmpdir=$(mktemp -d "$parent/.archives-create.XXXXXXXX") || {
+        error "Could not create temporary archive directory."
+        return 1
+    }
+    TEMP_DIRS+=("$tmpdir")
+
+    case "$kind" in
+        tar.gz)
+            require_command tar || return 1
+            tmp="$tmpdir/archive.tar.gz"
+            tar -czf "$tmp" -- "${files[@]}"
             ;;
-        *.zip)
-            zip -r "$archive_name" "${files[@]}"
+        zip)
+            require_command zip || return 1
+            tmp="$tmpdir/archive.zip"
+            zip -r "$tmp" -- "${files[@]}"
             ;;
-        *.rar)
-            if command -v rar > /dev/null; then
-                rar a "$archive_name" "${files[@]}"
-            else
-                echo "Error: 'rar' command not found. Please install RAR to create .rar archives."
-                exit 1
-            fi
+        rar)
+            require_command rar || return 1
+            tmp="$tmpdir/archive.rar"
+            rar a "$tmp" "${files[@]}"
             ;;
         *)
-            echo "Error: Unsupported archive format."
-            echo "Supported: .tar.gz, .zip, .rar"
-            exit 1
+            error "Unsupported creation format: $archive_name"
+            error "Supported: .tar.gz, .zip, .rar"
+            return 1
             ;;
-    esac
+        esac || {
+        error "Archive creation failed."
+        return 1
+    }
 
-    echo "✅ Archive created: $archive_name"
+    [[ ! -e "$archive_name" ]] || {
+        error "Archive appeared during creation: $archive_name"
+        return 1
+    }
+    mv -- "$tmp" "$archive_name"
+    info "Archive created: $archive_name"
 }
 
-# --- Main dispatcher ---
-if [[ $# -lt 1 ]]; then
-    usage
-fi
+function list_archive() {
+    local file="$1" kind
+    [[ -f "$file" ]] || { error "Not a regular file: $file"; return 1; }
+    kind=$(archive_kind "$(basename -- "$file")")
+    list_members "$(canonical_path "$file")" "$kind"
+}
 
-command="$1"
-shift
+function test_archive() {
+    local file="$1" kind abs_file
+    [[ -f "$file" ]] || { error "Not a regular file: $file"; return 1; }
+    abs_file=$(canonical_path "$file") || return 1
+    kind=$(archive_kind "$(basename -- "$file")")
 
-case "$command" in
-    extract) extract "$@" ;;
-    archive) archive "$@" ;;
-    help|--help|-h) usage ;;
-    *)
-        echo "Error: Unknown command '$command'"
+    case "$kind" in
+        tar|tar.gz|tar.bz2|tar.xz)
+            require_command tar || return 1
+            tar -tf "$abs_file" >/dev/null
+            ;;
+        tar.zst)
+            require_command zstd tar || return 1
+            zstd -t -- "$abs_file"
+            zstd -dc -- "$abs_file" | tar -tf - >/dev/null
+            ;;
+        zip)
+            require_command unzip || return 1
+            unzip -t "$abs_file"
+            ;;
+        rar)
+            require_command unrar || return 1
+            unrar t "$abs_file"
+            ;;
+        7z)
+            require_command 7z || return 1
+            7z t -- "$abs_file"
+            ;;
+        deb)
+            require_command ar || return 1
+            ar t "$abs_file" >/dev/null
+            ;;
+        gz)
+            require_command gzip || return 1
+            gzip -t -- "$abs_file"
+            ;;
+        bz2)
+            require_command bzip2 || return 1
+            bzip2 -t -- "$abs_file"
+            ;;
+        compress)
+            require_command uncompress || return 1
+            local check_dir check_output
+            check_dir=$(new_temp_dir) || return 1
+            check_output="$check_dir/output"
+            uncompress -c -- "$abs_file" > "$check_output"
+            ;;
+        *)
+            error "Unsupported test format: $file"
+            return 1
+            ;;
+        esac || {
+        error "Archive test failed: $file"
+        return 1
+    }
+    info "Archive test passed: $file"
+}
+
+function main() {
+    if (($# == 0)); then
         usage
-        ;;
-esac
+        return 0
+    fi
+    local command="$1"
+    shift
+
+    case "$command" in
+        extract) extract "$@" ;;
+        archive)
+            (($# >= 2)) || { error "archive requires a name and input files."; usage; return 1; }
+            archive "$@"
+            ;;
+        list)
+            (($# == 1)) || { error "list requires exactly one archive file."; return 1; }
+            list_archive "$1"
+            ;;
+        test)
+            (($# == 1)) || { error "test requires exactly one archive file."; return 1; }
+            test_archive "$1"
+            ;;
+        help|--help|-h) usage ;;
+        *)
+            error "Unknown command: $command"
+            usage
+            return 1
+            ;;
+    esac
+}
+
+main "$@"
+
