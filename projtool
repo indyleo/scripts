@@ -70,6 +70,7 @@ function mkproj() {
     local language=""
     local arduino_board=""
     local build_system=""   # make | just | sh | "" (auto/default)
+    local do_git=true do_docs=true do_direnv=true   # automatic; disable via flags
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -78,6 +79,12 @@ function mkproj() {
             -b|--board)   arduino_board="${2-}"; shift 2 ;;
             -B|--build)   build_system="${2-}";  shift 2 ;;
             -y|--yes)     auto_yes=true;         shift ;;
+            --git)        do_git=true;           shift ;;
+            --no-git)     do_git=false;          shift ;;
+            --docs)       do_docs=true;          shift ;;
+            --no-docs)    do_docs=false;         shift ;;
+            --direnv)     do_direnv=true;        shift ;;
+            --no-direnv)  do_direnv=false;       shift ;;
             *) shift ;;
         esac
     done
@@ -151,7 +158,9 @@ function mkproj() {
         py)
             echo "${TEMPLATES[py]}" > "src/main.py"
             chmod +x "src/main.py"
-            if command -v python3 >/dev/null 2>&1; then
+            if $do_direnv && command -v direnv >/dev/null 2>&1; then
+                print_color "$GREEN" "✅ Python venv will be managed by direnv (layout python3)"
+            elif command -v python3 >/dev/null 2>&1; then
                 python3 -m venv "venv" 2>/dev/null || true
                 print_color "$GREEN" "✅ Python venv created at venv/"
             fi
@@ -331,7 +340,7 @@ EOF
 
     _setup_gitignore "$language"
     print_color "$GREEN" "✅ Project created at $proj_path"
-    _check_and_offer_setup "$language" "$auto_yes" "$build_system"
+    _finish_setup "$language" "$build_system" "$do_direnv" "$do_docs" "$do_git" "$arduino_board"
 }
 
 # -----------------------------
@@ -1009,28 +1018,156 @@ EOF
 }
 
 # -----------------------------
-# Offer setup for docs/git
+# direnv support
 # -----------------------------
-function _check_and_offer_setup() {
-    local language="$1"
-    local auto_yes="$2"
-    local build_system="${3:-}"
-    local ans
+# Built-in direnv layouts are used where they exist (python3, go).
+# For everything else projtool installs its own layouts into
+# $XDG_CONFIG_HOME/direnv/lib/projtool.sh (auto-loaded by direnv).
 
-    if $auto_yes; then
-        setupdocs "$language" "$build_system"
-        # cargo init already sets up git; skip for rs
-        [[ "$language" != "rs" && ! -d .git ]] && mkgit
+function _direnv_lib_dir() { echo "${XDG_CONFIG_HOME:-$HOME/.config}/direnv/lib"; }
+
+function _install_direnv_layouts() {
+    local dir file tmp
+    dir="$(_direnv_lib_dir)"
+    file="$dir/projtool.sh"
+    tmp="$(mktemp)"
+    mkdir -p "$dir"
+
+    cat > "$tmp" <<'EOF'
+# projtool direnv layouts -- managed by projtool, edits will be overwritten.
+# Covers languages that direnv has no built-in layout for.
+
+layout_c() {
+    PATH_add bin
+    export PROJECT_ROOT="$PWD"
+}
+
+layout_cpp() {
+    layout_c
+}
+
+layout_rust() {
+    PATH_add target/debug
+    PATH_add target/release
+    export PROJECT_ROOT="$PWD"
+}
+
+layout_zig() {
+    PATH_add zig-out/bin
+    export PROJECT_ROOT="$PWD"
+}
+
+layout_lua() {
+    export LUA_PATH="$PWD/src/?.lua;$PWD/src/?/init.lua;;"
+    PATH_add src
+    export PROJECT_ROOT="$PWD"
+}
+
+layout_sh() {
+    PATH_add src
+    export PROJECT_ROOT="$PWD"
+}
+
+# Neovim plugin: wrap nvim so this plugin is always on the runtimepath.
+layout_nvim() {
+    local real bindir rtp
+    export NVIM_PLUGIN_ROOT="$PWD"
+    real="$(command -v nvim 2>/dev/null || true)"
+    [[ -z "$real" ]] && return 0
+    bindir="$(direnv_layout_dir)/bin"
+    rtp="${PWD// /\\ }"
+    mkdir -p "$bindir"
+    printf '#!/usr/bin/env bash\nexec "%s" --cmd "set rtp^=%s" "$@"\n' "$real" "$rtp" > "$bindir/nvim"
+    chmod +x "$bindir/nvim"
+    PATH_add "$bindir"
+}
+
+# Arduino: layout ino [fqbn]
+layout_ino() {
+    export ARDUINO_FQBN="${1:-arduino:avr:uno}"
+    : "${PORT:=/dev/ttyACM0}"
+    export PORT
+    export PROJECT_ROOT="$PWD"
+}
+EOF
+
+    if [[ ! -f "$file" ]]; then
+        mv "$tmp" "$file"
+        print_color "$GREEN" "✅ direnv layouts installed: $file"
+    elif ! cmp -s "$tmp" "$file"; then
+        mv "$tmp" "$file"
+        print_color "$GREEN" "✅ direnv layouts updated: $file"
     else
-        if [[ ! -f README.md || ! -f LICENSE ]]; then
-            read -rp "❔ Set up docs now? (y/N): " ans
-            [[ "$ans" =~ ^[Yy]$ ]] && setupdocs "$language" "$build_system"
-        fi
-        if [[ "$language" != "rs" && ! -d .git ]]; then
-            read -rp "❔ Initialize Git? (y/N): " ans
-            [[ "$ans" =~ ^[Yy]$ ]] && mkgit
-        fi
+        rm -f "$tmp"
     fi
+}
+
+function _detect_language() {
+    if   [[ -f Cargo.toml ]];                                   then echo rs
+    elif [[ -f build.zig ]];                                    then echo zig
+    elif compgen -G "sketch/*.ino" >/dev/null;                  then echo ino
+    elif [[ -f go.mod ]] || compgen -G "src/*.go" >/dev/null;   then echo go
+    elif compgen -G "src/*.cpp" >/dev/null;                     then echo cpp
+    elif compgen -G "src/*.c" >/dev/null;                       then echo c
+    elif compgen -G "src/*.py" >/dev/null;                      then echo py
+    elif [[ -d plugin && -d lua ]];                             then echo nvim
+    elif compgen -G "src/*.lua" >/dev/null;                     then echo lua
+    elif compgen -G "src/*.sh" >/dev/null;                      then echo sh
+    else echo ""
+    fi
+}
+
+function _setup_direnv() {
+    local language="${1:-}" board="${2:-}"
+    local envrc=""
+
+    _install_direnv_layouts
+
+    case "$language" in
+        py)  envrc="layout python3" ;;                 # built-in
+        go)  envrc="layout go" ;;                      # built-in
+        ino) envrc="layout ino${board:+ $board}" ;;    # projtool layout
+        c|cpp|rs|zig|lua|sh|nvim) envrc="layout $language" ;;  # projtool layouts
+        *)   envrc="PATH_add src" ;;
+    esac
+
+    if [[ -f .envrc ]]; then
+        print_color "$YELLOW" "⚙️  .envrc exists, leaving it alone."
+    else
+        printf '# Managed by projtool\n%s\n' "$envrc" > .envrc
+        print_color "$GREEN" "✅ .envrc created ($envrc)"
+    fi
+
+    # Keep direnv's cache dir out of git
+    touch .gitignore
+    grep -qxF '.direnv/' .gitignore || printf '\n# direnv\n.direnv/\n' >> .gitignore
+
+    if command -v direnv >/dev/null 2>&1; then
+        direnv allow . >/dev/null 2>&1 \
+            && print_color "$GREEN" "✅ direnv allowed" \
+            || print_color "$YELLOW" "⚠️  'direnv allow' failed; run it manually."
+    else
+        print_color "$YELLOW" "⚠️  direnv not installed; .envrc written but not allowed."
+    fi
+}
+
+function mkdirenv() {
+    local language="${1:-}" board="${2:-}"
+    [[ -z "$language" ]] && language="$(_detect_language)"
+    _setup_direnv "$language" "$board"
+}
+
+# -----------------------------
+# Finish setup: direnv, docs, git (automatic, controlled by flags)
+# -----------------------------
+function _finish_setup() {
+    local language="$1" build_system="$2" do_direnv="$3" do_docs="$4" do_git="$5" board="${6:-}"
+
+    if $do_direnv; then _setup_direnv "$language" "$board"; fi
+    if $do_docs;   then setupdocs "$language" "$build_system"; fi
+    # cargo init already sets up git; skip for rs
+    if $do_git && [[ "$language" != "rs" && ! -d .git ]]; then mkgit; fi
+    return 0
 }
 
 # -----------------------------
@@ -1047,9 +1184,20 @@ Commands:
                  -l <lang>          Language (see below)
                  -B <build-system>  Build system: make | just | sh  (overrides default)
                  -b <fqbn>          Arduino board FQBN (e.g. arduino:avr:uno)
-                 -y                 Skip prompts; auto-create docs and git
+                 -y                 Skip remaining prompts (build system, board)
+                 --no-git           Don't initialize git        (default: on)
+                 --no-docs          Don't create README/LICENSE (default: on)
+                 --no-direnv        Don't create .envrc         (default: on)
+                 --git/--docs/--direnv  Explicitly enable (already the default)
   mkgit        Initialize Git in current directory
   setupdocs    Create README.md and LICENSE
+  mkdirenv     Create .envrc + layouts in current directory
+               Usage: mkdirenv [lang] [fqbn]   (lang auto-detected if omitted)
+
+direnv layouts:
+  py -> layout python3 (built-in)    go -> layout go (built-in)
+  c cpp rs zig lua sh nvim ino -> projtool layouts, auto-installed to
+  ~/.config/direnv/lib/projtool.sh
 
 Languages & default build systems:
   sh    Bash script              build.sh (default) | make | just
@@ -1076,6 +1224,9 @@ Examples:
   projtool mkproj -n plugin -l nvim
   projtool mkproj -n script -l lua
   projtool mkproj -n webapp -l py  -y
+  projtool mkproj -n quick  -l c   --no-git --no-docs
+  projtool mkproj -n bare   -l go  --no-direnv
+  projtool mkdirenv                # add direnv to an existing project
   projtool mkproj -n blink  -l ino -b esp32:esp32:esp32
 EOF
 }
@@ -1087,5 +1238,7 @@ case "${1:-}" in
     mkproj)    shift; mkproj "$@" ;;
     mkgit)     mkgit ;;
     setupdocs) shift; setupdocs "${1:-}" "${2:-}" ;;
+    mkdirenv)  shift; mkdirenv "${1:-}" "${2:-}" ;;
     *)         usage ;;
 esac
+
