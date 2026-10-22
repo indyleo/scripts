@@ -10,20 +10,6 @@
 #   open many files    multiple=1 directory=0 save=0
 #   choose a directory directory=1
 #   save as            save=1   (path = suggested dir/name)
-#
-# The picking logic lives in lfrc ("FILE PICKER"): this script only works out the
-# mode and start directory and opens lf in its own terminal window.
-#
-# Setup:
-#   install -Dm755 lf-wrapper.sh ~/.config/xdg-desktop-portal-termfilechooser/lf-wrapper.sh
-#   ~/.config/xdg-desktop-portal-termfilechooser/config:
-#       [filechooser]
-#       cmd=lf-wrapper.sh
-#   and point the FileChooser portal at termfilechooser (portals.conf:
-#   org.freedesktop.impl.portal.FileChooser=termfilechooser).
-#
-# LF_PICKER_TERM is the terminal command, split on spaces (no quoting). The class
-# lets you float it with a window rule, e.g. match class "lf-picker" in Hyprland.
 set -eu
 
 multiple=${1:-0}
