@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env sh
 # lf-wrapper.sh - file / directory / save picker for GUI apps, backed by lf.
 #
 # Called by xdg-desktop-portal-termfilechooser as
