@@ -1,10 +1,10 @@
 #!/usr/bin/env sh
-# lf-wrapper.sh - file / directory / save picker for GUI apps, backed by lf.
+# lf-picker.sh - file / directory / save picker for GUI apps, backed by lf.
 #
 # Called by xdg-desktop-portal-termfilechooser as
-#   lf-wrapper.sh <multiple> <directory> <save> <path> <out> [debug]
+#   lf-picker.sh <multiple> <directory> <save> <path> <out> [debug]
 # and the chosen path(s) are read back from <out> (empty file = cancelled).
-# Handy to try by hand:  lf-wrapper.sh 0 1 0 ~/Downloads /tmp/out; cat /tmp/out
+# Handy to try by hand:  lf-picker.sh 0 1 0 ~/Downloads /tmp/out; cat /tmp/out
 #
 #   open one file      multiple=0 directory=0 save=0
 #   open many files    multiple=1 directory=0 save=0
@@ -15,11 +15,13 @@
 # mode and start directory and opens lf in its own terminal window.
 #
 # Setup:
-#   install -Dm755 lf-wrapper.sh ~/.config/xdg-desktop-portal-termfilechooser/lf-wrapper.sh
+#   Keep this script anywhere on your PATH (e.g. ~/.local/scripts), executable.
+#   It is deliberately NOT called lf-wrapper.sh: the portal package ships a stock
+#   script with that name that is searched before your own directories.
 #   ~/.config/xdg-desktop-portal-termfilechooser/config:
 #       [filechooser]
-#       cmd=lf-wrapper.sh
-#   and point the FileChooser portal at termfilechooser (portals.conf:
+#       cmd=lf-picker.sh
+#   and point the FileChooser portal at termfilechooser (hyprland-portals.conf:
 #   org.freedesktop.impl.portal.FileChooser=termfilechooser).
 #
 # LF_PICKER_TERM is the terminal command, split on spaces (no quoting). The class
