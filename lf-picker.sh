@@ -47,7 +47,13 @@ if [ -d "$path" ]; then
     start=$path
 elif [ -n "$path" ]; then
     start=$(dirname -- "$path")
-    [ "$mode" != save ] || name=$(basename -- "$path")
+    if [ "$mode" = save ]; then
+        name=$(basename -- "$path")
+        # the portal appends "_" until the name is unused; undo that
+        while [ "${name%_}" != "$name" ] && [ -e "$start/${name%_}" ]; do
+            name=${name%_}
+        done
+    fi
 else
     start=$HOME
 fi
