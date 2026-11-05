@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import curses
+import fcntl
 import hashlib
 import json
 import os
@@ -85,6 +86,20 @@ def save_settings(data: dict) -> None:
     tmp = SETTINGS.with_name("settings.json.tmp")
     tmp.write_text(json.dumps(data, indent=2) + "\n")
     os.replace(tmp, SETTINGS)
+
+
+AUTO_UPDATE_KEY = "auto_update_global"
+
+
+def global_auto_update() -> bool:
+    """Master switch for automatic updates. Off unless explicitly enabled."""
+    return load_settings().get(AUTO_UPDATE_KEY) is True
+
+
+def set_global_auto_update(enabled: bool) -> None:
+    data = load_settings()
+    data[AUTO_UPDATE_KEY] = bool(enabled)
+    save_settings(data)
 
 
 # --------------------------------------------------------------------------- utils
@@ -244,21 +259,86 @@ def newest_cached():
     return versions[-1] if versions else None
 
 
-def latest_release():
+def _github_json(url: str, what: str):
     req = urllib.request.Request(
-        f"https://api.github.com/repos/{REPO}/releases/latest",
-        headers={"User-Agent": UA, "Accept": "application/vnd.github+json"},
-    )
+        url, headers={"User-Agent": UA, "Accept": "application/vnd.github+json"})
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
-            data = json.load(r)
+            return json.load(r)
     except (urllib.error.URLError, OSError, ValueError) as e:
-        raise Error(f"could not ask GitHub for the latest release: {e}")
-    for asset in data.get("assets", []):
+        raise Error(f"could not {what}: {e}")
+
+
+def _release_asset(release):
+    """(version, download_url) of our AppImage in a release, or None."""
+    for asset in release.get("assets", []) or []:
         m = ASSET_RE.match(asset.get("name", ""))
-        if m:
+        if m and asset.get("browser_download_url"):
             return m.group(1), asset["browser_download_url"]
-    raise Error("the latest release has no x86_64 AppImage asset")
+    return None
+
+
+def latest_release():
+    """Newest *stable* release. GitHub's /releases/latest never returns prereleases or drafts."""
+    data = _github_json(f"https://api.github.com/repos/{REPO}/releases/latest",
+                        "ask GitHub for the latest release")
+    found = _release_asset(data) if isinstance(data, dict) else None
+    if not found:
+        raise Error("the latest release has no x86_64 AppImage asset")
+    return found
+
+
+def available_releases():
+    """Published GitHub releases that provide our x86_64 AppImage, newest first.
+
+    Returns [(tag, label, is_prerelease)]. Follows pagination (100 per page) so no
+    release is missed. Drafts and releases without the expected asset are skipped.
+    If a page after the first fails, the releases collected so far are returned.
+    """
+    found, seen = [], set()
+    for page in range(1, 51):
+        url = f"https://api.github.com/repos/{REPO}/releases?per_page=100&page={page}"
+        try:
+            data = _github_json(url, "retrieve GitHub releases")
+        except Error:
+            if page == 1:
+                raise
+            break
+        if not isinstance(data, list):
+            break
+        for release in data:
+            if release.get("draft"):
+                continue
+            tag = release.get("tag_name")
+            if not tag or tag in seen or not _release_asset(release):
+                continue
+            seen.add(tag)
+            title = (release.get("name") or "").strip()
+            label = tag if title in ("", tag) else f"{tag} \u2014 {title}"
+            pre = bool(release.get("prerelease"))
+            found.append((tag, label + (" [prerelease]" if pre else ""), pre))
+        if len(data) < 100:
+            break
+    return found
+
+
+def _release_key(version: str):
+    """Orderable key where 1.2.0 > 1.2.0-rc1 and 1.2.0 == 1.2 (used for update decisions)."""
+    m = re.match(r"[vV]?(\d+(?:\.\d+)*)(.*)$", version or "")
+    if not m:
+        return ((), False)
+    nums = [int(x) for x in m.group(1).split(".")]
+    while nums and nums[-1] == 0:
+        nums.pop()
+    return (tuple(nums), not m.group(2).strip("-.+ _"))
+
+
+def _is_newer(candidate: str, current: str) -> bool:
+    if candidate == current:
+        return False
+    if not current or current == "?":
+        return True
+    return _release_key(candidate) > _release_key(current)
 
 
 def fetch(version=None, latest=False, force=False, progress=None):
@@ -344,6 +424,11 @@ class Instance:
     @property
     def version(self) -> str:
         return self.meta().get("version", "?")
+
+    @property
+    def auto_update(self) -> bool:
+        """Per-instance flag; instances without it (older installs) default to off."""
+        return self.meta().get("auto_update") is True
 
     def env(self) -> dict:
         env = os.environ.copy()
@@ -431,7 +516,8 @@ def seed_payloads(donor: Instance, target: Instance) -> None:
             clone_or_copy(s, dst / item)
 
 
-def create_instance(name, version=None, env=None, seed=None, progress=None) -> Instance:
+def create_instance(name, version=None, env=None, seed=None, progress=None,
+                    auto_update=False) -> Instance:
     if not NAME_RE.match(name):
         raise Error(f"bad name '{name}' (letters, digits, . _ -; max 32 chars)")
     inst = Instance(name)
@@ -450,6 +536,7 @@ def create_instance(name, version=None, env=None, seed=None, progress=None) -> I
         if donor:
             seed_payloads(donor, inst)
         inst.save_meta({"name": name, "version": ver, "env": env or {},
+                        "auto_update": bool(auto_update),
                         "created": time.strftime("%Y-%m-%dT%H:%M:%S")})
     except BaseException:
         rmtree_force(inst.dir)
@@ -457,29 +544,99 @@ def create_instance(name, version=None, env=None, seed=None, progress=None) -> I
     return inst
 
 
+def set_instance_auto_update(inst: Instance, enabled: bool) -> None:
+    meta = inst.meta()
+    if not meta:
+        raise Error(f"{inst.name}: meta.json is unreadable; not touching it")
+    meta["auto_update"] = bool(enabled)
+    inst.save_meta(meta)
+
+
+class _UpdateLock:
+    """Non-blocking per-instance lock (flock) so two updates never run at once,
+    whether from two threads or two mocktail-multi processes."""
+
+    def __init__(self, inst: Instance):
+        self.inst, self.fd = inst, None
+
+    def __enter__(self):
+        fd = os.open(self.inst.dir / "update.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            raise Error(f"an update of '{self.inst.name}' is already in progress")
+        self.fd = fd
+        return self
+
+    def __exit__(self, *_exc):
+        if self.fd is not None:
+            os.close(self.fd)  # closing releases the flock
+            self.fd = None
+
+
 def upgrade_instance(inst: Instance, version=None, latest=False, progress=None) -> str:
     if inst.running():
         raise Error(f"stop '{inst.name}' before upgrading it")
-    ver, src = ensure_appimage(version, latest=latest, progress=progress)
-    tmp = inst.dir / "Mocktail.AppImage.new"
-    clone_or_copy(src, tmp)
-    tmp.chmod(0o755)
-    os.replace(tmp, inst.appimage)  # same path => same lock key
-    meta = inst.meta()
-    meta["version"] = ver
-    inst.save_meta(meta)
+    with _UpdateLock(inst):
+        ver, src = ensure_appimage(version, latest=latest, progress=progress)
+        tmp = inst.dir / "Mocktail.AppImage.new"
+        try:
+            clone_or_copy(src, tmp)
+            tmp.chmod(0o755)
+            if not is_appimage(tmp):
+                raise Error(f"{src.name} is not a valid AppImage; keeping the current one")
+            os.replace(tmp, inst.appimage)  # atomic; same path => same lock key
+        except BaseException:
+            tmp.unlink(missing_ok=True)  # the installed AppImage is untouched on any failure
+            raise
+        meta = inst.meta()
+        meta["version"] = ver
+        inst.save_meta(meta)
     return ver
 
 
-def start(inst: Instance):
+def auto_update_enabled(inst: Instance) -> bool:
+    """Global master switch AND the instance's own switch must both be on."""
+    return global_auto_update() and inst.auto_update
+
+
+def maybe_auto_update(inst: Instance, progress=None):
+    """Update *inst* to the newest stable release if auto-update applies to it.
+
+    Never raises: any failure (GitHub down, no asset, interrupted download, update
+    already running) returns a message and leaves the installed version untouched.
+    Returns None when nothing was due, otherwise a one-line status message.
+    """
+    if not auto_update_enabled(inst):
+        return None
+    try:
+        newest, _url = latest_release()
+        current = inst.version
+        if not _is_newer(newest, current):
+            return None
+        ver = upgrade_instance(inst, latest=True, progress=progress)
+        return f"auto-update: {inst.name} {current} -> {ver}"
+    except Error as e:
+        return f"auto-update skipped for {inst.name}: {e}"
+    except Exception as e:  # never block a launch
+        return f"auto-update skipped for {inst.name}: {type(e).__name__}: {e}"
+
+
+def start(inst: Instance, progress=None):
     if inst.running():
         raise Error(f"{inst.name} is already running")
+    # Checked before every launch. A failed check never blocks the launch: the
+    # currently installed version simply starts.
+    note = maybe_auto_update(inst, progress)
     if not inst.appimage.exists():
         raise Error(f"{inst.name}: AppImage is missing (try: upgrade {inst.name})")
     if inst.log.exists() and inst.log.stat().st_size > 5 * 1024 * 1024:
         os.replace(inst.log, inst.log.with_name("console.log.1"))
     with open(inst.log, "ab") as logf:
         logf.write(f"\n=== {time.strftime('%F %T')} starting {inst.name} ===\n".encode())
+        if note:
+            logf.write(f"[mocktail-multi] {note}\n".encode())
         logf.flush()
         proc = subprocess.Popen(
             [sys.executable, os.path.abspath(__file__), "_supervise", inst.name],
@@ -490,6 +647,7 @@ def start(inst: Instance):
     if started is not None:
         inst.pidfile.write_text(f"{proc.pid} {started}\n")
     _CHILDREN[inst.name] = proc
+    proc.update_note = note  # surfaced by the CLI/GUI; None when no update was due
     return proc
 
 
@@ -626,7 +784,7 @@ def cmd_new(args):
 
     for name in args.names:
         inst = create_instance(name, version=args.version, env=env, seed=seed,
-                               progress=progress)
+                               progress=progress, auto_update=args.auto_update)
         if sys.stdout.isatty():
             print()
         extra = f", payload seeded from {seed}" if seed else ""
@@ -643,6 +801,8 @@ def _pick(args):
 
 def _start_checked(inst: Instance, settle: float = 2.5) -> str:
     proc = start(inst)
+    if getattr(proc, "update_note", None):
+        print(proc.update_note)
     end = time.time() + settle
     while time.time() < end and proc.poll() is None:
         time.sleep(0.1)
@@ -690,6 +850,31 @@ def cmd_upgrade(args):
         old = inst.version
         ver = upgrade_instance(inst, version=args.version, latest=args.latest)
         print(f"{inst.name}: {old} -> {ver}")
+
+
+def cmd_autoupdate(args):
+    """No STATE: show settings. STATE alone: global switch. STATE with -i: those instances."""
+    if args.state is None:
+        glob = global_auto_update()
+        print(f"global automatic updates: {'on' if glob else 'off'}")
+        for inst in list_instances():
+            flag = "on" if inst.auto_update else "off"
+            eff = "will update" if (glob and inst.auto_update) else "pinned"
+            print(f"  {inst.name:<16} {flag:<4} ({eff}, {inst.version})")
+        if not glob:
+            print("note: instance settings only take effect while the global switch is on")
+        return
+    enabled = args.state == "on"
+    if args.instance:
+        for name in args.instance:
+            set_instance_auto_update(get_instance(name), enabled)
+            print(f"{name}: automatic updates {args.state}")
+        if enabled and not global_auto_update():
+            print("note: the global switch is off, so this has no effect yet "
+                  f"(run: {os.path.basename(sys.argv[0])} auto-update on)")
+    else:
+        set_global_auto_update(enabled)
+        print(f"global automatic updates: {args.state}")
 
 
 def cmd_rm(args):
@@ -1002,6 +1187,18 @@ def _draw(scr, ui: UI, insts, colors):
     scr.refresh()
 
 
+def _tui_start(ui, inst):
+    if auto_update_enabled(inst):
+        ui.job = Job(f"starting {inst.name}", lambda p, i=inst: (
+            getattr(start(i, progress=p), "update_note", None) or f"started {i.name}"))
+        return
+    try:
+        start(inst)
+        ui.say(f"starting {inst.name} ...")
+    except Error as e:
+        ui.say(str(e), bad=True)
+
+
 def _tui(scr):
     os.environ.setdefault("ESCDELAY", "25")
     try:
@@ -1106,17 +1303,9 @@ def _tui(scr):
             if cur.running():
                 ui.job = Job(f"stopping {cur.name}", lambda p, i=cur: stop(i) and f"stopped {i.name}")
             else:
-                try:
-                    start(cur)
-                    ui.say(f"starting {cur.name} ...")
-                except Error as e:
-                    ui.say(str(e), bad=True)
+                _tui_start(ui, cur)
         elif key == "s":
-            try:
-                start(cur)
-                ui.say(f"starting {cur.name} ...")
-            except Error as e:
-                ui.say(str(e), bad=True)
+            _tui_start(ui, cur)
         elif key == "x":
             if cur.running():
                 ui.job = Job(f"stopping {cur.name}", lambda p, i=cur: stop(i) and f"stopped {i.name}")
@@ -1235,22 +1424,46 @@ def _gui_classes(Gtk, GLib, Gio, Pango, Gdk):
         return btn
 
     def version_combo(default_text=None):
-        combo = Gtk.ComboBoxText.new_with_entry()
-        have = list(cached())[::-1]
-        for v in have:
-            combo.append_text(v)
-        if DEFAULT_VERSION not in have:
-            combo.append_text(DEFAULT_VERSION)
-        if have:
+        """Every GitHub release with our AppImage (prereleases marked). Defaults to the
+        newest stable release, or to default_text (e.g. an instance's current version)."""
+        combo = Gtk.ComboBoxText()
+        try:
+            releases = available_releases()
+        except Error:
+            releases = []
+        if not releases:  # offline: keep the UI usable with what is already downloaded
+            releases = [(v, v, False) for v in reversed(list(cached()))]
+            if DEFAULT_VERSION not in [t for t, _l, _p in releases]:
+                releases.append((DEFAULT_VERSION, DEFAULT_VERSION, False))
+        if default_text and default_text not in [t for t, _l, _p in releases]:
+            releases.append((default_text, default_text, False))
+        for tag, label, _pre in releases:
+            combo.append(tag, label)
+        stable = next((t for t, _l, pre in releases if not pre), None)
+        preferred = default_text or stable or releases[0][0]
+        if combo.set_active_id(preferred) is False:
             combo.set_active(0)
-        else:
-            combo.get_child().set_text(default_text or DEFAULT_VERSION)
         return combo
 
-    class VersionDialog(Gtk.Dialog):
-        """Pick an AppImage version (or 'latest'); downloaded on demand."""
+    def auto_update_widgets(active):
+        """Per-instance checkbox + the text explaining how it relates to the global switch."""
+        check = Gtk.CheckButton(label="Automatically update this instance")
+        check.set_active(bool(active))
+        note = dim(Gtk.Label(xalign=0))
+        note.set_line_wrap(True)
+        note.set_max_width_chars(48)
+        state = ("currently ON" if global_auto_update() else
+                 "currently OFF, so this setting has no effect yet")
+        note.set_text("Global automatic updates must be enabled (main menu \u203a Automatic "
+                      f"updates) for this setting to take effect. They are {state}. "
+                      "Only stable releases are installed automatically.")
+        return check, note
 
-        def __init__(self, parent, title, accept):
+    class VersionDialog(Gtk.Dialog):
+        """Pick a GitHub release; optionally keep an instance auto-updated."""
+
+        def __init__(self, parent, title, accept, show_auto_update=False,
+                     auto_update=False, selected_version=None):
             super().__init__(title=title, transient_for=parent, modal=True, use_header_bar=True)
             self.add_button("Cancel", Gtk.ResponseType.CANCEL)
             ok = self.add_button(accept, Gtk.ResponseType.OK)
@@ -1259,33 +1472,32 @@ def _gui_classes(Gtk, GLib, Gio, Pango, Gdk):
             area = self.get_content_area()
             area.set_border_width(16)
             area.set_spacing(10)
-            self.combo = version_combo()
-            self.combo.get_child().set_activates_default(True)
-            self.latest = Gtk.CheckButton(label="Use the latest GitHub release instead")
+            self.combo = version_combo(selected_version)
+            self.auto_update, self.auto_note = auto_update_widgets(auto_update)
             self.hint = dim(Gtk.Label(xalign=0))
-            area.pack_start(Gtk.Label(label="Mocktail version", xalign=0), False, False, 0)
+            area.pack_start(Gtk.Label(label="Mocktail release", xalign=0), False, False, 0)
             area.pack_start(self.combo, False, False, 0)
-            area.pack_start(self.latest, False, False, 0)
+            self.hint.set_line_wrap(True)
             area.pack_start(self.hint, False, False, 0)
+            if show_auto_update:
+                area.pack_start(self.auto_update, False, False, 0)
+                area.pack_start(self.auto_note, False, False, 0)
             self.combo.connect("changed", lambda *_: self.update_hint())
-            self.latest.connect("toggled", lambda *_: self.update_hint())
             self.update_hint()
             area.show_all()
 
         def text(self):
-            return (self.combo.get_active_text() or "").strip()
+            return (self.combo.get_active_id() or "").strip()
 
         def update_hint(self):
-            self.combo.set_sensitive(not self.latest.get_active())
-            if self.latest.get_active():
-                self.hint.set_text("Asks GitHub which release is newest.")
-            elif self.text() in cached():
-                self.hint.set_text("Already downloaded.")
+            version = self.text()
+            if version in cached():
+                self.hint.set_text("Already downloaded. Otherwise it will be downloaded from GitHub.")
             else:
-                self.hint.set_text("Will be downloaded from GitHub (~160 MB).")
+                self.hint.set_text("Selected release will be downloaded from GitHub when needed.")
 
         def result(self):
-            return (self.text() or None), self.latest.get_active()
+            return (self.text() or None), self.auto_update.get_active()
 
     class InstanceRow(Gtk.ListBoxRow):
         def __init__(self, win, name):
@@ -1315,7 +1527,7 @@ def _gui_classes(Gtk, GLib, Gio, Pango, Gdk):
             logs = Gtk.Button(label="Logs")
             logs.connect("clicked", lambda *_: win.show_log(name))
             self.menu = icon_menu_button(("view-more-symbolic", "view-more-horizontal-symbolic"), [
-                ("Upgrade AppImage\u2026", lambda: win.upgrade_dialog(name)),
+                ("Version & updates\u2026", lambda: win.upgrade_dialog(name)),
                 ("Open folder", lambda: win.open_folder(Instance(name).dir)),
                 None,
                 ("Delete\u2026", lambda: win.delete_dialog(name)),
@@ -1424,6 +1636,7 @@ def _gui_classes(Gtk, GLib, Gio, Pango, Gdk):
                 ("Start all", self.start_all),
                 ("Stop all", self.stop_all),
                 None,
+                ("Automatic updates\u2026", self.auto_update_dialog),
                 ("Graphics backend\u2026", self.graphics_dialog),
                 ("Open data folder", lambda: self.open_folder(ROOT)),
             ], "Menu"))
@@ -1601,6 +1814,11 @@ def _gui_classes(Gtk, GLib, Gio, Pango, Gdk):
                 self.run_job(f"Stopping {name}", lambda p: stop(inst) and f"Stopped {name}",
                              busy=(name,))
                 return
+            if auto_update_enabled(inst):
+                self.run_job(f"Starting {name}",
+                             lambda p: getattr(start(inst, progress=p), "update_note", None),
+                             busy=(name,))
+                return
             try:
                 start(inst)
             except Error as e:
@@ -1651,30 +1869,77 @@ def _gui_classes(Gtk, GLib, Gio, Pango, Gdk):
         def fetch_dialog(self):
             dlg = VersionDialog(self, "Download AppImage", "Download")
             resp = dlg.run()
-            version, latest = dlg.result()
+            version, _auto_update = dlg.result()
             dlg.destroy()
             if resp != Gtk.ResponseType.OK:
                 return
 
             def work(p):
-                ver, _path, sha = fetch(version, latest=latest, progress=p)
+                ver, _path, sha = fetch(version, progress=p)
                 return f"Downloaded Mocktail {ver}" if sha else f"Mocktail {ver} is already downloaded"
             self.run_job("Downloading AppImage", work)
 
         def upgrade_dialog(self, name):
             inst = Instance(name)
-            if inst.running():
-                self.notify(f"Stop {name} before upgrading it.", error=True)
-                return
-            dlg = VersionDialog(self, f"Upgrade {name}", "Upgrade")
+            dlg = VersionDialog(
+                self, f"Version & updates \u2013 {name}", "Apply",
+                show_auto_update=True,
+                auto_update=inst.auto_update,
+                selected_version=inst.version)
             resp = dlg.run()
-            version, latest = dlg.result()
+            version, auto_update = dlg.result()
             dlg.destroy()
             if resp != Gtk.ResponseType.OK:
                 return
-            self.run_job(f"Upgrading {name}", lambda p: "{} is now on Mocktail {}".format(
-                name, upgrade_instance(inst, version=version, latest=latest, progress=p)),
-                busy=(name,))
+
+            def work(p):
+                set_instance_auto_update(inst, auto_update)
+                state = "on" if auto_update else "off"
+                if not version or version == inst.version:
+                    return f"{name}: automatic updates {state}; version stays {inst.version}"
+                if inst.running():
+                    return (f"{name}: automatic updates {state}. Stop it to change its "
+                            "version.")
+                ver = upgrade_instance(inst, version=version, progress=p)
+                return f"{name} is now on Mocktail {ver}; automatic updates {state}"
+
+            self.run_job(f"Updating {name}", work, busy=(name,))
+
+        def auto_update_dialog(self):
+            dlg = Gtk.Dialog(title="Automatic updates", transient_for=self, modal=True,
+                             use_header_bar=True)
+            dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
+            ok = dlg.add_button("Apply", Gtk.ResponseType.OK)
+            ok.get_style_context().add_class("suggested-action")
+            area = dlg.get_content_area()
+            area.set_border_width(16)
+            area.set_spacing(10)
+            check = Gtk.CheckButton(label="Enable automatic updates globally")
+            check.set_active(global_auto_update())
+            note = dim(Gtk.Label(
+                label="This is the master switch. While it is off, no instance updates "
+                      "automatically. While it is on, only instances that have "
+                      "\u201cAutomatically update this instance\u201d enabled update, to "
+                      "the newest stable release (never a prerelease), each time they start. "
+                      "If GitHub can't be reached the instance starts as it is.",
+                xalign=0))
+            note.set_line_wrap(True)
+            note.set_max_width_chars(52)
+            area.pack_start(check, False, False, 0)
+            area.pack_start(note, False, False, 0)
+            area.show_all()
+            resp = dlg.run()
+            enabled = check.get_active()
+            dlg.destroy()
+            if resp != Gtk.ResponseType.OK:
+                return
+            try:
+                set_global_auto_update(enabled)
+            except OSError as e:
+                self.notify(f"Could not save the setting: {e}", error=True)
+                return
+            self.notify("Automatic updates are " + ("enabled" if enabled else "disabled")
+                        + " globally")
 
         def delete_dialog(self, name):
             inst = Instance(name)
@@ -1759,6 +2024,7 @@ def _gui_classes(Gtk, GLib, Gio, Pango, Gdk):
             name_entry.set_activates_default(True)
             name_entry.set_placeholder_text("acc1   (or several: acc1, acc2, acc3)")
             combo = version_combo()
+            auto_update_check, auto_update_note = auto_update_widgets(False)
             grid.attach(Gtk.Label(label="Name", xalign=1), 0, 0, 1, 1)
             grid.attach(name_entry, 1, 0, 1, 1)
             grid.attach(Gtk.Label(label="Mocktail", xalign=1), 0, 1, 1, 1)
@@ -1766,6 +2032,8 @@ def _gui_classes(Gtk, GLib, Gio, Pango, Gdk):
             hint = dim(Gtk.Label(xalign=0))
             grid.attach(hint, 1, 2, 1, 1)
             area.pack_start(grid, False, False, 0)
+            area.pack_start(auto_update_check, False, False, 0)
+            area.pack_start(auto_update_note, False, False, 0)
 
             donors = [i for i in list_instances() if i.has_payload() and not i.running()]
             seed_check = Gtk.CheckButton(
@@ -1821,7 +2089,7 @@ def _gui_classes(Gtk, GLib, Gio, Pango, Gdk):
                         _parse_env_text(env_text())
                     except Error as e:
                         problem = str(e)
-                v = (combo.get_active_text() or "").strip()
+                v = (combo.get_active_id() or "").strip()
                 hint.set_text("" if not v else ("Already downloaded." if v in cached()
                               else "Will be downloaded from GitHub (~160 MB)."))
                 err.set_text(problem)
@@ -1835,7 +2103,8 @@ def _gui_classes(Gtk, GLib, Gio, Pango, Gdk):
 
             resp = dlg.run()
             names = names_from_entry()
-            version = (combo.get_active_text() or "").strip() or None
+            version = (combo.get_active_id() or "").strip() or None
+            auto_update = auto_update_check.get_active()
             seed = donors[0].name if (donors and seed_check.get_active()) else None
             env = {}
             try:
@@ -1848,7 +2117,8 @@ def _gui_classes(Gtk, GLib, Gio, Pango, Gdk):
 
             def work(p):
                 for n in names:
-                    create_instance(n, version=version, env=env, seed=seed, progress=p)
+                    create_instance(n, version=version, env=env, seed=seed, progress=p,
+                                    auto_update=auto_update)
                 return "Created " + ", ".join(names)
             self.run_job("Creating " + ", ".join(names), work)
 
@@ -1872,7 +2142,7 @@ def cmd_gui(_args=None):
         import gi
         gi.require_version("Gtk", "3.0")
         gi.require_version("Gdk", "3.0")
-        from gi.repository import Gtk, Gdk, GLib, Gio, Pango
+        from gi.repository import Gdk, Gio, GLib, Gtk, Pango
     except (ImportError, ValueError) as e:
         raise Error("the GUI needs PyGObject and GTK 3 "
                     "(Arch: python-gobject gtk3 | Debian/Ubuntu: python3-gi gir1.2-gtk-3.0 | "
@@ -1921,6 +2191,9 @@ def build_parser():
     s.add_argument("--seed", action="store_true",
                    help="copy the Roblox payload from an existing stopped instance (best-effort)")
     s.add_argument("--seed-from", metavar="NAME", help="like --seed, from a specific instance")
+    s.add_argument("--auto-update", action="store_true",
+                   help="update this instance to the newest stable release on launch "
+                        "(also needs the global switch: auto-update on)")
 
     for name, aliases, hlp in (("start", [], "start instance(s)"),
                                ("stop", [], "stop instance(s)"),
@@ -1933,6 +2206,10 @@ def build_parser():
             s.add_argument("-v", "--version", help="version to use (downloaded if needed)")
             s.add_argument("--latest", action="store_true", help="use the newest release")
 
+    s = sub.add_parser("auto-update", help="show/set automatic updates (global, or per instance with -i)")
+    s.add_argument("state", nargs="?", choices=("on", "off"))
+    s.add_argument("-i", "--instance", action="append", metavar="NAME",
+                   help="apply to this instance instead of the global switch (repeatable)")
     s = sub.add_parser("list", aliases=["ls"], help="show instances and their status")
     s = sub.add_parser("rm", aliases=["delete"], help="delete instance(s) and their data")
     s.add_argument("names", nargs="+", metavar="NAME")
@@ -1954,6 +2231,7 @@ COMMANDS = {
     "start": cmd_start, "stop": cmd_stop, "restart": cmd_restart, "upgrade": cmd_upgrade,
     "list": cmd_list, "ls": cmd_list, "rm": cmd_rm, "delete": cmd_rm,
     "logs": cmd_logs, "path": cmd_path, "graphics": cmd_graphics,
+    "auto-update": cmd_autoupdate,
 }
 
 
@@ -1988,3 +2266,4 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
